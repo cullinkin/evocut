@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.vite/
+coverage/
+
+# Exported project artefacts, in case anyone dogfoods inside the repo.
+*.evocut.json
+*.evocut.jsonl

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2023", "DOM"],
+    // Typecheck against the EDL package's source, so a schema change surfaces here
+    // immediately instead of after a rebuild. The build config resolves the built
+    // package instead, which is what a consumer actually sees.
+    "paths": {
+      "@evocut/edl": ["../edl/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+}

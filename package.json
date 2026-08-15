@@ -1,0 +1,25 @@
+{
+  "name": "evocut",
+  "private": true,
+  "version": "0.0.0",
+  "description": "LLM-aided video editing: coarse human cuts, machine refinement, own renderer.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @evocut/edl && npm run build -w @evocut/renderer && npm run build -w @evocut/agent && npm run build -w @evocut/web",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev": "npm run dev --workspace @evocut/web"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
