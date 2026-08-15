@@ -56,6 +56,51 @@ screen without Safari's chrome.
 Everything is stored on the device — footage in OPFS, projects and logs in IndexedDB — so
 closing the tab and coming back resumes where you left off. Nothing is uploaded anywhere.
 
+## Testing it
+
+### On a computer
+
+```bash
+npm install
+npm run dev          # http://localhost:5173
+```
+
+Pick any video. Narrow the browser window to phone width — the layout is built for it.
+
+### On an iPhone
+
+The app stores everything on the device, and iOS gates the good storage APIs behind a
+**secure context**. That gives two options, and they behave differently:
+
+**Over your Wi-Fi (quickest).** `npm run dev` already listens on the network; open the
+`Network:` URL it prints on your phone. This works — footage, projects and edits all
+persist across a reload — but on plain HTTP there is no OPFS and no
+`navigator.storage.persist()`, so media falls back to IndexedDB blobs and Safari is free
+to evict it under storage pressure. Fine for trying the gestures, not for real footage.
+
+**Over HTTPS (the real thing).** Any HTTPS origin gets OPFS, streamable media, eviction
+protection, and a proper Add to Home Screen. Two easy routes:
+
+- *Deploy it.* Pushing this branch runs `.github/workflows/pages.yml`, which publishes
+  `apps/web/dist` to GitHub Pages. It needs enabling once: **Settings → Pages → Source:
+  GitHub Actions**. If you deploy from a non-default branch, also allow that branch under
+  **Settings → Environments → github-pages**.
+- *Tunnel your dev server.* `cloudflared tunnel --url http://localhost:5173` prints an
+  HTTPS URL with no account needed, and keeps hot reload.
+
+Then **Share → Add to Home Screen** to run it full-screen without Safari's chrome.
+
+### The automated checks
+
+```bash
+npm test                    # 154 unit tests across five packages
+npm run typecheck
+npm run e2e -w @evocut/web  # browser checks; needs `npm run dev` running
+```
+
+The browser checks drive an iPhone profile with real touch events — see
+[`apps/web/e2e/README.md`](apps/web/e2e/README.md).
+
 ## Layout
 
 ```
