@@ -1,5 +1,4 @@
-import { readFileSync } from 'node:fs';
-import { APP_URL, artifact, ensureClip, launch, makeReport, scrubTo } from './harness.mjs';
+import { APP_URL, ensureClip, exportLog, launch, makeReport, scrubTo } from './harness.mjs';
 
 /**
  * The signals pass, on real media, in a real browser.
@@ -87,16 +86,7 @@ check('nothingIsStillInAClipThatChangesEveryFrame', (measured?.motion?.still ?? 
 check('motionWasActuallySampled', (measured?.motion?.motion?.length ?? 0) >= 5, true);
 
 // --- It is logged, and it is cached ----------------------------------------------
-const [download] = await Promise.all([
-  page.waitForEvent('download'),
-  page.locator('footer button:has-text("Log")').click(),
-]);
-const logPath = artifact('signals-log.jsonl');
-await download.saveAs(logPath);
-const events = readFileSync(logPath, 'utf8')
-  .split('\n')
-  .filter(Boolean)
-  .map((line) => JSON.parse(line));
+const { events } = await exportLog(page, 'signals-log.jsonl');
 
 const computed = events.filter((event) => event.type === 'signals.compute');
 check('loggedTheMeasurement', computed.length, 1);
@@ -118,16 +108,9 @@ for (const fraction of [0.2, 0.35, 0.5, 0.65, 0.8]) {
 }
 check('cutsMade', (await page.locator('.clip-block').count()) >= 5, true);
 
-const [afterEdits] = await Promise.all([
-  page.waitForEvent('download'),
-  page.locator('footer button:has-text("Log")').click(),
-]);
-await afterEdits.saveAs(artifact('signals-log-after-edits.jsonl'));
-const recomputes = readFileSync(artifact('signals-log-after-edits.jsonl'), 'utf8')
-  .split('\n')
-  .filter(Boolean)
-  .map((line) => JSON.parse(line))
-  .filter((event) => event.type === 'signals.compute').length;
+const recomputes = (await exportLog(page, 'signals-log-after-edits.jsonl')).events.filter(
+  (event) => event.type === 'signals.compute',
+).length;
 check('editingDoesNotReMeasure', recomputes, 1);
 set('measurementCost', computed[0]?.payload ?? null);
 check('firstPassWasNotACacheHit', computed[0]?.payload?.fromCache, false);
@@ -135,26 +118,12 @@ check('firstPassWasNotACacheHit', computed[0]?.payload?.fromCache, false);
 // Reload: the second open must not pay for the analysis again.
 await page.reload();
 await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
-await page.waitForFunction(
-  () =>
-    Boolean(
-      [...document.querySelectorAll('footer button')].find((b) => b.textContent?.includes('Log')),
-    ),
-  null,
-  { timeout: 30_000 },
-);
+await page.locator('footer button[aria-label="Settings"]').waitFor({ timeout: 30_000 });
 await page.waitForTimeout(3000);
 
-const [second] = await Promise.all([
-  page.waitForEvent('download'),
-  page.locator('footer button:has-text("Log")').click(),
-]);
-await second.saveAs(artifact('signals-log-2.jsonl'));
-const reopened = readFileSync(artifact('signals-log-2.jsonl'), 'utf8')
-  .split('\n')
-  .filter(Boolean)
-  .map((line) => JSON.parse(line))
-  .filter((event) => event.type === 'signals.compute');
+const reopened = (await exportLog(page, 'signals-log-2.jsonl')).events.filter(
+  (event) => event.type === 'signals.compute',
+);
 
 set('measurementsAfterReload', reopened.map((event) => event.payload?.fromCache));
 check('reopeningReusesTheAnalysis', reopened.at(-1)?.fromCache ?? reopened.at(-1)?.payload?.fromCache, true);

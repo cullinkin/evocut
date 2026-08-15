@@ -53,13 +53,13 @@ check(
 await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, { timeout: 20000 });
 check(
   'mediaServedOverHttp',
-  await page.evaluate(() => (document.querySelector('.player video')?.src ?? '').startsWith('blob:')),
+  await page.evaluate(() => (document.querySelector('.player video.live')?.src ?? '').startsWith('blob:')),
   false,
 );
 check(
   'rangeServerAnswersPartialContent',
   await page.evaluate(async () => {
-    const src = document.querySelector('.player video').src;
+    const src = document.querySelector('.player video.live').src;
     const response = await fetch(src, { headers: { Range: 'bytes=0-99' } });
     return {
       status: response.status,
@@ -72,7 +72,7 @@ check(
 check(
   'mediaIsSeekable',
   await page.evaluate(() => {
-    const video = document.querySelector('.player video');
+    const video = document.querySelector('.player video.live');
     return video.seekable.length > 0;
   }),
   true,
@@ -85,7 +85,7 @@ check(
 check(
   'mediaIsTyped',
   await page.evaluate(async () => {
-    const src = document.querySelector('.player video')?.src;
+    const src = document.querySelector('.player video.live')?.src;
     if (!src) return 'no video element';
     return (await fetch(src)).headers.get('Content-Type');
   }),
@@ -135,7 +135,7 @@ check('clipsAfterCut', await page.locator('.clip-block').count(), 2);
   const parked = await page.locator('.timeline-clock').innerText();
 
   await page.evaluate(() => {
-    document.querySelector('.player video').currentTime = 0.2; // before clip 2 starts
+    document.querySelector('.player video.live').currentTime = 0.2; // before clip 2 starts
   });
   await page.waitForTimeout(200);
   await page.locator('button.play').click();
@@ -275,7 +275,7 @@ check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
   await page.locator('button.play').click();
   await page.waitForTimeout(1500);
   const during = await readClock();
-  const videoAdvanced = await page.evaluate(() => document.querySelector('.player video').currentTime);
+  const videoAdvanced = await page.evaluate(() => document.querySelector('.player video.live').currentTime);
   await page.locator('button.play').click(); // pause
   await page.waitForTimeout(200);
 
@@ -295,7 +295,7 @@ check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
   await page.locator('button.play').click(); // start playing
   await page.waitForTimeout(500);
 
-  const before = await page.evaluate(() => document.querySelector('.player video').currentTime);
+  const before = await page.evaluate(() => document.querySelector('.player video.live').currentTime);
   const from = await centre(page.locator('.timeline-scroller'));
 
   await cdp.send('Input.dispatchTouchEvent', {
@@ -309,7 +309,7 @@ check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
     });
     await page.waitForTimeout(40);
   }
-  const midDrag = await page.evaluate(() => document.querySelector('.player video').currentTime);
+  const midDrag = await page.evaluate(() => document.querySelector('.player video.live').currentTime);
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await page.waitForTimeout(600);
 
@@ -317,8 +317,8 @@ check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
   check('previewTracksTheFingerMidDrag', Math.abs(midDrag - before) > 0.3, true);
 
   const after = await page.evaluate(() => ({
-    time: document.querySelector('.player video').currentTime,
-    paused: document.querySelector('.player video').paused,
+    time: document.querySelector('.player video.live').currentTime,
+    paused: document.querySelector('.player video.live').paused,
   }));
   set('videoTimeBeforeScrub', Number(before.toFixed(2)));
   set('videoTimeAfterScrub', Number(after.time.toFixed(2)));

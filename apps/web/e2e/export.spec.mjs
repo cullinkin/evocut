@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport, scrubTo } from './harness.mjs';
+import { APP_URL, artifact, ensureClip, exportEdl, exportLog, launch, makeReport, scrubTo } from './harness.mjs';
 
 /**
  * The export, end to end, in a real browser.
@@ -260,15 +260,7 @@ await reimport.waitForFunction(
   { timeout: 120_000 },
 );
 
-const [logFile] = await Promise.all([
-  reimport.waitForEvent('download'),
-  reimport.locator('footer button:has-text("Log")').click(),
-]);
-await logFile.saveAs(artifact('reimport-log.jsonl'));
-const measured = readFileSync(artifact('reimport-log.jsonl'), 'utf8')
-  .split('\n')
-  .filter(Boolean)
-  .map((line) => JSON.parse(line))
+const measured = (await exportLog(reimport, 'reimport-log.jsonl')).events
   .filter((event) => event.type === 'signals.compute')
   .at(-1)?.payload;
 

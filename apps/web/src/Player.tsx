@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { microsToSeconds, secondsToMicros, sourceToTimeline, type Timeline } from '@evocut/edl';
 import { sampleTimeline } from '@evocut/renderer';
 
@@ -10,14 +10,37 @@ import { sampleTimeline } from '@evocut/renderer';
  * `sampleTimeline` — the same function the export will use. Reimplementing the mapping
  * here would be the classic editor bug where the preview and the export disagree at cuts.
  *
+ * ## Two elements, because a cut is a seek
+ *
+ * A cut in the timeline is a jump in the recording, and `video.currentTime = x` on a 5 GB
+ * 4K file is not free: the element decodes forward from the previous keyframe, which on a
+ * phone is the better part of a second. Do that at every clip boundary and playback is a
+ * stutter every few seconds — you can see each shot, but never how the edit *flows*, which
+ * is the one question the preview exists to answer.
+ *
+ * So there are two elements and only one of them is on screen. While the live one plays,
+ * the spare is parked, paused, on the first frame of the next clip — it has already paid
+ * for that seek, in the seconds nobody was waiting. At the boundary the live one pauses,
+ * the spare plays, and the two swap places. The swap is a class change; no seek happens at
+ * the cut at all.
+ *
+ * Three things keep it honest:
+ *
+ *  - **The spare must actually be there.** If it has not finished its seek, the handoff is
+ *    abandoned and the live element seeks the old way. The worst case is exactly the
+ *    behaviour this replaces, never a wrong frame.
+ *  - **Adjacent clips are not a cut.** Two kept clips that meet where the recording meets
+ *    itself — the common shape after a split — need no handoff and get none.
+ *  - **Only the live element ever plays.** The spare is paused, so there is one picture and
+ *    one soundtrack at all times.
+ *
  * ## Seeking, and why the kind matters
  *
- * `video.currentTime = x` asks for an exact frame, which means decoding forward from the
- * previous keyframe. Issue one of those per animation frame and iOS never finishes any of
- * them: the picture simply stops moving, which is what "dragging the playhead does not
- * scrub" looks like from the outside. `fastSeek` asks for the nearest keyframe instead —
- * approximate, and fast enough to track a finger. So every seek made *during* a drag is
- * approximate, and the exact one happens when the drag ends.
+ * `video.currentTime = x` asks for an exact frame. Issue one of those per animation frame
+ * and iOS never finishes any of them: the picture simply stops moving, which is what
+ * "dragging the playhead does not scrub" looks like from the outside. `fastSeek` asks for
+ * the nearest keyframe instead — approximate, and fast enough to track a finger. So every
+ * seek made *during* a drag is approximate, and the exact one happens when the drag ends.
  *
  * ## The loop corrects itself
  *
@@ -47,6 +70,20 @@ const SEEK_TOLERANCE_US = 60_000;
 /** How often the loop may correct an element that has drifted outside its clip. */
 const RESYNC_INTERVAL_MS = 250;
 /**
+ * How close the spare must be to the next in-point for the handoff to be taken.
+ *
+ * Roughly a frame and a half. Tighter than this and a keyframe-aligned seek would be
+ * rejected on media whose keyframes are sparse; looser and the cut lands visibly early.
+ */
+const HANDOFF_TOLERANCE_US = 60_000;
+/**
+ * Two clips whose join is this close in the source are the recording continuing.
+ *
+ * A split leaves exactly this shape — one shot, cut in two, both halves kept — and there is
+ * nothing to hand over: the element is already playing the frames the next clip wants.
+ */
+const CONTIGUOUS_US = 20_000;
+/**
  * Floor on how often a *scrub* may re-aim the element.
  *
  * A scroll gesture with momentum emits events for as long as it coasts, and each one used
@@ -72,9 +109,23 @@ export function Player({
   onEnded,
   onDiagnostics,
 }: PlayerProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const aRef = useRef<HTMLVideoElement>(null);
+  const bRef = useRef<HTMLVideoElement>(null);
   const frameRef = useRef<number | null>(null);
   const lastResyncRef = useRef(0);
+
+  /** Which element is on screen. The ref is what the loop reads; the state paints it. */
+  const liveRef = useRef(0);
+  const [live, setLive] = useState(0);
+  /** Source time the spare has been aimed at, or null when it is aimed at nothing. */
+  const preppedRef = useRef<number | null>(null);
+
+  const at = useCallback(
+    (index: number) => (index === 0 ? aRef.current : bRef.current),
+    [],
+  );
+  const liveVideo = useCallback(() => at(liveRef.current), [at]);
+  const spareVideo = useCallback(() => at(1 - liveRef.current), [at]);
 
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
@@ -121,7 +172,7 @@ export function Player({
    * the user happens to scrub.
    */
   const sync = useCallback(() => {
-    const video = videoRef.current;
+    const video = liveVideo();
     if (!video) return;
 
     const scrub = scrubRef.current;
@@ -134,9 +185,40 @@ export function Player({
     if (!layer) return;
     video.playbackRate = layer.clip.speed;
     seekTo(video, layer.sourceTime, scrubbingRef.current);
-  }, [seekTo, timeline]);
+  }, [liveVideo, seekTo, timeline]);
 
   useEffect(sync, [sync, playhead, scrubSourceTime, scrubbing]);
+
+  /**
+   * Park the spare on the first frame of whatever plays at `outputUs`.
+   *
+   * Idempotent, so the loop can call it every frame: once the spare is aimed at the right
+   * source time it does nothing, and re-issuing the seek would restart it.
+   */
+  const prepare = useCallback(
+    (outputUs: number) => {
+      const spare = spareVideo();
+      if (!spare) return;
+      const next = sampleTimeline(timeline, outputUs).layers[0];
+      if (!next) return;
+      if (
+        preppedRef.current !== null &&
+        Math.abs(preppedRef.current - next.sourceTime) <= HANDOFF_TOLERANCE_US
+      ) {
+        return;
+      }
+      preppedRef.current = next.sourceTime;
+      spare.playbackRate = next.clip.speed;
+      spare.currentTime = Math.max(0, microsToSeconds(next.sourceTime));
+    },
+    [spareVideo, timeline],
+  );
+
+  // A changed timeline invalidates whatever the spare was holding: accepting a suggestion
+  // can move the very cut it was prepared for.
+  useEffect(() => {
+    preppedRef.current = null;
+  }, [timeline]);
 
   /**
    * Once metadata is in, say whether this element can seek at all.
@@ -147,7 +229,7 @@ export function Player({
    * worth stating plainly rather than inferring from behaviour.
    */
   const reportDiagnostics = useCallback(() => {
-    const video = videoRef.current;
+    const video = liveVideo();
     if (!video || reportedForRef.current === objectUrl) return;
     reportedForRef.current = objectUrl;
 
@@ -161,10 +243,10 @@ export function Player({
       urlScheme: objectUrl.startsWith('blob:') ? 'blob' : 'http',
       fastSeek: typeof video.fastSeek === 'function',
     });
-  }, [objectUrl]);
+  }, [liveVideo, objectUrl]);
 
   useEffect(() => {
-    const video = videoRef.current;
+    const video = liveVideo();
     if (!video) return;
 
     // A drag owns the element for its duration. Letting the playback loop keep writing
@@ -172,6 +254,7 @@ export function Player({
     // nothing: every frame, the loop put it back.
     if (!playing || scrubbing) {
       video.pause();
+      spareVideo()?.pause();
       return;
     }
 
@@ -183,31 +266,66 @@ export function Player({
     const tick = () => {
       frameRef.current = requestAnimationFrame(tick);
 
+      const current = liveVideo();
+      if (!current) return;
+
       const layer = sampleTimeline(timeline, playheadRef.current).layers[0];
       if (!layer) {
         onEndedRef.current();
         return;
       }
 
-      const sourceNow = secondsToMicros(video.currentTime);
+      const sourceNow = secondsToMicros(current.currentTime);
+      const endOutput =
+        layer.clip.start + Math.round((layer.clip.sourceOut - layer.clip.sourceIn) / layer.clip.speed);
 
       // `video.ended` matters as much as the clip's own out point: a clip trimmed to the
       // very end of the source never reaches `sourceOut`, because the element stops a
       // fraction short. Without this the playhead parks mid-timeline and looks stuck.
-      if (sourceNow >= layer.clip.sourceOut || video.ended) {
-        const nextOutput =
-          layer.clip.start + Math.round((layer.clip.sourceOut - layer.clip.sourceIn) / layer.clip.speed);
-        const next = sampleTimeline(timeline, nextOutput).layers[0];
+      if (sourceNow >= layer.clip.sourceOut || current.ended) {
+        const next = sampleTimeline(timeline, endOutput).layers[0];
         if (!next) {
-          onTimeRef.current(nextOutput);
+          onTimeRef.current(endOutput);
           onEndedRef.current();
           return;
         }
-        video.currentTime = microsToSeconds(next.sourceTime);
-        video.playbackRate = next.clip.speed;
-        onTimeRef.current(nextOutput);
+
+        // The recording simply continues into the next clip — no jump, so no handoff.
+        const continues =
+          !current.ended &&
+          next.clip.sourceId === layer.clip.sourceId &&
+          next.clip.speed === layer.clip.speed &&
+          Math.abs(next.sourceTime - layer.clip.sourceOut) <= CONTIGUOUS_US;
+
+        if (!continues) {
+          const spare = spareVideo();
+          const armed =
+            spare !== null &&
+            spare.readyState >= 2 &&
+            !spare.seeking &&
+            Math.abs(secondsToMicros(spare.currentTime) - next.sourceTime) <= HANDOFF_TOLERANCE_US;
+
+          if (armed && spare) {
+            spare.playbackRate = next.clip.speed;
+            void spare.play().catch(() => {});
+            current.pause();
+            liveRef.current = 1 - liveRef.current;
+            setLive(liveRef.current);
+          } else {
+            // Nothing prepared in time. This is the old behaviour, and it is correct —
+            // just slow, which is the whole reason the spare exists.
+            current.currentTime = microsToSeconds(next.sourceTime);
+            current.playbackRate = next.clip.speed;
+          }
+          preppedRef.current = null;
+        }
+
+        onTimeRef.current(endOutput);
         return;
       }
+
+      // Pay for the next cut's seek now, while there is time to spare.
+      prepare(endOutput);
 
       const output = sourceToTimeline(layer.clip, sourceNow);
       if (output !== null) {
@@ -221,7 +339,7 @@ export function Player({
       const now = Date.now();
       if (now - lastResyncRef.current > RESYNC_INTERVAL_MS) {
         lastResyncRef.current = now;
-        video.currentTime = microsToSeconds(layer.sourceTime);
+        current.currentTime = microsToSeconds(layer.sourceTime);
       }
     };
 
@@ -229,12 +347,19 @@ export function Player({
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     };
-  }, [playing, scrubbing, timeline]);
+  }, [liveVideo, playing, prepare, scrubbing, spareVideo, timeline]);
 
   return (
     <div className="player">
+      {/*
+        Both elements carry the same source. The spare is not `hidden` and not
+        `display: none` — a hidden element is allowed to stop decoding, which would undo
+        the one thing it is here for. It is stacked behind the live one at zero opacity,
+        fully alive, one frame ready to go.
+      */}
       <video
-        ref={videoRef}
+        ref={aRef}
+        className={live === 0 ? 'live' : 'spare'}
         src={objectUrl}
         playsInline
         preload="auto"
@@ -243,6 +368,7 @@ export function Player({
           reportDiagnostics();
         }}
       />
+      <video ref={bRef} className={live === 1 ? 'live' : 'spare'} src={objectUrl} playsInline preload="auto" />
     </div>
   );
 }

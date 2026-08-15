@@ -1,5 +1,4 @@
-import { readFileSync } from 'node:fs';
-import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport, scrubTo } from './harness.mjs';
+import { APP_URL, artifact, ensureClip, exportEdl, exportLog, launch, makeReport, scrubTo } from './harness.mjs';
 
 /**
  * The refinement pass against a model, with the API intercepted.
@@ -136,7 +135,26 @@ reply = {
 await page.locator('button:has-text("Refine")').click();
 await page.locator('.sheet').waitFor({ timeout: 10000 });
 await page.locator('.sheet textarea').fill('Punchy. Hold on the hits, cut the dead air.');
-await page.locator('.sheet input[type=text]').fill('0:09');
+// Minutes and seconds are separate boxes: the numeric keypad iOS opens has no colon on
+// it, and the field it used to be showed `1:10` as its own example.
+await page.locator('.sheet input[aria-label="Target length, minutes"]').fill('0');
+await page.locator('.sheet input[aria-label="Target length, seconds"]').fill('9');
+check(
+  'theButtonSaysWhoIsBeingAsked',
+  (await page.locator('.sheet-actions .primary').innerText()).trim(),
+  'Ask Claude',
+);
+// Picked here rather than in Settings, on the screen where the bill is about to be run up.
+const picker = page.locator('.sheet select');
+check('theModelIsChosenOnThisSheet', await picker.count(), 1);
+check('itDefaultsToOpus5', await picker.inputValue(), 'claude-opus-5');
+const offered = await picker.locator('option').evaluateAll((options) => options.map((o) => o.value));
+set('modelsOffered', offered);
+check('everyFamilyIsOffered', ['opus', 'sonnet', 'haiku', 'fable'].every((family) => offered.some((id) => id.includes(family))), true);
+// Fable is twice the price of Opus, so the sheet has to say so before it is picked.
+await picker.selectOption('claude-fable-5');
+check('theExpensiveOneIsFlagged', /Expensive/.test(await page.locator('.sheet .warning').innerText()), true);
+await picker.selectOption('claude-opus-5');
 await page.locator('.sheet-actions .primary').click();
 await page.locator('.bubble').first().waitFor({ timeout: 30000 });
 
@@ -202,16 +220,10 @@ check('rejectionSurvived', revision?.review.verdicts.filter((v) => !v.accepted).
 // The key must not be anywhere in an artifact the user might share.
 check('keyNotInTheEdl', JSON.stringify(after).includes('sk-ant-test-key'), false);
 
-const [download] = await Promise.all([
-  page.waitForEvent('download'),
-  page.locator('footer button:has-text("Log")').click(),
-]);
-await download.saveAs(artifact('refine-log.jsonl'));
-const log = readFileSync(artifact('refine-log.jsonl'), 'utf8');
+const { text: log, events } = await exportLog(page, 'refine-log.jsonl');
 check('keyNotInTheLog', log.includes('sk-ant-test-key'), false);
 check('briefNotStoredVerbatimInLog', log.includes('Punchy. Hold on the hits'), false);
 
-const events = log.split('\n').filter(Boolean).map((line) => JSON.parse(line));
 const requested = events.find((event) => event.type === 'llm.request');
 const planned = events.filter((event) => event.type === 'llm.plan').at(-1);
 set('llmRequest', requested?.payload);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { findModel } from '@evocut/agent';
 import { formatTimecode, lengthStanding, timelineDuration } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
 import { BriefSheet } from './Brief.tsx';
@@ -23,6 +24,7 @@ export function App() {
   const [playing, setPlaying] = useState(false);
   const [drag, setDrag] = useState<TimelineDragState | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showMetadata, setShowMetadata] = useState(false);
   const [showBrief, setShowBrief] = useState(false);
   const [showList, setShowList] = useState(false);
   /** Index of the suggestion whose sheet is open, or null. */
@@ -42,6 +44,71 @@ export function App() {
     if (drag) setPlaying(false);
   }, [drag]);
 
+  /**
+   * The two files this app produces besides the video.
+   *
+   * They were in the editor's footer, one tap from every edit, which put two downloads
+   * next to the buttons a thumb reaches for while scrubbing. They are also not editing
+   * tools: the EDL is the edit as a document and the log is how it was arrived at. So they
+   * live one level in, on a screen that can say what each of them is.
+   */
+  if (showMetadata && session.project) {
+    const openProject = session.project;
+    return (
+      <main className="shell">
+        <header>
+          <button className="ghost" onClick={() => setShowMetadata(false)} aria-label="Back">
+            ←
+          </button>
+          <div className="title">
+            <h1>Metadata</h1>
+            <p className="meta">{openProject.name}</p>
+          </div>
+        </header>
+        <div className="settings metadata">
+          <ul className="exports">
+            <li>
+              <div>
+                <strong>EDL</strong>
+                <small>
+                  Every cut, trim and suggestion as JSON — the edit itself, without the
+                  footage. This is what to keep if you want to rebuild this project later.
+                </small>
+              </div>
+              <button
+                className="ghost download"
+                onClick={() => downloadProject(openProject)}
+                aria-label="Export EDL"
+              >
+                ⤓
+              </button>
+            </li>
+            <li>
+              <div>
+                <strong>Logs</strong>
+                <small>
+                  {session.events.length} {session.events.length === 1 ? 'event' : 'events'} — how
+                  the edit was arrived at, in order. The record a training set is built from.
+                </small>
+              </div>
+              <button
+                className="ghost download"
+                onClick={() => downloadLog(openProject, session.events)}
+                aria-label="Export Logs"
+              >
+                ⤓
+              </button>
+            </li>
+          </ul>
+          <p className="meta">
+            Neither file contains your API key or any footage. The EDL does carry the style
+            brief you typed for this video.
+          </p>
+        </div>
+      </main>
+    );
+  }
+
   if (showSettings) {
     return (
       <main className="shell">
@@ -60,6 +127,14 @@ export function App() {
           onSave={(next) => void session.saveSettings(next).then(() => setShowSettings(false))}
           onForgetKey={() => void session.forgetApiKey()}
           onClose={() => setShowSettings(false)}
+          {...(session.project
+            ? {
+                onMetadata: () => {
+                  setShowSettings(false);
+                  setShowMetadata(true);
+                },
+              }
+            : {})}
         />
       </main>
     );
@@ -161,7 +236,8 @@ export function App() {
 
       {session.refining && (
         <p className="relink">
-          Asking {session.settings.model} for edits. Only the timeline description and the
+          Asking Claude ({findModel(session.settings.model)?.label ?? session.settings.model}) for
+          edits. Only the timeline description and the
           measurements leave this device — never the footage.{' '}
           <button className="ghost small" onClick={session.cancelRefinement}>
             Cancel
@@ -264,11 +340,15 @@ export function App() {
           busy={session.refining}
           hasKey={Boolean(session.settings.apiKey)}
           model={session.settings.model}
-          onRun={(brief, target) => {
+          onRun={(brief, target, model) => {
             // Saved *and* passed. The save is what persists it for next time; the argument
-            // is what steers this run, because a `setProject` has not committed yet.
+            // is what steers this run, because neither `setProject` nor the settings write
+            // has committed yet.
             session.saveBrief(brief, target);
-            session.requestRefinement({ brief, targetDurationUs: target });
+            if (model !== session.settings.model) {
+              void session.saveSettings({ ...session.settings, model });
+            }
+            session.requestRefinement({ brief, targetDurationUs: target, model });
             setShowBrief(false);
           }}
           onClose={() => setShowBrief(false)}
@@ -339,15 +419,11 @@ export function App() {
           {session.canExport ? 'Export video' : 'No encoder'}
         </button>
         {/*
-          The log is a first-class output, not a debug aid: it is the record of how the
-          coarse pass was made, and the reason it can become a training set later.
+          The EDL and the log are still first-class outputs — the record of how the coarse
+          pass was made, and the reason it can become a training set later. They are one
+          level in now, under Settings → Metadata, because they are not editing tools and
+          this row is where a thumb rests during an edit.
         */}
-        <button className="ghost" onClick={() => downloadProject(project)}>
-          EDL
-        </button>
-        <button className="ghost" onClick={() => downloadLog(project, session.events)}>
-          Log ({session.events.length})
-        </button>
         <button className="ghost" onClick={() => setShowSettings(true)} aria-label="Settings">
           ⚙
         </button>

@@ -190,10 +190,31 @@ button.danger {
   justify-content: center;
 }
 
+/* Two elements, stacked: one playing, one parked on the first frame of the next clip so
+   the cut costs no seek. The spare must stay laid out and composited — `display: none` or
+   `visibility: hidden` lets a browser stop decoding it, which is the one thing it is for —
+   so it is a zero-opacity layer underneath, not a hidden one. */
+.player {
+  position: relative;
+}
+
 .player video {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+.player video.live {
+  opacity: 1;
+  z-index: 1;
+}
+
+.player video.spare {
+  opacity: 0;
+  z-index: 0;
+  pointer-events: none;
 }
 
 .transport {
@@ -868,6 +889,126 @@ button.ghost.small {
   padding: 0 12px;
   font-size: 13px;
   align-self: flex-start;
+}
+
+/* A settings row that goes somewhere, rather than setting something. */
+.row-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+}
+
+.row-link span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row-link small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* --- Metadata ------------------------------------------------------------------------
+   Two files with a download each. Deliberately not a toolbar: what each one *is* takes a
+   sentence, and a row with room for that sentence is the difference between an export
+   someone keeps and one they never tap. */
+
+.exports {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.exports li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.exports li div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.exports li small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+button.download {
+  flex: 0 0 auto;
+  min-width: 48px;
+  min-height: 48px;
+  font-size: 22px;
+  line-height: 1;
+}
+
+/* --- Target length -------------------------------------------------------------------
+   Minutes and seconds side by side, because the number pad iOS opens for a numeric field
+   has no colon on it and the field used to show `1:10` as its example. */
+
+fieldset.duration {
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 10px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+fieldset.duration legend {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.duration-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.duration-box input {
+  width: 4.5em;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  text-align: center;
+}
+
+.duration-box small {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 

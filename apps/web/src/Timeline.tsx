@@ -55,8 +55,9 @@ import { frameAt, useFilmstrip } from './filmstrip.ts';
  * second on a phone that would struggle to do it in JavaScript.
  *
  * The one hazard is the feedback loop: playback moves the playhead, which scrolls the
- * lane, which fires a scroll event, which would move the playhead. `suppressRef` marks the
- * scrolls we caused ourselves, and they are ignored on the way back in.
+ * lane, which fires a scroll event, which would move the playhead. It is broken by asking
+ * whether a hand was on the element — see `handRef` — rather than by trying to recognise
+ * our own scrolls after the fact, which is a guess that fails exactly when it matters.
  *
  * ## Touch
  *
@@ -145,19 +146,25 @@ export function TimelineEditor({
   /** Half the viewport: the padding that lets time zero sit under a centred playhead. */
   const [halfWidth, setHalfWidth] = useState(0);
   /**
-   * How we tell our own scrolls from the user's.
+   * How we tell the user's scrolls from our own.
    *
-   * An instant scroll lands on exactly one position, so `expectedRef` holds it and the
-   * scroll handler recognises it by value. That matters during playback, where we scroll
-   * every frame: a time-based flag would be open almost continuously and would swallow a
-   * finger arriving mid-playback — which is precisely when someone reaches for the lane.
+   * By asking whether a hand was involved, rather than by inspecting where the scroll
+   * landed. The first version compared `scrollLeft` against the position we had just
+   * asked for and called anything else a gesture — which is a guess, and it guesses wrong
+   * exactly when it matters. Playback scrolls the lane every frame; a scroll that gets
+   * clamped at either end, lands on a fractional device pixel, or coalesces with the next
+   * one reads as a finger that was never there. The consequences were the whole of the
+   * second bug reported from a real session: playback pauses itself, the player drops into
+   * scrub mode, the settle timer is pushed out by the *next* playback scroll, and the
+   * thing sits there frozen until something else disturbs it.
    *
-   * A *smooth* scroll passes through positions we never named, so it gets the blunt
-   * instrument instead. It only happens on a deliberate tap, where nothing else is moving.
+   * A pointer or a wheel on the scroller is unambiguous and cannot be faked by our own
+   * `scrollTo`. Every scroll without one is ours, and is ignored outright.
    */
-  const expectedRef = useRef<number | null>(null);
-  const suppressRef = useRef(false);
-  const settleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handRef = useRef(false);
+  const noteHand = useCallback(() => {
+    handRef.current = true;
+  }, []);
 
   const clips = timeline.tracks[0]?.clips ?? [];
   const committedTotal = timelineDuration(timeline);
@@ -227,9 +234,7 @@ export function TimelineEditor({
     // ratio of the two zooms — and, without this, the scroll that follows reads as a
     // gesture nobody made.
     requestAnimationFrame(() => {
-      const target = Math.max(0, Math.round((playheadRef.current / 1_000_000) * next));
-      expectedRef.current = target;
-      scroller.scrollLeft = target;
+      scroller.scrollLeft = Math.max(0, Math.round((playheadRef.current / 1_000_000) * next));
     });
   }, [committedTotal]);
 
@@ -247,16 +252,6 @@ export function TimelineEditor({
       if (!scroller) return;
       const target = Math.max(0, Math.round((us / 1_000_000) * pxPerSecond));
       if (Math.abs(scroller.scrollLeft - target) < 1) return;
-
-      if (smooth) {
-        suppressRef.current = true;
-        if (settleRef.current) clearTimeout(settleRef.current);
-        settleRef.current = setTimeout(() => {
-          suppressRef.current = false;
-        }, 500);
-      } else {
-        expectedRef.current = target;
-      }
       scroller.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
     },
     [pxPerSecond],
@@ -295,14 +290,9 @@ export function TimelineEditor({
    */
   const onScroll = useCallback(() => {
     const scroller = scrollerRef.current;
-    if (!scroller || suppressRef.current || dragRef.current) return;
-
-    // Our own instant scroll, recognised by where it landed rather than by when.
-    if (expectedRef.current !== null && Math.abs(scroller.scrollLeft - expectedRef.current) <= 1) {
-      expectedRef.current = null;
-      return;
-    }
-    expectedRef.current = null;
+    // No hand, no scrub. Playback, a tap on the ruler, a zoom and a reflow all move this
+    // element, and none of them is a gesture.
+    if (!scroller || !handRef.current || dragRef.current) return;
 
     // Announced as a drag, because to everything upstream that is exactly what it is: a
     // gesture in progress that owns the playhead. It is what stops the playback loop from
@@ -325,6 +315,7 @@ export function TimelineEditor({
     if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
     scrubTimerRef.current = setTimeout(() => {
       scrubbingRef.current = false;
+      handRef.current = false;
       lastScrubRef.current = null;
       // The exact seek, and the end of the gesture. Ordered so the player sees the final
       // position *and* the end of scrubbing in one commit, which is what turns the last
@@ -454,9 +445,7 @@ export function TimelineEditor({
       // playhead means holding `scrollLeft` on the same instant at the new scale.
       if (scroller) {
         requestAnimationFrame(() => {
-          const target = Math.max(0, Math.round((anchor / 1_000_000) * next));
-          expectedRef.current = target;
-          scroller.scrollLeft = target;
+          scroller.scrollLeft = Math.max(0, Math.round((anchor / 1_000_000) * next));
         });
       }
       return next;
@@ -493,6 +482,11 @@ export function TimelineEditor({
         className={drag ? 'timeline-scroller dragging' : 'timeline-scroller'}
         ref={scrollerRef}
         onScroll={onScroll}
+        // The positive signal. `onPointerDownCapture` so a press that lands on a clip —
+        // which stops propagation to select it — still counts as a hand on the lane.
+        onPointerDownCapture={noteHand}
+        onTouchStartCapture={noteHand}
+        onWheel={noteHand}
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}

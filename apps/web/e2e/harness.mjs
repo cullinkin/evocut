@@ -164,7 +164,20 @@ export async function ensureClip(page) {
 export async function scrubTo(page, fraction) {
   await page.evaluate((at) => {
     const scroller = document.querySelector('.timeline-scroller');
-    if (scroller) scroller.scrollLeft = at * (scroller.scrollWidth - scroller.clientWidth);
+    if (!scroller) return;
+    // A pointer first, because the component only treats a scroll as a scrub when a hand
+    // was on the element — playback scrolls it too, and those must not seek. Setting
+    // `scrollLeft` on its own is indistinguishable from the app's own scrolling, which is
+    // the whole point of that rule.
+    const box = scroller.getBoundingClientRect();
+    scroller.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        clientX: box.left + box.width / 2,
+        clientY: box.top + box.height / 2,
+      }),
+    );
+    scroller.scrollLeft = at * (scroller.scrollWidth - scroller.clientWidth);
   }, fraction);
   // The component fires a final `seek` on a settle timer, since a touch scroll with
   // momentum has no event that means "stopped".
@@ -193,13 +206,44 @@ export async function centre(locator) {
   return { x: box.x + box.width / 2, y: box.y + box.height / 2, box };
 }
 
-/** Download the project EDL and parse it — the only way to assert on what was recorded. */
+/**
+ * Download the project EDL and parse it — the only way to assert on what was recorded.
+ *
+ * Three taps rather than one, because that is where the export lives now: Settings →
+ * Metadata → the download on the EDL row. Going through the real screens means a spec
+ * fails if that path breaks, which is the only reason a helper should know about layout.
+ */
 export async function exportEdl(page, name = 'export.json') {
+  await openMetadata(page);
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.locator('footer button:has-text("EDL")').click(),
+    page.locator('button[aria-label="Export EDL"]').click(),
   ]);
   const path = artifact(name);
   await download.saveAs(path);
+  await page.locator('header button[aria-label="Back"]').click();
+  await page.locator('.timeline-scroller').waitFor();
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+/** Download the log and return its events, oldest first. */
+export async function exportLog(page, name = 'log.jsonl') {
+  await openMetadata(page);
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.locator('button[aria-label="Export Logs"]').click(),
+  ]);
+  const path = artifact(name);
+  await download.saveAs(path);
+  await page.locator('header button[aria-label="Back"]').click();
+  await page.locator('.timeline-scroller').waitFor();
+  const text = readFileSync(path, 'utf8');
+  return { path, text, events: text.split('\n').filter(Boolean).map((line) => JSON.parse(line)) };
+}
+
+/** Settings → Metadata, leaving the screen open. */
+export async function openMetadata(page) {
+  await page.locator('footer button[aria-label="Settings"]').click();
+  await page.locator('button.row-link').click();
+  await page.locator('.exports').waitFor();
 }

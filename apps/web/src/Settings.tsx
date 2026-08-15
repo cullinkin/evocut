@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { DEFAULT_MODEL } from '@evocut/agent';
 import type { RefinementSettings } from './settings.ts';
 
 /**
@@ -15,7 +14,9 @@ import type { RefinementSettings } from './settings.ts';
  * Anthropic console, and the screen says where.
  *
  * The style brief is deliberately *not* here. It is per video, and lives on the project —
- * see `Brief.tsx`. What is on this screen is what belongs to the device.
+ * see `Brief.tsx`. Nor is the model: it is picked on the same sheet, where the cost is
+ * about to be paid and the choice is in front of the thing it applies to. What is on this
+ * screen is what belongs to the device.
  */
 export interface SettingsScreenProps {
   settings: RefinementSettings;
@@ -23,12 +24,9 @@ export interface SettingsScreenProps {
   onSave(next: RefinementSettings): void;
   onForgetKey(): void;
   onClose(): void;
+  /** Absent when no project is open — there would be nothing to export. */
+  onMetadata?(): void;
 }
-
-const MODELS = [
-  { id: DEFAULT_MODEL, label: 'Claude Opus 5 — best judgement' },
-  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5 — faster, cheaper' },
-];
 
 const EFFORTS = [
   { id: '', label: 'Default' },
@@ -38,7 +36,14 @@ const EFFORTS = [
   { id: 'xhigh', label: 'Very high — slowest' },
 ] as const;
 
-export function SettingsScreen({ settings, busy, onSave, onForgetKey, onClose }: SettingsScreenProps) {
+export function SettingsScreen({
+  settings,
+  busy,
+  onSave,
+  onForgetKey,
+  onClose,
+  onMetadata,
+}: SettingsScreenProps) {
   const [draft, setDraft] = useState<RefinementSettings>(settings);
   const [revealed, setRevealed] = useState(false);
   const change = <K extends keyof RefinementSettings>(key: K, value: RefinementSettings[K]) =>
@@ -76,17 +81,6 @@ export function SettingsScreen({ settings, busy, onSave, onForgetKey, onClose }:
       </p>
 
       <label className="field">
-        <span>Model</span>
-        <select value={draft.model} onChange={(event) => change('model', event.target.value)}>
-          {MODELS.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="field">
         <span>How hard it should think</span>
         <select
           value={draft.effort}
@@ -101,9 +95,22 @@ export function SettingsScreen({ settings, busy, onSave, onForgetKey, onClose }:
       </label>
 
       <p className="meta">
-        What each video is meant to be — its brief and its target length — is asked for on
-        the video itself, when you tap Refine.
+        What each video is meant to be — its brief, its target length, and which model to
+        ask — is chosen on the video itself, when you tap Refine.
       </p>
+
+      {onMetadata && (
+        <>
+          <h2>This project</h2>
+          <button className="row-link" onClick={onMetadata}>
+            <span>
+              <strong>Metadata</strong>
+              <small>Export the EDL and the log.</small>
+            </span>
+            <span aria-hidden="true">›</span>
+          </button>
+        </>
+      )}
 
       <div className="settings-actions">
         <button className="ghost" onClick={onClose}>

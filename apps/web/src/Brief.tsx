@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { MODELS, findModel } from '@evocut/agent';
 import { formatTimecode } from '@evocut/edl';
 
 /**
@@ -12,6 +13,10 @@ import { formatTimecode } from '@evocut/edl';
  * first one's answer to everything after it. The key belongs to the phone. This belongs to
  * the video, so it lives on the project and travels with the EDL.
  *
+ * The model is the third kind of thing: a preference, not a secret and not a property of
+ * the edit. It is chosen here because this is the screen where the cost is about to be
+ * paid, and remembered on the device for next time.
+ *
  * ## Why the length is its own field
  *
  * Because it is the one instruction the model can check its own work against. Every clip's
@@ -20,8 +25,12 @@ import { formatTimecode } from '@evocut/edl';
  * changes the *kind* of pass: with no number there is no reason to drop a whole shot, and
  * dropping whole shots is the only way nine minutes becomes three.
  *
- * The field takes `m:ss` or plain seconds, because both are things a person types, and
- * rejecting one of them to enforce a format nobody agreed on is not a service.
+ * ## Two boxes, not one
+ *
+ * It used to be a single field showing `1:10` as its example, with `inputMode="numeric"`
+ * asking iOS for the number pad — which has no colon on it. So the app demonstrated a
+ * format the keyboard it had just summoned could not type. Minutes and seconds as separate
+ * boxes needs no separator at all, and each one is a plain number on the same pad.
  */
 export interface BriefProps {
   brief: string;
@@ -31,7 +40,7 @@ export interface BriefProps {
   /** False when there is no API key, so this says which pass it is about to run. */
   hasKey: boolean;
   model: string;
-  onRun(brief: string, targetDurationUs: number | null): void;
+  onRun(brief: string, targetDurationUs: number | null, model: string): void;
   onClose(): void;
 }
 
@@ -46,11 +55,15 @@ export function BriefSheet({
   onClose,
 }: BriefProps) {
   const [text, setText] = useState(brief);
-  const [length, setLength] = useState(targetDurationUs ? formatDuration(targetDurationUs) : '');
+  const split = splitDuration(targetDurationUs);
+  const [minutes, setMinutes] = useState(split.minutes);
+  const [seconds, setSeconds] = useState(split.seconds);
+  const [chosen, setChosen] = useState(model);
 
-  const parsed = parseDuration(length);
-  const invalid = length.trim() !== '' && parsed === null;
+  const parsed = joinDuration(minutes, seconds);
+  const invalid = (minutes.trim() !== '' || seconds.trim() !== '') && parsed === null;
   const over = parsed !== null ? currentUs - parsed : null;
+  const choice = findModel(chosen);
 
   return (
     <div className="sheet" role="dialog" aria-label="Refine">
@@ -79,25 +92,56 @@ export function BriefSheet({
         does will.
       </p>
 
-      <label className="field">
-        <span>Target length</span>
-        <input
-          type="text"
-          inputMode="numeric"
-          value={length}
-          onChange={(event) => setLength(event.target.value)}
-          placeholder="1:10"
-          autoComplete="off"
-          aria-invalid={invalid}
-        />
-      </label>
+      <fieldset className="field duration">
+        <legend>Target length</legend>
+        <span className="duration-box">
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={minutes}
+            onChange={(event) => setMinutes(digits(event.target.value))}
+            placeholder="1"
+            autoComplete="off"
+            aria-label="Target length, minutes"
+            aria-invalid={invalid}
+          />
+          <small>min</small>
+        </span>
+        <span className="duration-box">
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={seconds}
+            onChange={(event) => setSeconds(digits(event.target.value))}
+            placeholder="10"
+            autoComplete="off"
+            aria-label="Target length, seconds"
+            aria-invalid={invalid}
+          />
+          <small>sec</small>
+        </span>
+      </fieldset>
       <p className={invalid ? 'warning' : 'meta'}>
         {invalid
-          ? 'Give it as m:ss or a number of seconds — 1:10, or 70.'
+          ? 'Seconds must be under 60 — put the rest in minutes.'
           : over === null
             ? `This cut runs ${formatTimecode(currentUs, undefined, { compact: true })}. Leave it blank to let the pass just tighten what's there.`
             : `This cut runs ${formatTimecode(currentUs, undefined, { compact: true })} — ${formatDuration(Math.abs(over))} ${over > 0 ? 'over' : 'under'}.`}
       </p>
+
+      <label className="field">
+        <span>Model</span>
+        <select value={chosen} onChange={(event) => setChosen(event.target.value)}>
+          {MODELS.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {choice && <p className={choice.costly ? 'warning' : 'meta'}>{choice.note}</p>}
 
       <div className="sheet-actions">
         <button className="ghost" onClick={onClose}>
@@ -106,9 +150,9 @@ export function BriefSheet({
         <button
           className="primary"
           disabled={busy || invalid}
-          onClick={() => onRun(text, parsed)}
+          onClick={() => onRun(text, parsed, chosen)}
         >
-          {busy ? 'Thinking…' : hasKey ? `Ask ${model}` : 'Suggest edits'}
+          {busy ? 'Thinking…' : hasKey ? 'Ask Claude' : 'Suggest edits'}
         </button>
       </div>
 
@@ -122,16 +166,32 @@ export function BriefSheet({
   );
 }
 
-/** `m:ss`, `h:mm:ss`, or a bare number of seconds. Null when it is none of those. */
-export function parseDuration(input: string): number | null {
-  const text = input.trim();
-  if (!text) return null;
-  if (!/^\d+(:[0-5]?\d)*(\.\d+)?$/.test(text)) return null;
+/** Strip everything that is not a digit, so a paste of "1:10" cannot half-land. */
+function digits(input: string): string {
+  return input.replace(/\D/g, '').slice(0, 3);
+}
 
-  const parts = text.split(':').map(Number);
-  if (parts.some((part) => !Number.isFinite(part))) return null;
-  const totalSeconds = parts.reduce((total, part) => total * 60 + part, 0);
-  return totalSeconds > 0 ? Math.round(totalSeconds * 1_000_000) : null;
+/**
+ * Minutes and seconds as they were typed, into microseconds.
+ *
+ * Null means "no target", which is a legitimate answer and the one the field starts on.
+ * Sixty or more seconds is a typo rather than a value to normalise: someone who meant 90
+ * seconds and typed it in the seconds box gets told, instead of silently getting 1:30 and
+ * never learning which box does what.
+ */
+export function joinDuration(minutes: string, seconds: string): number | null {
+  if (minutes.trim() === '' && seconds.trim() === '') return null;
+  const m = minutes.trim() === '' ? 0 : Number(minutes);
+  const s = seconds.trim() === '' ? 0 : Number(seconds);
+  if (!Number.isFinite(m) || !Number.isFinite(s) || s >= 60) return null;
+  const total = m * 60 + s;
+  return total > 0 ? total * 1_000_000 : null;
+}
+
+export function splitDuration(us: number | null): { minutes: string; seconds: string } {
+  if (!us || us <= 0) return { minutes: '', seconds: '' };
+  const total = Math.round(us / 1_000_000);
+  return { minutes: String(Math.floor(total / 60)), seconds: String(total % 60) };
 }
 
 export function formatDuration(us: number): string {

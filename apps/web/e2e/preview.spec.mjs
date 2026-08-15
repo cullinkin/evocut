@@ -70,7 +70,7 @@ const sourceAt = (us) => {
 
 const videoState = () =>
   page.evaluate(() => {
-    const video = document.querySelector('.player video');
+    const video = document.querySelector('.player video.live');
     if (!video) return { missing: true };
     const box = video.getBoundingClientRect();
     return {
@@ -119,6 +119,10 @@ await page.screenshot({ path: artifact('preview-on-open.png') });
  */
 const flick = await page.evaluate(async () => {
   const scroller = document.querySelector('.timeline-scroller');
+  const box = scroller.getBoundingClientRect();
+  scroller.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, clientX: box.left + box.width / 2, clientY: box.top + 4 }),
+  );
   const max = scroller.scrollWidth - scroller.clientWidth;
   const targets = [];
   for (let i = 1; i <= 12; i += 1) targets.push(Math.round((max * 0.7 * i) / 12));
@@ -175,6 +179,10 @@ set('zoomedOutPxPerSecond', await page.evaluate(() => {
 
 const coarseFlick = await page.evaluate(async () => {
   const scroller = document.querySelector('.timeline-scroller');
+  const box = scroller.getBoundingClientRect();
+  scroller.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, clientX: box.left + box.width / 2, clientY: box.top + 4 }),
+  );
   const max = scroller.scrollWidth - scroller.clientWidth;
   const targets = [];
   for (let i = 1; i <= 10; i += 1) targets.push(Math.round((max * 0.8 * i) / 10));
@@ -248,6 +256,84 @@ check('playbackActuallyStarted', during.currentTime !== parked.currentTime, true
 // looks exactly like "all my cuts are gone".
 check('playDidNotJumpToTheStart', Math.abs(during.currentTime - parked.currentTime) < 3, true);
 check('theClockAdvancedRatherThanReset', duringClock !== '0:00.000', true);
+
+/**
+ * Playing across cuts is continuous.
+ *
+ * The reported symptom: "each cut seems like it takes a second to think before it actually
+ * starts to play, so it's difficult to fully understand how the video flows." A cut is a
+ * jump in the recording, and a single element pays for that jump with an exact seek at
+ * every boundary. Two elements ping-ponged pay for it in advance instead.
+ *
+ * Asserted three ways, because each catches a different failure:
+ *
+ *  - **The clock never stalls.** Sampled ten times a second; the longest gap between
+ *    advances is the stutter, in milliseconds. This is the number the complaint is about.
+ *  - **Playback is never stopped by the app.** The other half of the report — "it would
+ *    play for a moment or two and then stop again on its own" — was the timeline treating
+ *    its own scroll-to-follow-the-playhead as a gesture, which pauses playback.
+ *  - **Both elements exist and take turns.** Without this the first two checks pass on a
+ *    fixture whose cuts are cheap, which the twelve-second test clip's certainly are.
+ */
+await page.locator('button[aria-label="Fit timeline"]').click();
+await page.waitForTimeout(300);
+await scrubTo(page, 0.05);
+await page.waitForTimeout(700);
+
+set('videoElements', await page.evaluate(() => document.querySelectorAll('.player video').length));
+check('thereAreTwoElementsToHandOverBetween', await page.evaluate(() => document.querySelectorAll('.player video').length), 2);
+
+await page.locator('button.play').click();
+const run = await page.evaluate(async () => {
+  const clock = () => document.querySelector('.timeline-clock')?.textContent ?? '';
+  const which = () => [...document.querySelectorAll('.player video')].findIndex((v) => v.classList.contains('live'));
+
+  const samples = [];
+  const started = performance.now();
+  let last = clock();
+  let lastChange = started;
+  let longestStall = 0;
+  const seen = new Set([which()]);
+  let handoffs = 0;
+  let live = which();
+
+  while (performance.now() - started < 5000) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const now = performance.now();
+    const current = clock();
+    if (current !== last) {
+      longestStall = Math.max(longestStall, now - lastChange);
+      lastChange = now;
+      last = current;
+    }
+    const nowLive = which();
+    if (nowLive !== live) {
+      handoffs += 1;
+      live = nowLive;
+      seen.add(nowLive);
+    }
+    samples.push(current);
+  }
+  longestStall = Math.max(longestStall, performance.now() - lastChange);
+
+  return {
+    longestStallMs: Math.round(longestStall),
+    handoffs,
+    elementsUsed: seen.size,
+    advanced: new Set(samples).size,
+    stillPlaying: !document.querySelector('.player video.live')?.paused,
+    finalClock: last,
+  };
+});
+set('playback', run);
+// Half a second is already visible as a hitch; a full second is the complaint. The
+// twelve-second fixture cuts cheaply, so this is a floor, not proof it is fast on 4K.
+check('playbackNeverStalls', run.longestStallMs < 500, true);
+check('theClockKeptMoving', run.advanced > 10, true);
+check('nothingStoppedPlaybackOnItsOwn', run.stillPlaying, true);
+check('theSpareElementTookOverAtACut', run.handoffs >= 1, true);
+check('bothElementsWereUsed', run.elementsUsed, 2);
+await page.locator('button.play').click();
 
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();

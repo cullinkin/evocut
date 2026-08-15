@@ -190,9 +190,10 @@ export interface Session {
    * Takes the brief and target explicitly rather than reading them back off the project,
    * because the brief sheet saves and runs in the same gesture and a `setProject` has not
    * committed by the time the run starts. Passing them through means the pass is steered
-   * by what the person just typed, not by what it replaced.
+   * by what the person just typed, not by what it replaced. The model is passed for the
+   * same reason: it is picked on that sheet too.
    */
-  requestRefinement(steer?: { brief: string; targetDurationUs: number | null }): void;
+  requestRefinement(steer?: { brief: string; targetDurationUs: number | null; model?: string }): void;
   cancelRefinement(): void;
 
   settings: RefinementSettings;
@@ -685,13 +686,18 @@ export function useSession(): Session {
    * nothing has happened to the video until one is tapped.
    */
   const openReview = useCallback(
-    (proposal: RefinementPlan, by: 'model' | 'heuristics', detail: Record<string, unknown>) => {
+    (
+      proposal: RefinementPlan,
+      by: 'model' | 'heuristics',
+      detail: Record<string, unknown>,
+      usedModel?: string,
+    ) => {
       setProject((current) => {
         if (!current) return current;
         const session: ReviewSession = {
           id: newId('revision'),
           by,
-          ...(by === 'model' ? { model: settingsRef.current.model } : {}),
+          ...(by === 'model' ? { model: usedModel ?? settingsRef.current.model } : {}),
           ...(proposal.summary ? { summary: proposal.summary } : {}),
           ops: proposal.ops,
           accepted: proposal.ops.map(() => false),
@@ -727,7 +733,7 @@ export function useSession(): Session {
    * signal. Both paths produce the same `RefinementPlan` and land on the same screen.
    */
   const requestRefinement = useCallback(
-    (steer?: { brief: string; targetDurationUs: number | null }) => {
+    (steer?: { brief: string; targetDurationUs: number | null; model?: string }) => {
     if (!project || refining) return;
 
     const steered: Project = steer
@@ -737,6 +743,11 @@ export function useSession(): Session {
           ...(steer.targetDurationUs ? { targetDurationUs: steer.targetDurationUs } : { targetDurationUs: undefined }),
         }
       : project;
+
+    // Taken from the sheet rather than from settings for the same reason the brief is: the
+    // save that persists the choice for next time has not committed yet, and a run that
+    // used last week's model because of a React batch is impossible to explain afterwards.
+    const model = steer?.model ?? settings.model;
 
     if (!settings.apiKey) {
       openReview(planLocalRefinement(steered, { signals }), 'heuristics', {});
@@ -751,7 +762,7 @@ export function useSession(): Session {
     const startedAt = Date.now();
     record('llm.request', {
       payload: {
-        model: settings.model,
+        model,
         effort: settings.effort || 'default',
         clips: steered.timeline.tracks[0]?.clips.filter((clip) => clip.enabled).length ?? 0,
         measuredSources: signals.size,
@@ -775,7 +786,7 @@ export function useSession(): Session {
         const complete = createAnthropicComplete(
           {
             apiKey: settings.apiKey,
-            model: settings.model,
+            model,
             ...(settings.effort ? { effort: settings.effort } : {}),
             signal: controller.signal,
           },
@@ -791,22 +802,27 @@ export function useSession(): Session {
         });
         if (controller.signal.aborted) return;
 
-        openReview(result.plan, 'model', {
-          rounds: result.rounds,
-          // Ops the engine refused even after a repair round. Logged rather than
-          // discarded: a model that keeps proposing edits the schema rejects is a prompt
-          // problem, and this is the only place it would show up.
-          rejected: result.rejected.length,
-          rejectedReasons: result.rejected.map((failure) => failure.message).slice(0, 5),
-          elapsedMs: Date.now() - startedAt,
-          ...usage,
-        });
+        openReview(
+          result.plan,
+          'model',
+          {
+            rounds: result.rounds,
+            // Ops the engine refused even after a repair round. Logged rather than
+            // discarded: a model that keeps proposing edits the schema rejects is a prompt
+            // problem, and this is the only place it would show up.
+            rejected: result.rejected.length,
+            rejectedReasons: result.rejected.map((failure) => failure.message).slice(0, 5),
+            elapsedMs: Date.now() - startedAt,
+            ...usage,
+          },
+          model,
+        );
       } catch (cause) {
         if (controller.signal.aborted) return;
         const message = describe(cause);
         setError(message);
         record('llm.error', {
-          payload: { message, model: settings.model, elapsedMs: Date.now() - startedAt, ...usage },
+          payload: { message, model, elapsedMs: Date.now() - startedAt, ...usage },
         });
       } finally {
         if (!controller.signal.aborted) setRefining(false);
