@@ -1,0 +1,20 @@
+# Zero-config deploy for anyone who cannot use GitHub Pages — Pages on a private repo
+# needs a paid GitHub plan, and Netlify's free tier does not. Connecting the repo in
+# Netlify picks these up, so there is nothing to type into a settings form on a phone.
+#
+# The output is plain static files. There is no server, no API, and no upload path: the
+# app keeps every project and every frame of footage on the device it runs on.
+
+[build]
+  command = "npm run build"
+  publish = "apps/web/dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Single page, no router — but a 200 rewrite keeps a deep link or a refresh working if
+# one is ever added.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

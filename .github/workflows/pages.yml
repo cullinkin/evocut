@@ -3,7 +3,11 @@ name: Deploy to Pages
 # The app is a static single page — no server, nothing to run, nothing leaves the device.
 # Publishing it is the only practical way to try it on a phone: iOS gates OPFS and
 # `storage.persist()` behind a secure context, so a plain-HTTP LAN address from `npm run
-# dev` works but silently falls back to weaker storage. Pages gives HTTPS for free.
+# dev` works but silently falls back to weaker storage.
+#
+# This needs Pages enabled at Settings -> Pages -> Source: GitHub Actions, and Pages on a
+# *private* repo needs a paid GitHub plan. If neither applies, `netlify.toml` in the repo
+# root configures the same build on Netlify's free tier, which serves private repos.
 on:
   push:
     # Feature branches deploy too, because the whole point is trying the thing on a
@@ -38,11 +42,10 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      # `enablement` turns Pages on via the API, so nobody has to find the setting.
-      # It is a no-op once Pages is already enabled.
+      # No `enablement: true` here: the workflow token cannot create a Pages site
+      # ("Resource not accessible by integration"), and asking it to turns the clear
+      # "enable Pages on this repo" message into a confusing permissions one.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: apps/web/dist
