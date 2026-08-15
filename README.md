@@ -86,8 +86,9 @@ entirely from a phone, and both publish the same static files:
   [`netlify.toml`](netlify.toml) already carries the build settings. Works with a
   **private** repo on a free plan.
 - *GitHub Pages.* Enable at **Settings → Pages → Source: GitHub Actions**, then re-run
-  the "Deploy to Pages" workflow. Note that Pages on a private repo needs a paid GitHub
-  plan; on a free plan the repo has to be public.
+  the "Deploy to Pages" workflow. This one step cannot be automated — the create-a-Pages-
+  site API refuses a workflow's own token — but it is the only manual step. Pages on a
+  private repo also needs a paid GitHub plan.
 
 Then **Share → Add to Home Screen** to run it full-screen without Safari's chrome.
 
