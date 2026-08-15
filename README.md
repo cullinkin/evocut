@@ -79,14 +79,15 @@ persist across a reload — but on plain HTTP there is no OPFS and no
 to evict it under storage pressure. Fine for trying the gestures, not for real footage.
 
 **Over HTTPS (the real thing).** Any HTTPS origin gets OPFS, streamable media, eviction
-protection, and a proper Add to Home Screen. Two easy routes:
+protection, and a proper Add to Home Screen. Pick whichever fits — both can be set up
+entirely from a phone, and both publish the same static files:
 
-- *Deploy it.* Pushing this branch runs `.github/workflows/pages.yml`, which publishes
-  `apps/web/dist` to GitHub Pages. It needs enabling once: **Settings → Pages → Source:
-  GitHub Actions**. If you deploy from a non-default branch, also allow that branch under
-  **Settings → Environments → github-pages**.
-- *Tunnel your dev server.* `cloudflared tunnel --url http://localhost:5173` prints an
-  HTTPS URL with no account needed, and keeps hot reload.
+- *Netlify or Cloudflare Pages.* Sign in with GitHub, pick this repo, deploy.
+  [`netlify.toml`](netlify.toml) already carries the build settings. Works with a
+  **private** repo on a free plan.
+- *GitHub Pages.* Enable at **Settings → Pages → Source: GitHub Actions**, then re-run
+  the "Deploy to Pages" workflow. Note that Pages on a private repo needs a paid GitHub
+  plan; on a free plan the repo has to be public.
 
 Then **Share → Add to Home Screen** to run it full-screen without Safari's chrome.
 
