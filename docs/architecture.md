@@ -6,11 +6,14 @@
 apps/web            packages/edl          packages/agent        packages/renderer
 ─────────           ────────────          ──────────────        ─────────────────
 coarse pass    ──▶  Project / EDL    ──▶  refinement pass  ──▶  WebCodecs output
-  (human)             + op engine           (LLM ops)             (own pipeline)
+  (human)             + op engine           (proposed ops)        (own pipeline)
      │                    ▲                      │                      │
-     └──── log ───────────┴──────────────────────┘                      │
+  review  ◀───────────────┼──────────────────────┘                      │
+     │                    │                                             │
+     └──── log ───────────┤                                             │
                           │                                             │
-                    training export ◀───────────────────────────────────┘
+                    packages/store ──▶ training export ◀────────────────┘
+                    (OPFS + IndexedDB)
 ```
 
 `@evocut/edl` is the hub and depends on nothing but zod. Everything else depends on it and
@@ -23,6 +26,34 @@ preview, which is deliberate — see below.
 
 Schema, time model, op engine, validation, prompt rendering, digest, log. Runs unchanged
 in a browser, a worker, and Node. Fully tested. Read [`docs/edl-spec.md`](./edl-spec.md).
+
+### `@evocut/store` — done
+
+Media in OPFS, projects and logs in IndexedDB. The split is about access pattern, not
+taste: the renderer needs to stream a source lazily, which an OPFS file handle supports and
+an IndexedDB blob does not, while projects and log rows need querying and partial updates,
+which is the opposite.
+
+Three decisions worth knowing:
+
+**Media is fingerprinted, not hashed.** `fingerprintFile` reads the size and the first and
+last 64KB. A real content hash would mean reading half a gigabyte before the editor opened
+— and since WebCrypto has no streaming digest, holding all of it in memory at once. The
+job is only to notice the same recording being picked twice, and both ends plus the length
+does that.
+
+**Log rows live in their own object store**, keyed by `[projectId, seq]`. The log grows
+with every scrub, so rewriting the project document to append one row would make logging
+quadratic — and logging has to stay cheap enough that nobody is tempted to make it sparse.
+
+**A project that fails to parse throws rather than reporting itself absent.** Absent
+invites the app to overwrite the user's work with a fresh project, which is worse than an
+error message. The record stays in the database for a future migration to reach.
+
+In-memory implementations of both stores ship alongside the real ones — not only as test
+doubles, but because OPFS has no Node equivalent and without them the whole persistence
+layer would be exercisable only in a browser. They validate on read exactly as the real
+stores do; a double that is more forgiving than the real thing is worse than none.
 
 ### `@evocut/renderer` — sampling core done, pipeline not started
 
@@ -57,17 +88,40 @@ The repair round is the notable part: rejected ops go back with their error mess
 an instruction not to resend the ones that landed. One round is usually enough, because
 the common failure is a stale id and the error names it exactly.
 
-### `@evocut/web` — coarse pass working, everything else not started
+**`planLocalRefinement` is a stand-in, not the product.** It applies fixed heuristics —
+trim a quarter-second off each join, push in on long static clips, speed up the very long
+ones — where the real pass will listen to the audio and watch the footage. It exists
+because the review screen is the piece that turns usage into labelled data, and that screen
+could not be built, tested, or used before a provider was wired up. It satisfies the same
+`CompleteFn` shape a model will, so replacing it is one function.
+
+Its heuristics are deliberately conservative and capped at twelve edits. A pass that
+proposes forty trains people to hit "accept all", and an accept-all is worth nothing as a
+label. It also checks its own proposals apply cleanly before emitting them, because a
+rejected op wastes a review slot.
+
+### `@evocut/web` — coarse pass and review working, render screen not started
 
 Vite + React, mobile-first, dark. Import a recording, scrub, split at the playhead, drop
-and restore clips, freeze the coarse pass, export the EDL and the log.
+and restore clips, freeze the coarse pass, review the refinement, export the EDL and the
+log. Work is saved continuously and resumes after a reload.
 
-There is intentionally no trim handle, no effect panel, no zoom control. The bet is that a
-person on a phone is good at one judgement — "is this bit worth keeping?" — and that the
-refinement pass is what everything else is for.
+There is intentionally no trim handle, no effect panel, no zoom control on the coarse
+screen. The bet is that a person on a phone is good at one judgement — "is this bit worth
+keeping?" — and that the refinement pass is what everything else is for.
 
-Not started: persistence (the media locator is `unresolved`, so reopening needs a
-re-pick), the refinement review screen, and the render screen.
+The **review screen** is where usage becomes labelled data, and its design follows from
+that. Nothing starts accepted: a screen that opens with every box ticked collects consent,
+not judgement. Every op shows the rationale that came with it, because the stated reason is
+as much what is being judged as the edit is. Applying with nothing accepted is a real
+outcome rather than a no-op — it records that a human saw the suggestions and wanted none,
+which is a stronger signal than never having asked.
+
+Missing media is rendered as a state, not an error. The cut points are valid without the
+footage, so a project whose bytes are gone shows a "find this file again" prompt and keeps
+every clip intact when it is re-picked.
+
+Not started: the render screen.
 
 ## Decisions worth knowing about
 
@@ -106,11 +160,16 @@ check that the package boundaries are real.
 
 ## What to do next
 
-1. **Persist media and projects.** OPFS for the footage, IndexedDB for the EDL. Until this
-   lands, closing the tab loses the session, which makes the coarse pass hard to dogfood.
-2. **The refinement review screen.** Ops arrive with rationales; show them as a list the
-   user accepts or rejects per-op, and write the verdict to `Revision.accepted`. This is
-   what turns usage into labelled data.
-3. **The render pipeline.** `sampleTimeline` already says what each frame should be.
-4. **The training export.** Walk a directory of projects and logs into
-   `(source features, coarse decisions)` pairs. `droppedRegions()` is the starting point.
+1. **Wire a real model behind the refinement pass.** The prompt, the tool schema, the
+   repair loop, and the review screen are all built and exercised; `planLocalRefinement`
+   is the only stand-in left. This needs a decision about where the call happens — calling
+   a provider from the browser would expose the key, so it likely means a small server
+   endpoint.
+2. **The render pipeline.** `sampleTimeline` already says what each frame should be; what
+   is missing is decode → composite → encode → mux.
+3. **The training export.** Walk stored projects and logs into
+   `(source features, coarse decisions, refinement verdicts)` records. `droppedRegions()`
+   and `Revision.review` are the two starting points, and both are now populated by real
+   use.
+4. **Storage management.** `orphanedMedia()` exists but nothing calls it; a phone will
+   fill up.

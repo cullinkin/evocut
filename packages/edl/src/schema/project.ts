@@ -27,21 +27,53 @@ export type ProjectStage = z.infer<typeof ProjectStage>;
  * from the initial import plus ops. That replayability is what makes the training export
  * trustworthy: we are not trusting a snapshot, we can re-derive it.
  */
+/**
+ * One human verdict on one proposed op.
+ *
+ * The rejections matter as much as the acceptances, and they are the half that is easy to
+ * lose: an op the user waved away leaves no trace on the timeline. Recording the verdict
+ * against the op that earned it is what turns a refinement pass into labelled data rather
+ * than just a diff that happened.
+ */
+export const OpVerdict = z.object({
+  op: Op,
+  accepted: z.boolean(),
+  /** Optional reason, when the user gave one. Free text; never shown to the model. */
+  note: z.string().max(500).optional(),
+});
+export type OpVerdict = z.infer<typeof OpVerdict>;
+
+export const RevisionReview = z.object({
+  /** Every op the pass proposed, in the order it proposed them, each with its verdict. */
+  verdicts: z.array(OpVerdict),
+  reviewedAt: Timestamp,
+});
+export type RevisionReview = z.infer<typeof RevisionReview>;
+
 export const Revision = z.object({
   id: RevisionId,
   parentId: RevisionId.optional(),
   at: Timestamp,
   by: Actor,
-  /** Ops that take the parent revision's timeline to this one. */
+  /**
+   * Ops that take the parent revision's timeline to this one.
+   *
+   * After a review this is the *accepted subset*, not everything proposed — a revision
+   * records what happened. The full proposal lives in `review.verdicts`.
+   */
   ops: z.array(Op),
   /** Model's summary of the pass, or a human note. */
   summary: z.string().max(4000).optional(),
   /** Model identifier, when `by === 'llm'`. */
   model: z.string().max(200).optional(),
   /**
-   * Set when a human reviewed a model pass. `null`/absent means not yet reviewed.
-   * This field is the accept/reject label in the training set — the whole point of
-   * routing refinements through a review screen.
+   * Per-op verdicts, when a human reviewed this pass. Absent means not yet reviewed.
+   */
+  review: RevisionReview.optional(),
+  /**
+   * Pass-level outcome: did the human keep anything from it? Absent means not yet
+   * reviewed. Coarser than `review` and derived from it, but worth storing separately
+   * so a training export can filter passes without walking every verdict.
    */
   accepted: z.boolean().optional(),
 });

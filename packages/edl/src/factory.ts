@@ -2,7 +2,7 @@ import { newId as defaultNewId, type EntityKind, type Provenance } from './schem
 import type { Clip } from './schema/clip.js';
 import type { Source } from './schema/source.js';
 import type { Timeline, Track, TrackKind } from './schema/timeline.js';
-import { Project, SCHEMA_VERSION, type Revision } from './schema/project.js';
+import { Project, SCHEMA_VERSION, type OpVerdict, type Revision } from './schema/project.js';
 import type { Op } from './schema/ops.js';
 import { normalizeTimeline } from './normalize.js';
 import { applyOps, type ApplyContext, type ApplyResult } from './apply.js';
@@ -155,6 +155,12 @@ export interface CommitOptions extends ApplyContext, FactoryDeps {
   by: Revision['by'];
   summary?: string;
   model?: string;
+  /**
+   * Per-op verdicts from a review screen. Pass the *whole* proposal here — including the
+   * ops the user rejected — while `ops` carries only the accepted subset. The rejected
+   * ones leave no mark on the timeline, so this is the only place they survive.
+   */
+  review?: { verdicts: OpVerdict[]; reviewedAt?: string };
 }
 
 export interface CommitResult extends ApplyResult {
@@ -173,14 +179,27 @@ export function commitOps(project: Project, ops: Op[], options: CommitOptions): 
   const { newId, now } = deps(options);
   const result = applyOps(project.timeline, ops, { sources: project.sources, ...options });
 
+  const at = now();
+  const review = options.review
+    ? { verdicts: options.review.verdicts, reviewedAt: options.review.reviewedAt ?? at }
+    : undefined;
+
   const revision: Revision = {
     id: newId('revision'),
     ...(project.headRevisionId ? { parentId: project.headRevisionId } : {}),
-    at: now(),
+    at,
     by: options.by,
     ops: result.applied,
     ...(options.summary !== undefined ? { summary: options.summary } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(review
+      ? {
+          review,
+          // "The human kept something from this pass." A pass where every op was waved
+          // away is a rejected pass, and that is the label a training export wants.
+          accepted: review.verdicts.some((v) => v.accepted),
+        }
+      : {}),
   };
 
   return {

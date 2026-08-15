@@ -10,6 +10,8 @@ export default defineConfig({
     alias: {
       '@evocut/edl': fileURLToPath(new URL('../../packages/edl/src/index.ts', import.meta.url)),
       '@evocut/renderer': fileURLToPath(new URL('../../packages/renderer/src/index.ts', import.meta.url)),
+      '@evocut/agent': fileURLToPath(new URL('../../packages/agent/src/index.ts', import.meta.url)),
+      '@evocut/store': fileURLToPath(new URL('../../packages/store/src/index.ts', import.meta.url)),
     },
   },
   server: {

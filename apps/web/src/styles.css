@@ -254,3 +254,183 @@ footer {
   color: var(--danger);
   font-size: 14px;
 }
+
+/* --- Project list, relink prompt, and the review screen --- */
+
+.recents {
+  list-style: none;
+  margin: 24px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.recents li {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.recent-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  padding: 10px 12px;
+}
+
+.recent-main small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+button.danger {
+  color: var(--danger);
+}
+
+.picker.small span {
+  min-height: 40px;
+  line-height: 40px;
+  padding: 0 16px;
+  font-size: 14px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.relink,
+.warning {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(108, 140, 255, 0.1);
+  border: 1px solid rgba(108, 140, 255, 0.35);
+  font-size: 14px;
+}
+
+.relink p,
+.warning {
+  margin: 0 0 10px;
+}
+
+.warning {
+  margin: 16px 0 0;
+  color: var(--muted);
+}
+
+.review {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+}
+
+.review h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.review .lede {
+  margin: 0;
+  font-size: 14px;
+}
+
+.review-bulk {
+  display: flex;
+  gap: 4px;
+}
+
+.proposals {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.proposal {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+/* Accepted rows are marked, not merely un-dimmed: nothing starts accepted, so the
+   highlight is a record of a decision the person actually made. */
+.proposal.accepted {
+  border-color: var(--accent);
+  background: rgba(108, 140, 255, 0.08);
+}
+
+.proposal-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.proposal-body strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.proposal-body small {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.proposal-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+button.verdict {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+button.verdict.on {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.review-actions {
+  display: flex;
+  gap: 8px;
+  position: sticky;
+  bottom: 0;
+  padding: 12px 0 calc(4px + env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--bg) 70%, transparent);
+}
+
+.review-actions button {
+  flex: 1;
+}
+
+.times em {
+  font-style: normal;
+  color: var(--muted);
+  font-weight: 400;
+}

@@ -118,9 +118,20 @@ export function parseLog(jsonl: string): ParsedLog {
   return { events, skipped };
 }
 
-/** Incrementing sequence numbers for one project's log. */
-export function makeLogger(projectId: string, newEventId: () => string, now: () => string) {
-  let seq = 0;
+/**
+ * Incrementing sequence numbers for one project's log.
+ *
+ * `startSeq` resumes an existing log: reopening a project has to continue its sequence,
+ * not restart it, or the new rows would collide with the stored ones and a replay would
+ * silently lose whichever side lost the write.
+ */
+export function makeLogger(
+  projectId: string,
+  newEventId: () => string,
+  now: () => string,
+  startSeq = 0,
+) {
+  let seq = startSeq;
   return function record(
     type: LogEventType,
     actor: Actor,

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { microsToSeconds, secondsToMicros, sourceToTimeline, type Timeline } from '@evocut/edl';
 import { sampleTimeline } from '@evocut/renderer';
 
@@ -33,20 +33,29 @@ export function Player({ objectUrl, timeline, playhead, playing, onTime, onEnded
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
 
-  // Follow external seeks (scrubber, clip taps) without fighting playback.
-  useEffect(() => {
+  /**
+   * Put the element where the timeline says it should be.
+   *
+   * Also runs on `loadedmetadata`, which matters after a reload: a restored project can
+   * open on a clip that starts well into the source, and a `currentTime` assignment made
+   * before the element has metadata is silently discarded — leaving a black frame until
+   * the user happens to scrub.
+   */
+  const sync = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    const layer = sampleTimeline(timeline, playhead).layers[0];
+    const layer = sampleTimeline(timeline, playheadRef.current).layers[0];
     if (!layer) return;
 
     video.playbackRate = layer.clip.speed;
-    const target = microsToSeconds(layer.sourceTime);
     if (Math.abs(secondsToMicros(video.currentTime) - layer.sourceTime) > SEEK_TOLERANCE_US) {
-      video.currentTime = target;
+      video.currentTime = microsToSeconds(layer.sourceTime);
     }
-  }, [playhead, timeline]);
+  }, [timeline]);
+
+  // Follow external seeks (scrubber, clip taps) without fighting playback.
+  useEffect(sync, [sync, playhead]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -99,7 +108,7 @@ export function Player({ objectUrl, timeline, playhead, playing, onTime, onEnded
 
   return (
     <div className="player">
-      <video ref={videoRef} src={objectUrl} playsInline preload="auto" />
+      <video ref={videoRef} src={objectUrl} playsInline preload="auto" onLoadedMetadata={sync} />
     </div>
   );
 }

@@ -160,9 +160,17 @@ Once refinement ops land on the live timeline there is no way to recover which c
 the human's. This is the one moment it can be captured, and it is stored rather than
 reconstructed so it survives log truncation or any future compaction of `revisions`.
 
-**`revisions`** — a linear chain of `(parentId, by, ops, accepted?)`. The timeline at any
+**`revisions`** — a linear chain of `(parentId, by, ops, review?)`. The timeline at any
 point is replayable from the import plus ops, so the training export can re-derive rather
-than trust a snapshot. `accepted` is the human's verdict on a model pass — the label.
+than trust a snapshot.
+
+`Revision.ops` is what was *applied*. After a review that is the accepted subset, and the
+full proposal lives in `Revision.review.verdicts` — one `{op, accepted, note?}` per
+suggestion. Storing rejections explicitly is the whole point: an op the user waved away
+leaves no mark on the timeline, so the verdict is the only trace it ever gets, and the
+rejections are as much of the label as the acceptances. `Revision.accepted` is the coarser
+pass-level roll-up ("did the human keep anything from this pass?"), stored separately so a
+training export can filter without walking every verdict.
 
 **The log** (`LogEvent`, JSONL) — where the user scrubbed, what they watched twice, which
 cut they made and undid. A finished EDL cannot tell you whether a cut point was deliberate

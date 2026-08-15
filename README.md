@@ -21,13 +21,18 @@ for automating the first pass later.
 
 | | |
 | --- | --- |
-| `packages/edl` | **Working.** Schema, time model, op engine, validation, log. 69 tests. |
+| `packages/edl` | **Working.** Schema, time model, op engine, validation, log. 78 tests. |
+| `packages/store` | **Working.** OPFS media, IndexedDB projects and logs. 36 tests. |
 | `packages/renderer` | **Sampling core working**, WebCodecs pipeline not started. |
-| `packages/agent` | **Prompt and repair loop working**, provider transport not wired. |
-| `apps/web` | **Coarse pass working.** No persistence, no review screen, no render screen. |
+| `packages/agent` | **Prompt, repair loop, and a local stand-in planner.** No provider wired. |
+| `apps/web` | **Coarse pass and refinement review working.** No render screen. |
 
 Early prototype. The EDL is the piece everything else depends on, so it was built first
 and properly; the rest is scaffolding of varying thickness around it.
+
+The refinement pass currently runs a **local heuristic planner**, not a model — see
+`packages/agent/src/local.ts`. It exists so the review screen can be built and used
+before a provider is wired up; swapping it for a real model is one function.
 
 ## Quick start
 
@@ -38,15 +43,18 @@ npm run dev     # then open the printed network URL on a phone
 ```
 
 The coarse pass: pick a video, scrub, **Split here** at a cut point, **Drop** the clips you
-do not want, **Finish coarse pass** to freeze it. **Export EDL** and **Export log** give
+do not want, **Finish coarse pass** to freeze it. Then **Refine** proposes edits, each with
+a reason, and you keep or skip them one at a time. **Export EDL** and **Export log** give
 you the two artefacts.
 
-Media is not persisted yet, so a reload loses the session.
+Everything is stored on the device — footage in OPFS, projects and logs in IndexedDB — so
+closing the tab and coming back resumes where you left off. Nothing is uploaded anywhere.
 
 ## Layout
 
 ```
 packages/edl/         the edit decision list — schema, ops, validation, log
+packages/store/       local persistence: OPFS media, IndexedDB projects and logs
 packages/renderer/    output pipeline; currently the pure sampling core
 packages/agent/       refinement pass: prompts, op validation, repair rounds
 apps/web/             mobile web app for the coarse pass

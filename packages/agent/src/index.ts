@@ -23,6 +23,7 @@ import { REFINEMENT_SYSTEM_PROMPT, buildRefinementPrompt, refinementTool, type R
  */
 
 export * from './prompt.js';
+export * from './local.js';
 
 /** What the caller must supply: one round-trip to a model that can call tools. */
 export type CompleteFn = (request: {

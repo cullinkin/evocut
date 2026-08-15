@@ -10,7 +10,9 @@
     "types": ["vite/client"],
     "paths": {
       "@evocut/edl": ["../../packages/edl/src/index.ts"],
-      "@evocut/renderer": ["../../packages/renderer/src/index.ts"]
+      "@evocut/renderer": ["../../packages/renderer/src/index.ts"],
+      "@evocut/agent": ["../../packages/agent/src/index.ts"],
+      "@evocut/store": ["../../packages/store/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
