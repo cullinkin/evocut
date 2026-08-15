@@ -149,6 +149,28 @@ export async function ensureClip(page) {
   return path;
 }
 
+/**
+ * Move the playhead by scrolling the timeline, which is now the only way it moves.
+ *
+ * The playhead is painted down the middle of the viewport and never moves; the lane
+ * scrolls under it and the time is read out of `scrollLeft`. So a spec that wants the
+ * playhead at 40% of the edit scrolls to 40% of the scrollable range — which is the same
+ * arithmetic the component does, and a real scroll event either way.
+ *
+ * `scrollWidth - clientWidth` is exactly `duration x pxPerSecond`, because the content
+ * carries half a viewport of padding at each end; that is what makes the fraction here a
+ * fraction of the *edit* rather than of some layout box.
+ */
+export async function scrubTo(page, fraction) {
+  await page.evaluate((at) => {
+    const scroller = document.querySelector('.timeline-scroller');
+    if (scroller) scroller.scrollLeft = at * (scroller.scrollWidth - scroller.clientWidth);
+  }, fraction);
+  // The component fires a final `seek` on a settle timer, since a touch scroll with
+  // momentum has no event that means "stopped".
+  await page.waitForTimeout(320);
+}
+
 /** A genuine single-finger touch drag, so `touch-action` is actually exercised. */
 export async function touchDrag(cdp, page, from, to, steps = 14) {
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: from.x, y: from.y, id: 1 }] });

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { APP_URL, artifact, ensureClip, launch, makeReport } from './harness.mjs';
+import { APP_URL, artifact, ensureClip, launch, makeReport, scrubTo } from './harness.mjs';
 
 /**
  * The signals pass, on real media, in a real browser.
@@ -111,9 +111,8 @@ check('loggedTheMeasurement', computed.length, 1);
  * anywhere said so. Signals belong to the footage; nothing a trim does can change what the
  * footage sounds like, and this asserts that in the one place it can be observed.
  */
-const ruler = await page.locator('.ruler').boundingBox();
 for (const fraction of [0.2, 0.35, 0.5, 0.65, 0.8]) {
-  await page.mouse.click(ruler.x + ruler.width * fraction, ruler.y + ruler.height / 2);
+  await scrubTo(page, fraction);
   await page.locator('button[aria-label="Cut at playhead"]').click();
   await page.waitForTimeout(120);
 }

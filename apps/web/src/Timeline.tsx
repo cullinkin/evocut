@@ -10,6 +10,7 @@ import {
   type Timeline as TimelineDoc,
   type TrimBounds,
 } from '@evocut/edl';
+import type { OpPreview } from '@evocut/edl';
 import { frameAt, useFilmstrip } from './filmstrip.ts';
 
 /**
@@ -39,12 +40,30 @@ import { frameAt, useFilmstrip } from './filmstrip.ts';
  * step. This is what every editor with a gapless timeline does, and it is the only version
  * where the gesture means what it looks like it means.
  *
+ * ## Scrolling *is* scrubbing
+ *
+ * The playhead does not move. It is painted down the middle of the viewport and stays
+ * there; dragging the lane moves the *footage* past it, and the time under it is read
+ * straight out of `scrollLeft`. This is how every phone editor behaves, and the reason is
+ * not fashion: a playhead you have to chase is a playhead you have to aim at, and aiming
+ * at a two-pixel line with a thumb on a moving surface is the worst gesture in a mobile
+ * editor. Here the aiming is done by the scroll, which is inertial, interruptible, and
+ * already the most practised gesture on the device.
+ *
+ * It also means the browser does the work. No pointer capture, no autoscroll loop, no
+ * rubber-banding at the edges — native momentum scrolling, for free, at sixty frames a
+ * second on a phone that would struggle to do it in JavaScript.
+ *
+ * The one hazard is the feedback loop: playback moves the playhead, which scrolls the
+ * lane, which fires a scroll event, which would move the playhead. `suppressRef` marks the
+ * scrolls we caused ourselves, and they are ignored on the way back in.
+ *
  * ## Touch
  *
- * Pointer Events with `setPointerCapture`, so a drag keeps receiving moves after the
- * finger leaves the element it started on. `touch-action: pan-x` on the lane so it scrolls;
- * `none` on the playhead and handles so a drag is a drag. Handles hit-test at 44px around
- * a 12px paint, because a thumb is ~9mm and a trim handle cannot be.
+ * Pointer Events with `setPointerCapture` for trims, so a drag keeps receiving moves after
+ * the finger leaves the element it started on. `touch-action: pan-x` on the lane so it
+ * scrolls; `none` on the handles so a trim is a trim. Handles hit-test at 44px around a
+ * 12px paint, because a thumb is ~9mm and a trim handle cannot be.
  */
 export interface TimelineDragState {
   kind: 'playhead' | 'trim';
@@ -59,19 +78,20 @@ export interface TimelineProps {
   playhead: number;
   selectedClipId: string | null;
   frozen: boolean;
+  /** Open suggestions, drawn as bubbles over the clips they touch. */
+  previews: OpPreview[];
+  accepted: boolean[];
   onSeek(us: number, final: boolean): void;
   onSelect(clipId: string | null): void;
   onTrimCommit(clipId: string, sourceIn: number, sourceOut: number): void;
   onDragChange(drag: TimelineDragState | null): void;
+  onOpenSuggestion(index: number): void;
 }
 
-/** Horizontal padding inside the scroller, so the first and last frame can be reached. */
-const EDGE_PAD = 24;
 const MIN_PPS = 4;
 const MAX_PPS = 400;
-/** Within this many pixels of the edge, a *playhead* drag scrolls the lane along with it. */
-const AUTOSCROLL_MARGIN = 44;
-const AUTOSCROLL_MAX_PPF = 14;
+/** Bubbles closer together than this are drawn as one, with a count. */
+const BUBBLE_CLUSTER_PX = 30;
 
 interface TrimDraft {
   clipId: string;
@@ -83,7 +103,6 @@ interface TrimDraft {
 }
 
 type DragKind =
-  | { type: 'playhead' }
   | {
       type: 'trim';
       clipId: string;
@@ -104,10 +123,13 @@ export function TimelineEditor({
   playhead,
   selectedClipId,
   frozen,
+  previews,
+  accepted,
   onSeek,
   onSelect,
   onTrimCommit,
   onDragChange,
+  onOpenSuggestion,
 }: TimelineProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [pxPerSecond, setPxPerSecond] = useState(40);
@@ -115,22 +137,37 @@ export function TimelineEditor({
   const [draft, setDraft] = useState<TrimDraft | null>(null);
   const dragRef = useRef<DragKind | null>(null);
   const draftRef = useRef<TrimDraft | null>(null);
-  const pointerXRef = useRef(0);
+  /** Half the viewport: the padding that lets time zero sit under a centred playhead. */
+  const [halfWidth, setHalfWidth] = useState(0);
+  /**
+   * How we tell our own scrolls from the user's.
+   *
+   * An instant scroll lands on exactly one position, so `expectedRef` holds it and the
+   * scroll handler recognises it by value. That matters during playback, where we scroll
+   * every frame: a time-based flag would be open almost continuously and would swallow a
+   * finger arriving mid-playback — which is precisely when someone reaches for the lane.
+   *
+   * A *smooth* scroll passes through positions we never named, so it gets the blunt
+   * instrument instead. It only happens on a deliberate tap, where nothing else is moving.
+   */
+  const expectedRef = useRef<number | null>(null);
+  const suppressRef = useRef(false);
+  const settleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clips = timeline.tracks[0]?.clips ?? [];
   const committedTotal = timelineDuration(timeline);
 
-  const toX = useCallback((us: number) => (us / 1_000_000) * pxPerSecond + EDGE_PAD, [pxPerSecond]);
+  const toX = useCallback((us: number) => (us / 1_000_000) * pxPerSecond + halfWidth, [halfWidth, pxPerSecond]);
 
   const toTime = useCallback(
     (clientX: number) => {
       const scroller = scrollerRef.current;
       if (!scroller) return 0;
       const rect = scroller.getBoundingClientRect();
-      const x = clientX - rect.left + scroller.scrollLeft - EDGE_PAD;
+      const x = clientX - rect.left + scroller.scrollLeft - halfWidth;
       return Math.max(0, Math.round((x / pxPerSecond) * 1_000_000));
     },
-    [pxPerSecond],
+    [halfWidth, pxPerSecond],
   );
 
   /** Geometry of a clip in content pixels, accounting for a drag in progress. */
@@ -152,16 +189,29 @@ export function TimelineEditor({
     [draft, pxPerSecond, toX],
   );
 
+  // Half a viewport of padding at each end, so the first and last frame can both reach
+  // the middle of the screen. Measured rather than guessed: it is the term that ties
+  // `scrollLeft` to a time, and a stale value would put the playhead off the beat.
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const measure = () => setHalfWidth(scroller.clientWidth / 2);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, []);
+
   // Wide enough for a drag that has pushed a clip past the committed end.
   const contentWidth = Math.max(
-    (committedTotal / 1_000_000) * pxPerSecond + EDGE_PAD * 2,
-    ...clips.map((clip) => geometryOf(clip).left + geometryOf(clip).width + EDGE_PAD),
+    (committedTotal / 1_000_000) * pxPerSecond + halfWidth * 2,
+    ...clips.map((clip) => geometryOf(clip).left + geometryOf(clip).width + halfWidth),
   );
 
   const fit = useCallback(() => {
     const scroller = scrollerRef.current;
     if (!scroller || committedTotal <= 0) return;
-    const usable = Math.max(120, scroller.clientWidth - EDGE_PAD * 2);
+    const usable = Math.max(120, scroller.clientWidth - 32);
     setPxPerSecond(clamp(usable / (committedTotal / 1_000_000), MIN_PPS, MAX_PPS));
   }, [committedTotal]);
 
@@ -172,31 +222,79 @@ export function TimelineEditor({
     fit();
   }, [fit, committedTotal]);
 
-  // Keep the playhead on screen during playback and after a seek from elsewhere.
+  /** Park the lane so `us` sits under the centred playhead, without calling it a scrub. */
+  const scrollToTime = useCallback(
+    (us: number, smooth = false) => {
+      const scroller = scrollerRef.current;
+      if (!scroller) return;
+      const target = Math.max(0, Math.round((us / 1_000_000) * pxPerSecond));
+      if (Math.abs(scroller.scrollLeft - target) < 1) return;
+
+      if (smooth) {
+        suppressRef.current = true;
+        if (settleRef.current) clearTimeout(settleRef.current);
+        settleRef.current = setTimeout(() => {
+          suppressRef.current = false;
+        }, 500);
+      } else {
+        expectedRef.current = target;
+      }
+      scroller.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
+    },
+    [pxPerSecond],
+  );
+
+  // The playhead moving from anywhere else — playback, a tap on a clip, a seek to zero —
+  // brings the lane with it. A trim drag is exempt: it is already showing the edge.
   useEffect(() => {
     if (drag) return;
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
+    scrollToTime(playhead);
+  }, [drag, playhead, scrollToTime]);
 
-    const x = toX(playhead);
-    const left = scroller.scrollLeft;
-    if (x < left + AUTOSCROLL_MARGIN || x > left + scroller.clientWidth - AUTOSCROLL_MARGIN) {
-      scroller.scrollTo({ left: Math.max(0, x - scroller.clientWidth / 2), behavior: 'smooth' });
+  /**
+   * Scrolling the lane is scrubbing.
+   *
+   * `final: false` while the finger is down, so the log records the attention trail as a
+   * scrub rather than sixty seeks — and a settle timer fires the final one, because a
+   * touch scroll with momentum has no event that means "stopped".
+   */
+  const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubbingRef = useRef(false);
+  const onScroll = useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || suppressRef.current || dragRef.current) return;
+
+    // Our own instant scroll, recognised by where it landed rather than by when.
+    if (expectedRef.current !== null && Math.abs(scroller.scrollLeft - expectedRef.current) <= 1) {
+      expectedRef.current = null;
+      return;
     }
-  }, [playhead, toX, drag]);
+    expectedRef.current = null;
+
+    // Announced as a drag, because to everything upstream that is exactly what it is: a
+    // gesture in progress that owns the playhead. It is what stops the playback loop from
+    // writing the playhead back over the scroll, sixty times a second, which is the same
+    // tug of war that made the old playhead drag look frozen.
+    if (!scrubbingRef.current) {
+      scrubbingRef.current = true;
+      onDragChange({ kind: 'playhead' });
+    }
+
+    const us = Math.max(0, Math.min(committedTotal, Math.round((scroller.scrollLeft / pxPerSecond) * 1_000_000)));
+    onSeek(us, false);
+    if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
+    scrubTimerRef.current = setTimeout(() => {
+      scrubbingRef.current = false;
+      onSeek(us, true);
+      onDragChange(null);
+    }, 140);
+  }, [committedTotal, onDragChange, onSeek, pxPerSecond]);
 
   const applyDrag = useCallback(
     (clientX: number) => {
       const current = dragRef.current;
       if (!current) return;
-      const time = toTime(clientX);
-
-      if (current.type === 'playhead') {
-        onSeek(Math.min(time, Math.max(0, committedTotal)), false);
-        return;
-      }
-
-      const delta = (time - current.grabTime) * current.speed;
+      const delta = (toTime(clientX) - current.grabTime) * current.speed;
       const next: TrimDraft =
         current.edge === 'in'
           ? {
@@ -237,45 +335,12 @@ export function TimelineEditor({
         scrubSourceTime: current.edge === 'in' ? next.sourceIn : Math.max(next.sourceIn, next.sourceOut - 40_000),
       });
     },
-    [committedTotal, onDragChange, onSeek, toTime],
+    [onDragChange, toTime],
   );
-
-  /**
-   * Edge auto-scroll, for playhead drags only.
-   *
-   * Deliberately not applied to trims. It is the mechanism that made a stationary finger
-   * keep trimming: scrolling changes the time under the finger, and a trim that responds
-   * to that changes the scroll range in turn. A playhead drag has no such loop — it reads
-   * the position and writes nothing that affects it.
-   */
-  useEffect(() => {
-    if (drag?.type !== 'playhead') return;
-    let frame = 0;
-
-    const tick = () => {
-      frame = requestAnimationFrame(tick);
-      const scroller = scrollerRef.current;
-      if (!scroller) return;
-
-      const rect = scroller.getBoundingClientRect();
-      const x = pointerXRef.current;
-      let delta = 0;
-      if (x < rect.left + AUTOSCROLL_MARGIN) delta = -edgeSpeed(rect.left + AUTOSCROLL_MARGIN - x);
-      else if (x > rect.right - AUTOSCROLL_MARGIN) delta = edgeSpeed(x - (rect.right - AUTOSCROLL_MARGIN));
-      if (delta === 0) return;
-
-      const before = scroller.scrollLeft;
-      scroller.scrollLeft = clamp(before + delta, 0, scroller.scrollWidth - scroller.clientWidth);
-      if (scroller.scrollLeft !== before) applyDrag(x);
-    };
-
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [drag, applyDrag]);
 
   const startDrag = useCallback(
     (event: React.PointerEvent, kind: DragKind) => {
-      if (frozen && kind.type === 'trim') return;
+      if (frozen) return;
       event.preventDefault();
       event.stopPropagation();
       (event.target as Element).setPointerCapture?.(event.pointerId);
@@ -284,36 +349,27 @@ export function TimelineEditor({
       // is drawn. The hit area is 44px around a 12px grip, so pressing near its edge used
       // to charge the drag ~20px of offset before the finger had moved at all — around a
       // second of footage at a typical zoom, applied the instant the gesture started.
-      const anchored: DragKind =
-        kind.type === 'trim' ? { ...kind, grabTime: toTime(event.clientX) } : kind;
+      const anchored: DragKind = { ...kind, grabTime: toTime(event.clientX) };
 
       dragRef.current = anchored;
       draftRef.current = null;
-      pointerXRef.current = event.clientX;
       setDrag(anchored);
       setDraft(null);
-
-      if (anchored.type === 'playhead') {
-        onDragChange({ kind: 'playhead' });
-        applyDrag(event.clientX);
-      } else {
-        // No `applyDrag` here. The finger is somewhere inside a 44px target around a 12px
-        // handle, so acting on pointerdown would nudge the cut before the user moved.
-        onDragChange({
-          kind: 'trim',
-          scrubSourceTime:
-            anchored.edge === 'in' ? anchored.originIn : Math.max(anchored.originIn, anchored.originOut - 40_000),
-        });
-      }
+      // No `applyDrag` here. The finger is somewhere inside a 44px target around a 12px
+      // handle, so acting on pointerdown would nudge the cut before the user moved.
+      onDragChange({
+        kind: 'trim',
+        scrubSourceTime:
+          anchored.edge === 'in' ? anchored.originIn : Math.max(anchored.originIn, anchored.originOut - 40_000),
+      });
     },
-    [applyDrag, frozen, onDragChange, toTime],
+    [frozen, onDragChange, toTime],
   );
 
   const moveDrag = useCallback(
     (event: React.PointerEvent) => {
       if (!dragRef.current) return;
       event.preventDefault();
-      pointerXRef.current = event.clientX;
       applyDrag(event.clientX);
     },
     [applyDrag],
@@ -332,20 +388,17 @@ export function TimelineEditor({
       setDraft(null);
       onDragChange(null);
 
-      if (current.type === 'playhead') {
-        onSeek(toTime(event.clientX), true);
-      } else if (pending) {
-        // One op for the whole gesture, then park the playhead on the edge that was just
-        // set — so releasing leaves you looking at the cut you made.
-        onTrimCommit(current.clipId, pending.sourceIn, pending.sourceOut);
-        const length = Math.round((pending.sourceOut - pending.sourceIn) / current.speed);
-        onSeek(
-          current.edge === 'in' ? current.originStart : Math.max(current.originStart, current.originStart + length - 40_000),
-          true,
-        );
-      }
+      if (!pending) return;
+      // One op for the whole gesture, then park the playhead on the edge that was just
+      // set — so releasing leaves you looking at the cut you made.
+      onTrimCommit(current.clipId, pending.sourceIn, pending.sourceOut);
+      const length = Math.round((pending.sourceOut - pending.sourceIn) / current.speed);
+      onSeek(
+        current.edge === 'in' ? current.originStart : Math.max(current.originStart, current.originStart + length - 40_000),
+        true,
+      );
     },
-    [onDragChange, onSeek, onTrimCommit, toTime],
+    [onDragChange, onSeek, onTrimCommit],
   );
 
   const zoom = (factor: number) => {
@@ -353,12 +406,13 @@ export function TimelineEditor({
     const anchor = playhead;
     setPxPerSecond((previous) => {
       const next = clamp(previous * factor, MIN_PPS, MAX_PPS);
+      // Zoom around the playhead — it is where the user is looking — which with a fixed
+      // playhead means holding `scrollLeft` on the same instant at the new scale.
       if (scroller) {
-        // Zoom around the playhead: it is where the user is looking, and zooming away
-        // from it means re-finding your place.
         requestAnimationFrame(() => {
-          const x = (anchor / 1_000_000) * next + EDGE_PAD;
-          scroller.scrollLeft = Math.max(0, x - scroller.clientWidth / 2);
+          const target = Math.max(0, Math.round((anchor / 1_000_000) * next));
+          expectedRef.current = target;
+          scroller.scrollLeft = target;
         });
       }
       return next;
@@ -367,6 +421,7 @@ export function TimelineEditor({
 
   const selected = clips.find((c) => c.id === selectedClipId) ?? null;
   const selectedSource = selected ? sources.find((s) => s.id === selected.sourceId) ?? null : null;
+  const bubbles = clusterBubbles(previews, accepted, pxPerSecond);
 
   return (
     <section className="timeline" aria-label="Timeline">
@@ -384,15 +439,50 @@ export function TimelineEditor({
         </button>
       </div>
 
+      {/*
+        A wrapper so the playhead can be pinned to the middle of the *scroller* without
+        scrolling with its contents. It has to be a sibling of the scrolled element rather
+        than a child, or it moves with the footage — which is the one thing it must not do.
+      */}
+      <div className="timeline-viewport">
       <div
         className={drag ? 'timeline-scroller dragging' : 'timeline-scroller'}
         ref={scrollerRef}
+        onScroll={onScroll}
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
         <div className="timeline-content" style={{ width: contentWidth }}>
-          <Ruler total={committedTotal} pxPerSecond={pxPerSecond} onScrub={startDrag} />
+          <Ruler
+            total={committedTotal}
+            pxPerSecond={pxPerSecond}
+            offset={halfWidth}
+            onTap={(us) => {
+              onSeek(us, true);
+              scrollToTime(us, true);
+            }}
+          />
+
+          {bubbles.length > 0 && (
+            <div className="bubbles">
+              {bubbles.map((bubble) => (
+                <button
+                  key={bubble.key}
+                  className={bubbleClass(bubble)}
+                  style={{ left: toX(bubble.atUs) }}
+                  onClick={() => onOpenSuggestion(bubble.indices[0]!)}
+                  aria-label={
+                    bubble.indices.length > 1
+                      ? `${bubble.indices.length} suggestions here`
+                      : bubble.headline
+                  }
+                >
+                  <span aria-hidden="true">{bubble.indices.length > 1 ? bubble.indices.length : bubble.glyph}</span>
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="timeline-lane" onPointerDown={() => onSelect(null)}>
             {clips.map((clip, index) => (
@@ -421,22 +511,33 @@ export function TimelineEditor({
             )}
           </div>
 
-          <div className="playhead" style={{ left: toX(playhead) }} aria-hidden="true">
-            <div className="playhead-line" />
-          </div>
-          {/* Its own element so the 44px grab target never overlaps a clip's tap area. */}
-          <div
-            className={drag?.type === 'playhead' ? 'playhead-grip active' : 'playhead-grip'}
-            style={{ left: toX(playhead) }}
-            onPointerDown={(event) => startDrag(event, { type: 'playhead' })}
-            role="slider"
-            aria-label="Playhead"
-            aria-valuemin={0}
-            aria-valuemax={committedTotal}
-            aria-valuenow={playhead}
-            tabIndex={0}
-          />
         </div>
+      </div>
+
+      {/*
+        Pinned to the middle of the viewport. The playhead is no longer a thing on the
+        timeline that can be at the wrong place — it is a mark on the screen, and the
+        timeline moves behind it.
+      */}
+      <div
+        className="playhead"
+        role="slider"
+        aria-label="Playhead"
+        aria-valuemin={0}
+        aria-valuemax={committedTotal}
+        aria-valuenow={playhead}
+        aria-orientation="horizontal"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          const step = event.shiftKey ? 1_000_000 : 100_000;
+          if (event.key === 'ArrowLeft') onSeek(Math.max(0, playhead - step), true);
+          else if (event.key === 'ArrowRight') onSeek(Math.min(committedTotal, playhead + step), true);
+          else return;
+          event.preventDefault();
+        }}
+      >
+        <div className="playhead-line" />
+      </div>
       </div>
     </section>
   );
@@ -445,22 +546,31 @@ export function TimelineEditor({
 function Ruler({
   total,
   pxPerSecond,
-  onScrub,
+  offset,
+  onTap,
 }: {
   total: number;
   pxPerSecond: number;
-  onScrub(event: React.PointerEvent, kind: DragKind): void;
+  offset: number;
+  onTap(us: number): void;
 }) {
   const step = tickInterval(pxPerSecond);
   const ticks: number[] = [];
   for (let t = 0; t <= total; t += step) ticks.push(t);
 
   return (
-    // Scrubbing anywhere on the ruler grabs the playhead, which is how every editor
-    // behaves and saves aiming for the grip itself.
-    <div className="ruler" onPointerDown={(event) => onScrub(event, { type: 'playhead' })}>
+    // Dragging the ruler pans the lane like everything else; a *tap* brings that instant
+    // to the middle. Both gestures land the playhead somewhere you pointed at, which is
+    // the only thing the old drag-the-grip version was really for.
+    <div
+      className="ruler"
+      onClick={(event) => {
+        const box = event.currentTarget.getBoundingClientRect();
+        onTap(Math.max(0, Math.round(((event.clientX - box.left - offset) / pxPerSecond) * 1_000_000)));
+      }}
+    >
       {ticks.map((t) => (
-        <span key={t} className="tick" style={{ left: (t / 1_000_000) * pxPerSecond + EDGE_PAD }}>
+        <span key={t} className="tick" style={{ left: (t / 1_000_000) * pxPerSecond + offset }}>
           {formatTimecode(t, undefined, { compact: true }).replace(/\.\d+$/, '')}
         </span>
       ))}
@@ -609,15 +719,81 @@ function TrimHandles({
   );
 }
 
+/**
+ * Suggestion bubbles, merged where they would overlap.
+ *
+ * A refinement pass over a nine-minute assembly can return forty suggestions, and at a
+ * zoom where the whole edit fits on a phone screen most of them land within a few pixels
+ * of each other. Drawing them all produces a smear that can neither be read nor tapped, so
+ * anything within a thumb's width becomes one bubble carrying a count. The full list is
+ * always a tap away, which is what that count is for.
+ */
+interface Bubble {
+  key: string;
+  atUs: number;
+  indices: number[];
+  glyph: string;
+  headline: string;
+  accepted: boolean;
+  stale: boolean;
+}
+
+export function clusterBubbles(previews: OpPreview[], accepted: boolean[], pxPerSecond: number): Bubble[] {
+  const gapUs = (BUBBLE_CLUSTER_PX / Math.max(1, pxPerSecond)) * 1_000_000;
+  const sorted = [...previews].sort((a, b) => a.anchorUs - b.anchorUs);
+  const out: Bubble[] = [];
+
+  for (const preview of sorted) {
+    const last = out.at(-1);
+    if (last && preview.anchorUs - last.atUs <= gapUs) {
+      last.indices.push(preview.index);
+      // A cluster counts as accepted only when all of it is — a half-ticked group that
+      // looked settled would be the one thing worse than no indicator at all.
+      last.accepted = last.accepted && (accepted[preview.index] ?? false);
+      last.stale = last.stale || !preview.applicable;
+      continue;
+    }
+    out.push({
+      key: `bubble-${preview.index}`,
+      atUs: preview.anchorUs,
+      indices: [preview.index],
+      glyph: glyphFor(preview),
+      headline: preview.headline,
+      accepted: accepted[preview.index] ?? false,
+      stale: !preview.applicable,
+    });
+  }
+
+  return out;
+}
+
+function glyphFor(preview: OpPreview): string {
+  switch (preview.op.op) {
+    case 'trim':
+      return '✂';
+    case 'setSpeed':
+      return '»';
+    case 'remove':
+    case 'setEnabled':
+      return '⊘';
+    case 'addEffect':
+      return '⊙';
+    case 'split':
+      return '⌇';
+    default:
+      return '•';
+  }
+}
+
+function bubbleClass(bubble: Bubble): string {
+  return ['bubble', bubble.accepted ? 'accepted' : '', bubble.stale ? 'stale' : ''].filter(Boolean).join(' ');
+}
+
 /** Tick spacing that keeps labels at least ~64px apart at the current zoom. */
 function tickInterval(pxPerSecond: number): number {
   const candidates = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
   const seconds = candidates.find((c) => c * pxPerSecond >= 64) ?? candidates.at(-1)!;
   return seconds * 1_000_000;
-}
-
-function edgeSpeed(overshoot: number): number {
-  return Math.min(AUTOSCROLL_MAX_PPF, Math.max(2, overshoot / 3));
 }
 
 function clamp(value: number, min: number, max: number): number {

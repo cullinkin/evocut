@@ -18,4 +18,5 @@ export * from './validate.js';
 export * from './factory.js';
 export * from './digest.js';
 export * from './describe.js';
+export * from './review.js';
 export * from './jsonschema.js';

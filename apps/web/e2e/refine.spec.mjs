@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport } from './harness.mjs';
+import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport, scrubTo } from './harness.mjs';
 
 /**
  * The refinement pass against a model, with the API intercepted.
@@ -49,8 +49,7 @@ await page.locator('text=Choose a video').waitFor();
 await page.setInputFiles('input[type=file]', clip);
 await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
 
-const ruler = await page.locator('.ruler').boundingBox();
-await page.mouse.click(ruler.x + ruler.width * 0.42, ruler.y + ruler.height / 2);
+await scrubTo(page, 0.42);
 await page.locator('button[aria-label="Cut at playhead"]').click();
 await page.waitForTimeout(300);
 
@@ -66,18 +65,24 @@ await page.waitForTimeout(300);
 
 // --- No key: the local heuristics, not an error ------------------------------------
 await page.locator('button:has-text("Refine")').click();
-await page.locator('.proposal').first().waitFor({ timeout: 10000 });
-check('worksWithNoKeyConfigured', (await page.locator('.proposal').count()) > 0, true);
-check('saysWhoSuggestedIt', await page.locator('header .meta').innerText(), 'Suggested by the built-in heuristics');
+await page.locator('.sheet').waitFor({ timeout: 10000 });
+check('saysItWillUseTheHeuristics', await page.locator('.sheet-actions .primary').innerText(), 'Suggest edits');
+await page.locator('.sheet-actions .primary').click();
+await page.locator('.bubble').first().waitFor({ timeout: 10000 });
+check('worksWithNoKeyConfigured', (await page.locator('.bubble').count()) > 0, true);
 check('noApiCallWithoutAKey', sent.length, 0);
-await page.locator('.review-actions .ghost').click(); // discard
-await page.locator('.timeline').waitFor({ timeout: 10000 });
 
-// --- Configure a key and a brief ---------------------------------------------------
+await page.locator('header .primary').click();
+await page.locator('.review').waitFor({ timeout: 10000 });
+check('saysWhoSuggestedIt', /built-in heuristics/.test(await page.locator('.sheet-count').innerText()), true);
+await page.locator('.review-actions .ghost.danger').click(); // discard the pass
+await page.waitForTimeout(400);
+check('discardingClearsTheBubbles', await page.locator('.bubble').count(), 0);
+
+// --- Configure a key -----------------------------------------------------------------
 await page.locator('footer button[aria-label="Settings"]').click();
 await page.locator('.settings').waitFor();
 await page.locator('.field input[type=password]').fill('sk-ant-test-key');
-await page.locator('.field textarea').fill('Punchy. Hold on the hits, cut the dead air.');
 await page.locator('.settings-actions .primary').click();
 await page.locator('.timeline').waitFor({ timeout: 10000 });
 
@@ -127,9 +132,13 @@ reply = {
   },
 };
 
-// --- Refine, for real --------------------------------------------------------------
+// --- Refine, for real: the brief and the target are asked for here, per video --------
 await page.locator('button:has-text("Refine")').click();
-await page.locator('.proposal').first().waitFor({ timeout: 30000 });
+await page.locator('.sheet').waitFor({ timeout: 10000 });
+await page.locator('.sheet textarea').fill('Punchy. Hold on the hits, cut the dead air.');
+await page.locator('.sheet input[type=text]').fill('0:09');
+await page.locator('.sheet-actions .primary').click();
+await page.locator('.bubble').first().waitFor({ timeout: 30000 });
 
 // Two calls, not one: the third op in the canned reply never applies, so the repair round
 // fires. That is the loop working, not a bug — and the stub answers identically both
@@ -151,6 +160,10 @@ check('adaptiveThinking', request.body.thinking, { type: 'adaptive' });
 // The two claims the app makes to the user, checked on the wire.
 check('promptCarriesTheSignals', /Signals measured from the footage/.test(prompt), true);
 check('promptCarriesTheBrief', prompt.includes('Punchy. Hold on the hits'), true);
+// The target is arithmetic, not atmosphere: the model is told the number, the current
+// length, and the gap, because those are what let it check its own work.
+check('promptCarriesTheTarget', /Target length: .*\(9000000us\)/.test(prompt), true);
+check('promptSaysHowFarOver', /which is .* (over|under)/.test(prompt), true);
 check(
   'noFootageLeftTheDevice',
   !/"type"\s*:\s*"(image|document)"/.test(JSON.stringify(request.body)) &&
@@ -160,7 +173,9 @@ check(
 set('promptHead', prompt.slice(0, 200).replace(/\s+/g, ' '));
 
 // --- What came back -----------------------------------------------------------------
-check('modelNamedInHeader', await page.locator('header .meta').innerText(), 'Suggested by claude-opus-5');
+await page.locator('header .primary').click();
+await page.locator('.review').waitFor({ timeout: 10000 });
+check('modelNamedInTheList', /claude-opus-5/.test(await page.locator('.sheet-count').innerText()), true);
 // Three ops proposed, one of them invalid. Two survive.
 check('invalidOpNeverReachedReview', await page.locator('.proposal').count(), 2);
 const rationales = await page.locator('.proposal small').allInnerTexts();
@@ -209,6 +224,8 @@ check('loggedTheDroppedOp', planned?.payload?.rejected, 1);
 // --- A rejected key says so, and says where to fix it --------------------------------
 reply = { status: 401, body: { type: 'error', error: { type: 'authentication_error', message: 'bad key' } } };
 await page.locator('button:has-text("Refine")').click();
+await page.locator('.sheet').waitFor({ timeout: 10000 });
+await page.locator('.sheet-actions .primary').click();
 await page.locator('.error').waitFor({ timeout: 30000 });
 check('badKeyExplainsTheFix', await page.locator('.error').innerText(), 'That API key was rejected. Check it in Settings.');
 

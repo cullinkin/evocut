@@ -1,40 +1,71 @@
-import { describeOp, type RefinementPlan, type Timeline } from '@evocut/edl';
+import { formatTimecode, type OpPreview } from '@evocut/edl';
 
 /**
- * The refinement review screen.
+ * Every suggestion in one list.
  *
- * This is where usage becomes labelled data, and the design follows from that:
+ * The bubbles on the timeline answer "what is being suggested *here*"; this answers "what
+ * is being suggested at all", and the two are genuinely different questions. A pass that
+ * returns forty edits is unreadable as forty bubbles and perfectly readable as a list with
+ * a running total at the bottom.
  *
- *  - **Nothing starts accepted.** A screen that opens with every box ticked collects
- *    consent, not judgement, and consent is worth nothing as a training label.
- *  - **Every op shows its rationale.** The model's stated reason is the thing being
- *    judged as much as the edit is; an edit with no reason attached cannot be evaluated,
- *    only guessed at.
- *  - **Rejections are recorded, not discarded.** A rejected op leaves no mark on the
- *    timeline, so the verdict is the only trace it ever gets.
+ * This is no longer a screen you have to get through. It used to be modal — the timeline
+ * disappeared, you ticked boxes against text, and one Apply button committed the lot. That
+ * arrangement forced every judgement to be made blind and in one sitting. Now nothing here
+ * is a commitment: each row is a live toggle against the edit behind it, and the list can
+ * be closed and reopened as many times as it takes.
  *
- * One op per row, each independently decidable. Batch buttons exist, but they are
- * secondary — the per-op verdict is the product.
+ * What survives from the old design, because it was right:
+ *
+ *  - **Nothing starts accepted.** A list that opens pre-ticked collects consent, not
+ *    judgement, and consent is worth nothing as a training label.
+ *  - **Every suggestion shows its rationale.** The model's stated reason is being judged
+ *    as much as the edit is.
+ *  - **Rejections are recorded.** A skipped op leaves no mark on the timeline, so the
+ *    verdict is the only trace it will ever have.
  */
 export interface ReviewProps {
-  plan: RefinementPlan;
-  timeline: Timeline;
-  verdicts: Map<number, boolean>;
-  busy: boolean;
+  previews: OpPreview[];
+  accepted: boolean[];
+  failures: Map<number, string>;
+  by: 'model' | 'heuristics';
+  model: string | null;
+  summary: string | null;
+  /** Where the edit stands against its target, if one is set. */
+  standing: string;
+  onOpen(index: number): void;
   onVerdict(index: number, accepted: boolean): void;
   onAll(accepted: boolean): void;
-  onApply(): void;
+  onFinish(): void;
   onDiscard(): void;
+  onClose(): void;
 }
 
-export function Review({ plan, timeline, verdicts, busy, onVerdict, onAll, onApply, onDiscard }: ReviewProps) {
-  const acceptedCount = [...verdicts.values()].filter(Boolean).length;
+export function Review({
+  previews,
+  accepted,
+  failures,
+  by,
+  model,
+  summary,
+  standing,
+  onOpen,
+  onVerdict,
+  onAll,
+  onFinish,
+  onDiscard,
+  onClose,
+}: ReviewProps) {
+  const keptCount = accepted.filter(Boolean).length;
+  const keptUs = previews.reduce(
+    (total, preview, index) => total + (accepted[index] && preview.applicable ? preview.deltaUs : 0),
+    0,
+  );
 
-  if (plan.ops.length === 0) {
+  if (previews.length === 0) {
     return (
-      <section className="review">
+      <section className="sheet review" role="dialog" aria-label="All suggestions">
         <h2>Nothing to change</h2>
-        <p className="lede">{plan.summary}</p>
+        <p className="lede">{summary ?? 'The pass came back with no suggestions.'}</p>
         <button className="primary" onClick={onDiscard}>
           Back to the timeline
         </button>
@@ -43,40 +74,57 @@ export function Review({ plan, timeline, verdicts, busy, onVerdict, onAll, onApp
   }
 
   return (
-    <section className="review">
-      <h2>Suggested edits</h2>
-      {plan.summary && <p className="lede">{plan.summary}</p>}
+    <section className="sheet review" role="dialog" aria-label="All suggestions">
+      <div className="sheet-head">
+        <button className="ghost small" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
+        <span className="sheet-count">
+          {previews.length} {previews.length === 1 ? 'suggestion' : 'suggestions'} ·{' '}
+          {by === 'model' ? model ?? 'a model' : 'built-in heuristics'}
+        </span>
+      </div>
+
+      {summary && <p className="lede">{summary}</p>}
 
       <div className="review-bulk">
         <button className="ghost" onClick={() => onAll(true)}>
-          Accept all
+          Keep all
         </button>
         <button className="ghost" onClick={() => onAll(false)}>
-          Reject all
+          Skip all
         </button>
       </div>
 
       <ol className="proposals">
-        {plan.ops.map((op, index) => {
-          const accepted = verdicts.get(index) ?? false;
+        {previews.map((preview, index) => {
+          const on = accepted[index] ?? false;
+          const failure = failures.get(index);
           return (
-            <li key={index} className={accepted ? 'proposal accepted' : 'proposal'}>
-              <div className="proposal-body">
-                <strong>{describeOp(op, timeline)}</strong>
-                {op.rationale && <small>{op.rationale}</small>}
-              </div>
+            <li key={index} className={['proposal', on ? 'accepted' : '', failure ? 'stale' : ''].filter(Boolean).join(' ')}>
+              <button className="proposal-body" onClick={() => onOpen(index)}>
+                <strong>{preview.headline}</strong>
+                <span className="proposal-at">
+                  at {formatTimecode(preview.anchorUs, undefined, { compact: true })}
+                  {preview.deltaUs !== 0 && ` · ${preview.deltaUs > 0 ? '+' : ''}${(preview.deltaUs / 1_000_000).toFixed(2)}s`}
+                </span>
+                {preview.op.rationale && <small>{preview.op.rationale}</small>}
+                {failure && <small className="warning">No longer applies: {failure}</small>}
+              </button>
               <div className="proposal-verdict">
                 <button
-                  className={accepted ? 'verdict on' : 'verdict'}
+                  className={on ? 'verdict on' : 'verdict'}
                   onClick={() => onVerdict(index, true)}
-                  aria-pressed={accepted}
+                  aria-pressed={on}
+                  aria-label={`Keep suggestion ${index + 1}`}
                 >
                   Keep
                 </button>
                 <button
-                  className={accepted ? 'verdict' : 'verdict on'}
+                  className={on ? 'verdict' : 'verdict on'}
                   onClick={() => onVerdict(index, false)}
-                  aria-pressed={!accepted}
+                  aria-pressed={!on}
+                  aria-label={`Skip suggestion ${index + 1}`}
                 >
                   Skip
                 </button>
@@ -86,22 +134,26 @@ export function Review({ plan, timeline, verdicts, busy, onVerdict, onAll, onApp
         })}
       </ol>
 
+      <p className="meta">
+        Keeping {keptCount} of {previews.length}
+        {keptUs !== 0 && `, ${keptUs < 0 ? 'saving' : 'adding'} ${formatTimecode(Math.abs(keptUs), undefined, { compact: true })}`}
+        {' · '}
+        {standing}
+      </p>
+
       <div className="review-actions">
-        <button className="ghost" onClick={onDiscard} disabled={busy}>
-          Cancel
+        {/*
+          Finishing with nothing kept is a real outcome, not a no-op: it records that a
+          human saw these suggestions and wanted none of them, which is a stronger signal
+          than never having asked. Discarding throws the verdicts away with them.
+        */}
+        <button className="ghost danger" onClick={onDiscard}>
+          Discard the pass
         </button>
-        <button className="primary" onClick={onApply} disabled={busy}>
-          {acceptedCount === 0
-            ? 'Reject the whole pass'
-            : `Apply ${acceptedCount} of ${plan.ops.length}`}
+        <button className="primary" onClick={onFinish}>
+          {keptCount === 0 ? 'Done — kept none' : `Done — kept ${keptCount}`}
         </button>
       </div>
-
-      {/*
-        Applying with nothing accepted is a real outcome, not a no-op: it records that a
-        human saw these suggestions and wanted none of them, which is a stronger signal
-        than never having asked.
-      */}
     </section>
   );
 }

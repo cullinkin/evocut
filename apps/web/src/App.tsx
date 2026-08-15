@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { formatTimecode, timelineDuration } from '@evocut/edl';
+import { formatTimecode, lengthStanding, timelineDuration } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
+import { BriefSheet } from './Brief.tsx';
 import { ExportPanel } from './Export.tsx';
 import { SettingsScreen } from './Settings.tsx';
 import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
+import { SuggestionSheet } from './Suggestion.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
 import { downloadLog, downloadProject, useSession } from './session.ts';
 
@@ -21,6 +23,10 @@ export function App() {
   const [playing, setPlaying] = useState(false);
   const [drag, setDrag] = useState<TimelineDragState | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showBrief, setShowBrief] = useState(false);
+  const [showList, setShowList] = useState(false);
+  /** Index of the suggestion whose sheet is open, or null. */
+  const [openSuggestion, setOpenSuggestion] = useState<number | null>(null);
 
   const onTime = useCallback((t: number) => session.seek(t, false), [session]);
   const onEnded = useCallback(() => setPlaying(false), []);
@@ -82,7 +88,8 @@ export function App() {
     );
   }
 
-  const { project, playhead, plan } = session;
+  const { project, playhead, review, previews } = session;
+  const open = openSuggestion === null ? null : previews[openSuggestion] ?? null;
   const clips = project.timeline.tracks[0]?.clips ?? [];
   const kept = clips.filter((clip) => clip.enabled);
   const total = timelineDuration(project.timeline);
@@ -112,36 +119,6 @@ export function App() {
     );
   }
 
-  if (plan) {
-    return (
-      <main className="shell">
-        <header>
-          <button className="ghost" onClick={session.discardReview} aria-label="Back">
-            ←
-          </button>
-          <div className="title">
-            <h1>{project.name}</h1>
-            <p className="meta">
-              {session.refinedBy === 'model'
-                ? `Suggested by ${session.settings.model}`
-                : 'Suggested by the built-in heuristics'}
-            </p>
-          </div>
-        </header>
-        <Review
-          plan={plan}
-          timeline={project.timeline}
-          verdicts={session.verdicts}
-          busy={session.busy}
-          onVerdict={session.setVerdict}
-          onAll={session.setAllVerdicts}
-          onApply={session.applyReview}
-          onDiscard={session.discardReview}
-        />
-      </main>
-    );
-  }
-
   return (
     <main className="shell editor">
       <header>
@@ -152,7 +129,9 @@ export function App() {
           <h1>{project.name}</h1>
           <p className="meta">
             {kept.length} {kept.length === 1 ? 'clip' : 'clips'} ·{' '}
-            {formatTimecode(total, undefined, { compact: true })}
+            {project.targetDurationUs
+              ? lengthStanding(project.timeline, project.targetDurationUs).label
+              : formatTimecode(total, undefined, { compact: true })}
             {!session.persistent && ' · not saved'}
             {/*
               Worth saying out loud: the refinement pass is meaningfully better once the
@@ -165,8 +144,12 @@ export function App() {
               }`}
           </p>
         </div>
-        {frozen ? (
-          <button className="primary small" onClick={session.requestRefinement} disabled={session.refining}>
+        {review ? (
+          <button className="primary small" onClick={() => setShowList(true)}>
+            {previews.filter((_, i) => review.accepted[i]).length}/{previews.length} kept
+          </button>
+        ) : frozen ? (
+          <button className="primary small" onClick={() => setShowBrief(true)} disabled={session.refining}>
             {session.refining ? 'Thinking…' : 'Refine'}
           </button>
         ) : (
@@ -236,10 +219,13 @@ export function App() {
         playhead={playhead}
         selectedClipId={session.selectedClipId}
         frozen={frozen}
+        previews={previews}
+        accepted={review?.accepted ?? []}
         onSeek={session.seek}
         onSelect={session.select}
         onTrimCommit={session.commitTrim}
         onDragChange={setDrag}
+        onOpenSuggestion={setOpenSuggestion}
       />
 
       <nav className="toolbar" aria-label="Editing tools">
@@ -269,6 +255,73 @@ export function App() {
           <small>Delete</small>
         </button>
       </nav>
+
+      {showBrief && (
+        <BriefSheet
+          brief={project.brief ?? ''}
+          targetDurationUs={project.targetDurationUs ?? null}
+          currentUs={total}
+          busy={session.refining}
+          hasKey={Boolean(session.settings.apiKey)}
+          model={session.settings.model}
+          onRun={(brief, target) => {
+            // Saved *and* passed. The save is what persists it for next time; the argument
+            // is what steers this run, because a `setProject` has not committed yet.
+            session.saveBrief(brief, target);
+            session.requestRefinement({ brief, targetDurationUs: target });
+            setShowBrief(false);
+          }}
+          onClose={() => setShowBrief(false)}
+        />
+      )}
+
+      {review && openSuggestion !== null && open && (
+        <SuggestionSheet
+          preview={open}
+          index={openSuggestion}
+          count={previews.length}
+          accepted={review.accepted[openSuggestion] ?? false}
+          source={project.sources.find((source) => source.id === open.before?.sourceId) ?? null}
+          mediaUrl={session.mediaUrls.get(open.before?.sourceId ?? '') ?? null}
+          totalUs={total}
+          standing={lengthStanding(project.timeline, project.targetDurationUs).label}
+          failure={session.reviewFailures.get(openSuggestion) ?? null}
+          onVerdict={(accepted) => session.setVerdict(openSuggestion, accepted)}
+          onStep={(delta) =>
+            setOpenSuggestion((current) =>
+              current === null ? null : (current + delta + previews.length) % previews.length,
+            )
+          }
+          onClose={() => setOpenSuggestion(null)}
+        />
+      )}
+
+      {review && showList && (
+        <Review
+          previews={previews}
+          accepted={review.accepted}
+          failures={session.reviewFailures}
+          by={review.by}
+          model={review.model ?? null}
+          summary={review.summary ?? null}
+          standing={lengthStanding(project.timeline, project.targetDurationUs).label}
+          onOpen={(index) => {
+            setShowList(false);
+            setOpenSuggestion(index);
+          }}
+          onVerdict={session.setVerdict}
+          onAll={session.setAllVerdicts}
+          onFinish={() => {
+            session.finishReview();
+            setShowList(false);
+          }}
+          onDiscard={() => {
+            session.discardReview();
+            setShowList(false);
+          }}
+          onClose={() => setShowList(false)}
+        />
+      )}
 
       {selected && (
         <p className="selection-hint">

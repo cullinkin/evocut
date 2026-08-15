@@ -15,15 +15,21 @@ export interface RefinementSettings {
   model: string;
   /** Empty means "whatever the API defaults to" rather than a level we picked. */
   effort: '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-  /** Free-text steer, in the user's own words. Rides into every prompt. */
-  brief: string;
 }
+
+/*
+  The style brief used to live here and now lives on the project.
+
+  It was the wrong home in a way that only shows up on the second video: a booster bundle
+  and a twenty-minute build log want opposite things from the same model, and a
+  device-wide brief silently applies the first one's answer to every project after it. The
+  key belongs to the phone; what a video is meant to be belongs to the video.
+*/
 
 export const EMPTY_SETTINGS: RefinementSettings = {
   apiKey: '',
   model: DEFAULT_MODEL,
   effort: '',
-  brief: '',
 };
 
 const KEY = 'refinement';
@@ -61,7 +67,7 @@ export function useSettings(stores: AppStores): SettingsState {
 
   const save = useCallback(
     async (next: RefinementSettings) => {
-      const trimmed = { ...next, apiKey: next.apiKey.trim(), brief: next.brief.trim() };
+      const trimmed = { ...next, apiKey: next.apiKey.trim() };
       setSettings(trimmed);
       await stores.settings.set(KEY, trimmed);
     },

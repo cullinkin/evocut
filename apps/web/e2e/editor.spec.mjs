@@ -1,4 +1,4 @@
-import { APP_URL, artifact, centre, ensureClip, exportEdl, launch, makeReport, touchDrag } from './harness.mjs';
+import { APP_URL, artifact, centre, ensureClip, exportEdl, launch, makeReport, touchDrag, scrubTo } from './harness.mjs';
 
 /**
  * The editing gestures, on an iPhone profile, driven by real touch events.
@@ -38,7 +38,7 @@ check('toolbarWithinViewport', toolbar.y + toolbar.height <= profile.viewport.he
 check(
   'targetsBelow44px',
   await page.evaluate(() =>
-    [...document.querySelectorAll('.toolbar button, .transport button, .playhead-grip, .trim-handle')]
+    [...document.querySelectorAll('.toolbar button, .transport button, .trim-handle')]
       .map((el) => ({ cls: el.className, h: Math.round(el.getBoundingClientRect().height) }))
       .filter((t) => t.h < 44),
   ),
@@ -98,14 +98,27 @@ await page.waitForFunction(() => document.querySelectorAll('.clip-thumbs img').l
 set('thumbnailsRendered', await page.locator('.clip-thumbs img').count());
 await page.screenshot({ path: artifact('iphone-editor.png') });
 
-// --- Drag the playhead ----------------------------------------------------------
-const grip = await centre(page.locator('.playhead-grip'));
-const scroller = await page.locator('.timeline-scroller').boundingBox();
-await touchDrag(cdp, page, grip, { x: scroller.x + scroller.width * 0.5, y: grip.y });
+// --- Scroll the lane to move the playhead ---------------------------------------
+// The playhead does not move any more; the footage moves under it. A real single-finger
+// pan across the lane is the gesture, and `touch-action: pan-x` is what lets the browser
+// treat it as a scroll rather than as a tap that went slightly wrong.
+const lane = await centre(page.locator('.timeline-scroller'));
+await touchDrag(cdp, page, lane, { x: lane.x - lane.box.width * 0.3, y: lane.y });
+await page.waitForTimeout(400);
 
 const clock = await page.locator('.timeline-clock').innerText();
-set('clockAfterPlayheadDrag', clock);
-check('playheadMoved', clock !== '0:00.000', true);
+set('clockAfterScrub', clock);
+check('scrollingMovedThePlayhead', clock !== '0:00.000', true);
+// The mark itself stays put: that is the whole design, and a playhead that drifted would
+// mean the time under it and the time in `scrollLeft` had come apart.
+const playheadX = await page.evaluate(() => {
+  const el = document.querySelector('.playhead');
+  const track = document.querySelector('.timeline-scroller');
+  return Math.round(el.getBoundingClientRect().left - track.getBoundingClientRect().left);
+});
+const halfLane = Math.round((await page.locator('.timeline-scroller').boundingBox()).width / 2);
+set('playheadOffsetFromLaneCentre', playheadX - halfLane);
+check('playheadStayedCentred', Math.abs(playheadX - halfLane) <= 2, true);
 
 // --- Cut at the playhead --------------------------------------------------------
 await page.locator('button[aria-label="Cut at playhead"]').click();
@@ -118,9 +131,7 @@ check('clipsAfterCut', await page.locator('.clip-block').count(), 2);
 // `sourceToTimeline` returns null there, and the loop used to read that as "nothing to
 // report" — the playhead stopped while the video played on underneath.
 {
-  const box = await page.locator('.timeline-scroller').boundingBox();
-  await page.mouse.click(box.x + box.width * 0.8, box.y + 14); // land inside clip 2
-  await page.waitForTimeout(300);
+  await scrubTo(page, 0.8); // land inside clip 2
   const parked = await page.locator('.timeline-clock').innerText();
 
   await page.evaluate(() => {
@@ -274,32 +285,33 @@ check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
   check('videoActuallyPlayed', videoAdvanced > 0.3, true);
 }
 
-// --- Dragging the playhead must show the frame it lands on -----------------------
-// It did not: playback kept writing the playhead back from the video's own position
-// every frame, so a drag looked like it did nothing at all.
+// --- Scrubbing must show the frame it lands on, while the finger is still down -----
+// Playback used to write the playhead back from the video's own position every frame, so
+// a scrub looked like it did nothing at all. The preview has to follow the scroll as it
+// happens, not catch up when it stops.
 {
+  await page.locator('button[aria-label="Back to start"]').click();
+  await page.waitForTimeout(300);
   await page.locator('button.play').click(); // start playing
   await page.waitForTimeout(500);
 
   const before = await page.evaluate(() => document.querySelector('.player video').currentTime);
-  const gripNow = await centre(page.locator('.playhead-grip'));
-  const box = await page.locator('.timeline-scroller').boundingBox();
+  const from = await centre(page.locator('.timeline-scroller'));
 
-  // Mid-drag sample: the picture has to follow the finger, not catch up on release.
   await cdp.send('Input.dispatchTouchEvent', {
     type: 'touchStart',
-    touchPoints: [{ x: gripNow.x, y: gripNow.y, id: 1 }],
+    touchPoints: [{ x: from.x, y: from.y, id: 1 }],
   });
   for (let i = 1; i <= 8; i++) {
     await cdp.send('Input.dispatchTouchEvent', {
       type: 'touchMove',
-      touchPoints: [{ x: gripNow.x + ((box.x + box.width * 0.85 - gripNow.x) * i) / 8, y: gripNow.y, id: 1 }],
+      touchPoints: [{ x: from.x - (from.box.width * 0.35 * i) / 8, y: from.y, id: 1 }],
     });
     await page.waitForTimeout(40);
   }
   const midDrag = await page.evaluate(() => document.querySelector('.player video').currentTime);
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(600);
 
   set('videoTimeMidDrag', Number(midDrag.toFixed(2)));
   check('previewTracksTheFingerMidDrag', Math.abs(midDrag - before) > 0.3, true);
@@ -334,12 +346,19 @@ await page.reload();
 await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
 check('clipsAfterReload', await page.locator('.clip-block').count(), 1);
 
-// --- And still reaches the refinement review -------------------------------------
+// --- And still reaches the refinement pass ----------------------------------------
+// Refine now asks what the video is before it asks a model anything, so the brief sheet
+// is the first thing on the path rather than a screen full of proposals.
 await page.locator('button:has-text("Done")').click();
 await page.waitForTimeout(300);
 await page.locator('button:has-text("Refine")').click();
-await page.waitForTimeout(500);
-check('reviewReachable', (await page.locator('.review').count()) > 0, true);
+await page.locator('.sheet').waitFor({ timeout: 10000 });
+check('briefSheetReachable', (await page.locator('.sheet textarea').count()) > 0, true);
+await page.locator('.sheet-actions .primary').click();
+await page.waitForTimeout(1500);
+// A one-clip edit may honestly have nothing to suggest, so what is asserted is that the
+// review opened at all — the header counter is the review's own presence on screen.
+check('reviewOpened', /\d+\/\d+ kept/.test(await page.locator('header .primary').innerText()), true);
 
 const exitCode = finish(errors);
 await browser.close();

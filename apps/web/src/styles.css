@@ -253,6 +253,10 @@ button.play {
   font-size: 14px;
 }
 
+.timeline-viewport {
+  position: relative;
+}
+
 .timeline-scroller {
   position: relative;
   overflow-x: auto;
@@ -447,13 +451,25 @@ button.play {
   pointer-events: none;
 }
 
+/* Pinned to the middle of the timeline, not to a place on it: the lane scrolls under it.
+   `left: 50%` is the same 50% the scroller's padding is derived from, so the time under
+   the mark and the time computed from `scrollLeft` are the same number by construction. */
 .playhead {
   position: absolute;
   top: 0;
   bottom: 0;
+  left: 50%;
   width: 0;
-  pointer-events: none;
   z-index: 5;
+  pointer-events: none;
+}
+
+.playhead:focus-visible {
+  outline: none;
+}
+
+.playhead:focus-visible .playhead-line {
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 .playhead-line {
@@ -464,35 +480,6 @@ button.play {
   width: 2px;
   background: #fff;
   box-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
-}
-
-.playhead-grip {
-  position: absolute;
-  top: 0;
-  width: 44px;
-  height: 44px;
-  margin-left: -22px;
-  touch-action: none;
-  z-index: 6;
-  cursor: grab;
-}
-
-.playhead-grip::before {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 50%;
-  width: 14px;
-  height: 14px;
-  margin-left: -7px;
-  border-radius: 3px;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-}
-
-.playhead-grip.active::before {
-  background: var(--accent);
-  transform: scale(1.2);
 }
 
 /* --- Toolbar --- */
@@ -623,14 +610,11 @@ footer button {
 
 /* --- Review screen --- */
 
+/* The list is a sheet over the editor, like the single-suggestion view: the timeline it
+   is describing has to stay visible, or every judgement becomes a memory test. Layout
+   comes from `.sheet`; what is left here is the list's own rhythm. */
 .review {
-  display: flex;
-  flex-direction: column;
   gap: 12px;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
 }
 
 .review h2 {
@@ -884,4 +868,245 @@ button.ghost.small {
   padding: 0 12px;
   font-size: 13px;
   align-self: flex-start;
+}
+
+
+/* --- Suggestion bubbles --------------------------------------------------------------
+   Word bubbles over the clips they touch. They sit in their own strip above the lane
+   rather than on the clips, because a badge drawn on a clip competes with the clip's own
+   tap target — and on a phone the clip is the thing you are most often trying to hit. */
+.bubbles {
+  position: relative;
+  height: 26px;
+  pointer-events: none;
+}
+
+.bubble {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 13px;
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  z-index: 4;
+}
+
+/* The tap target is bigger than the paint, for the same reason the trim handles' is. */
+.bubble::after {
+  content: '';
+  position: absolute;
+  inset: -9px -6px;
+}
+
+.bubble.accepted {
+  background: var(--accent);
+  color: #04121f;
+  font-weight: 600;
+}
+
+.bubble.stale {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* --- Sheets ---------------------------------------------------------------------------
+   Over the editor rather than instead of it. A suggestion is about a place on the
+   timeline, and a full-screen review that hides the timeline makes every judgement a
+   memory test. */
+/* Centred and capped, so a desktop browser gets a sheet rather than a very wide strip.
+   On a phone `min()` resolves to the full width and nothing changes. */
+.sheet {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(100%, 560px);
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px calc(14px + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.45);
+  max-height: 82vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.sheet h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sheet-count {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.sheet .rationale {
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.sheet-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sheet-actions button {
+  flex: 1;
+  min-height: 46px;
+}
+
+/* --- Before and after -----------------------------------------------------------------
+   Both bars share one scale, in output seconds, so a shorter edit is a shorter bar. That
+   is the whole point of drawing them at all. */
+.compare {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shot-label {
+  flex: 0 0 42px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.shot-track {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.shot-bar {
+  position: relative;
+  height: 46px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #000;
+  /* `flex: 0 0 auto` and `min-width: 0` so the inline percentage width is what decides
+     the length. A flex item defaults to `min-width: auto`, which is its min-content size
+     — six thumbnails wide here — and that floor silently made both bars the same length,
+     which is the one thing this pair of bars exists not to do. */
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.shot-bar img,
+.shot-bar .thumb-placeholder {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shot-bar.empty {
+  width: 64px;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+  background: var(--surface-2, #12181f);
+}
+
+/* Hatched over the frames that go, at the end they go from — so "off the head" and "off
+   the tail" are one glance apart rather than two readings of the same sentence. */
+.shot-cut {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(0, 0, 0, 0.78),
+    rgba(0, 0, 0, 0.78) 5px,
+    rgba(255, 90, 90, 0.55) 5px,
+    rgba(255, 90, 90, 0.55) 10px
+  );
+}
+
+.shot-cut.head {
+  left: 0;
+}
+
+.shot-cut.tail {
+  right: 0;
+}
+
+.shot-length {
+  flex: 0 0 46px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+}
+
+.cost div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cost dt {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cost dd {
+  margin: 0;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.proposal-body {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+}
+
+.proposal-at {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.proposal.stale {
+  border-color: var(--danger);
 }

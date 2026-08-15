@@ -1,4 +1,10 @@
-import { describeProject, refinementToolDefinition, type Project } from '@evocut/edl';
+import {
+  describeProject,
+  formatTimecode,
+  refinementToolDefinition,
+  timelineDuration,
+  type Project,
+} from '@evocut/edl';
 import { describeSignals, type SourceSignals } from '@evocut/signals';
 
 /**
@@ -39,9 +45,20 @@ Using the signals:
 - They are incomplete. Nothing here tells you what is being said, or what is in frame. If
   the signals do not support an edit, do not make it up to fill the gap — leave it out.
 
+When a target length is given:
+- It changes the job. Tightening joins recovers seconds; a target that is minutes away can
+  only be met by dropping whole shots, so drop them. Use setEnabled rather than remove, so
+  the person can put any of them back with one tap.
+- Say which shots you dropped and why those and not others. "Redundant with the shot after
+  it", "nothing happens for the last twenty seconds of it" — the reason is what the person
+  is judging, and on a whole-shot cut it is the only thing they can judge.
+- Do not silently give up on the number. If the signals do not support cutting far enough,
+  get as close as you honestly can and say in your summary how much is left and where you
+  think it has to come from.
+
 What you do not do:
-- Remove a whole clip unless it is plainly redundant with the one next to it — and use
-  setEnabled rather than remove, so the person can put it back.
+- Remove a whole clip unless it is plainly redundant with the one next to it, or a target
+  length requires it — and use setEnabled rather than remove, so the person can put it back.
 - Restore footage the person cut, unless doing so fixes something they clearly missed
   (a sentence cut off mid-word at a clip boundary).
 - Add an effect to every clip. A push-in on every shot is worse than a push-in on none.
@@ -82,6 +99,32 @@ export function buildRefinementPrompt(project: Project, options: RefinementReque
 
   if (options.instruction) {
     sections.push(`The person editing asked for: ${options.instruction}`);
+  }
+
+  /*
+    The target length, stated as arithmetic.
+
+    This is the one instruction the model can check its own work against: every clip's
+    length is in the description below, so "cut to 1:10" is a sum it can actually do,
+    where the same words inside a free-text brief are a mood. It is also the instruction
+    that turns a polishing pass into a selection pass — without a number there is no
+    reason to drop a whole shot, and dropping whole shots is the only way a nine-minute
+    assembly becomes a three-minute video.
+  */
+  if (project.targetDurationUs) {
+    const current = timelineDuration(project.timeline);
+    const over = current - project.targetDurationUs;
+    sections.push(
+      [
+        `Target length: ${formatTimecode(project.targetDurationUs)} (${project.targetDurationUs}us).`,
+        `This cut currently runs ${formatTimecode(current)} (${current}us), which is ` +
+          `${formatTimecode(Math.abs(over))} ${over > 0 ? 'over' : 'under'}.`,
+        over > 0
+          ? 'Getting there means dropping or shortening whole shots, not only tightening joins. ' +
+            'Say in your summary how much you removed and where you think the rest has to come from.'
+          : 'There is room; do not pad it.',
+      ].join(' '),
+    );
   }
 
   sections.push(describeProject(project, { effects: options.includeEffects ?? false }));

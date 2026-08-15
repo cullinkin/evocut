@@ -1,149 +1,206 @@
 import { describe, expect, it } from 'vitest';
-import { commitOps } from '../src/factory.js';
-import { describeOp } from '../src/describe.js';
-import { Project, type OpVerdict } from '../src/schema/project.js';
-import { kenBurns } from '../src/schema/effects.js';
-import type { Op } from '../src/schema/ops.js';
-import { COARSE_CLIP_IDS, makeCoarseProject, makeCoarseTimeline, S, testDeps } from './fixtures.js';
+import {
+  createClip,
+  createTimeline,
+  createTrack,
+  lengthStanding,
+  makeIdFactory,
+  previewOps,
+  resolveReview,
+  secondsToMicros as S,
+  timelineDuration,
+  type Op,
+  type ReviewSession,
+  type Timeline,
+} from '../src/index.js';
 
-const [FIRST, SECOND] = COARSE_CLIP_IDS;
-const timeline = makeCoarseTimeline();
+/**
+ * A live review: derived, not mutated.
+ *
+ * The property these tests exist for is that accepting and un-accepting are the *same*
+ * operation with a different argument. If un-accepting were an undo — an inverse op
+ * applied to whatever the timeline had become — then a sequence of toggles could leave the
+ * timeline somewhere neither the user nor the log could account for. Deriving from the
+ * baseline every time makes that structurally impossible, and the way to demonstrate it is
+ * to toggle things back and forth and land exactly where we started.
+ */
 
-describe('describeOp', () => {
-  it('describes a trim by how much it moves each edge', () => {
-    // Clip 1 runs 2s–10s in the source.
-    expect(describeOp({ op: 'trim', clipId: FIRST, sourceIn: S(2.4) }, timeline)).toBe(
-      'Trim 0:00.400 off the head of clip 1 (intro)',
-    );
-    expect(describeOp({ op: 'trim', clipId: FIRST, sourceOut: S(9.5) }, timeline)).toBe(
-      'Trim 0:00.500 off the tail of clip 1 (intro)',
-    );
-    expect(describeOp({ op: 'trim', clipId: FIRST, sourceIn: S(1.5) }, timeline)).toBe(
-      'Extend 0:00.500 onto the head of clip 1 (intro)',
-    );
-    expect(describeOp({ op: 'trim', clipId: FIRST, sourceIn: S(2.4), sourceOut: S(9.5) }, timeline)).toBe(
-      'Trim 0:00.400 off the head and trim 0:00.500 off the tail of clip 1 (intro)',
-    );
+function deps() {
+  return { newId: makeIdFactory('r') };
+}
+
+function baseline(): Timeline {
+  const d = deps();
+  const clips = [
+    createClip({ sourceId: 'src_a', sourceIn: S(0), sourceOut: S(10) }, d),
+    createClip({ sourceId: 'src_a', sourceIn: S(20), sourceOut: S(32) }, d),
+    createClip({ sourceId: 'src_a', sourceIn: S(40), sourceOut: S(46) }, d),
+  ];
+  return createTimeline({ tracks: [createTrack({ kind: 'video', clips }, d)] }, d);
+}
+
+function session(ops: Op[], accepted?: boolean[]): ReviewSession {
+  return {
+    id: 'rev_1',
+    by: 'model',
+    model: 'claude-opus-5',
+    ops,
+    accepted: accepted ?? ops.map(() => false),
+    baseline: baseline(),
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+const ids = () => baseline().tracks[0]!.clips.map((clip) => clip.id);
+
+describe('resolveReview', () => {
+  it('shows the untouched edit when nothing is accepted', () => {
+    const [a] = ids();
+    const resolved = resolveReview(session([{ op: 'remove', clipId: a! }]));
+    expect(timelineDuration(resolved.timeline)).toBe(S(28));
+    expect(resolved.landed).toEqual([false]);
   });
 
-  it('names clips by position and label, not by id', () => {
-    // The reviewer is looking at their own video, not at a data structure.
-    expect(describeOp({ op: 'remove', clipId: SECOND }, timeline)).toBe('Delete clip 2 (demo)');
-    expect(describeOp({ op: 'setEnabled', clipId: SECOND, enabled: false }, timeline)).toBe(
-      'Drop clip 2 (demo)',
-    );
+  it('applies only what was accepted', () => {
+    const [a, b] = ids();
+    const ops: Op[] = [
+      { op: 'remove', clipId: a! },
+      { op: 'setSpeed', clipId: b!, speed: 2 },
+    ];
+    const resolved = resolveReview(session(ops, [false, true]));
+    // Clip a stays (10s), clip b halves (12s → 6s), clip c unchanged (6s).
+    expect(timelineDuration(resolved.timeline)).toBe(S(22));
+    expect(resolved.landed).toEqual([false, true]);
   });
 
-  it('describes the rest of the op kinds', () => {
-    const cases: Array<[Op, string]> = [
-      [{ op: 'split', clipId: FIRST, at: S(3.5) }, 'Split clip 1 (intro) at 0:03.500'],
-      [{ op: 'setSpeed', clipId: FIRST, speed: 1.5 }, 'Speed up clip 1 (intro) to 1.5×'],
-      [{ op: 'setSpeed', clipId: FIRST, speed: 0.5 }, 'Slow down clip 1 (intro) to 0.5×'],
-      [{ op: 'move', clipId: FIRST, toIndex: 2 }, 'Move clip 1 (intro) to position 3'],
-      [{ op: 'setAudio', clipId: FIRST, audio: { mute: true } }, 'Mute clip 1 (intro)'],
-      [{ op: 'setAudio', clipId: FIRST, audio: { gain: 0.5 } }, 'Set clip 1 (intro) volume to 50%'],
-      [{ op: 'setLabel', clipId: FIRST, label: 'opening' }, 'Label clip 1 (intro) "opening"'],
-      [
-        { op: 'addEffect', clipId: FIRST, effect: kenBurns('fx_a', S(8), { scale: 1 }, { scale: 1.2 }) },
-        'Push in from 1× to 1.2× on clip 1 (intro)',
-      ],
-      [
-        {
-          op: 'insertClip',
-          trackId: timeline.tracks[0]!.id,
-          sourceId: 'src_take1',
-          sourceIn: S(10),
-          sourceOut: S(14),
-        },
-        'Restore 0:04.000 of footage from src_take1',
-      ],
+  it('returns to exactly where it started when a suggestion is taken back', () => {
+    const [a, b] = ids();
+    const ops: Op[] = [
+      { op: 'trim', clipId: a!, sourceIn: S(2) },
+      { op: 'setSpeed', clipId: b!, speed: 1.5 },
+      { op: 'remove', clipId: b! },
     ];
 
-    for (const [op, expected] of cases) {
-      expect(describeOp(op, timeline)).toBe(expected);
-    }
+    const none = resolveReview(session(ops, [false, false, false])).timeline;
+    const all = resolveReview(session(ops, [true, true, true])).timeline;
+    expect(timelineDuration(all)).toBeLessThan(timelineDuration(none));
+
+    // Ticked on, then off again — byte for byte the timeline we began with. This is the
+    // whole claim: taking a suggestion back is not an approximate reversal.
+    const backAgain = resolveReview(session(ops, [true, true, true]));
+    expect(backAgain.landed).toEqual([true, true, true]);
+    expect(resolveReview(session(ops, [false, false, false])).timeline).toEqual(none);
   });
 
-  it('falls back to the raw id for a clip that does not exist yet', () => {
-    // A later op in a batch can target something an earlier op created.
-    expect(describeOp({ op: 'remove', clipId: 'clp_future' }, timeline)).toBe('Delete clp_future');
-    expect(describeOp({ op: 'remove', clipId: 'clp_future' })).toBe('Delete clp_future');
+  it('applies in the order proposed, not the order ticked', () => {
+    const [, b] = ids();
+    const ops: Op[] = [
+      { op: 'trim', clipId: b!, sourceOut: S(30) },
+      { op: 'setSpeed', clipId: b!, speed: 2 },
+    ];
+    // A trim then a speed change: 10s of source at 2x is 5s. The other order would give
+    // the same clip a different length, which is why the tick order must not decide it.
+    const resolved = resolveReview(session(ops, [true, true]));
+    expect(timelineDuration(resolved.timeline)).toBe(S(10) + S(5) + S(6));
+  });
+
+  it('reports an accepted op that no longer applies instead of dropping it', () => {
+    const ops: Op[] = [{ op: 'remove', clipId: 'clp_gone' }];
+    const resolved = resolveReview(session(ops, [true]));
+    expect(resolved.landed).toEqual([false]);
+    expect(resolved.failures[0]?.index).toBe(0);
+    expect(resolved.failures[0]?.message).toMatch(/clp_gone/);
+  });
+
+  it('pins the failure to the right suggestion when an earlier one was skipped', () => {
+    const [a] = ids();
+    const ops: Op[] = [
+      { op: 'remove', clipId: a! },
+      { op: 'remove', clipId: 'clp_gone' },
+      { op: 'setSpeed', clipId: 'clp_alsogone', speed: 2 },
+    ];
+    // Only the last two are accepted, so `applyOps` sees a two-op batch and indexes its
+    // errors 0 and 1 — which are ops 1 and 2 here. Reporting those verbatim would put the
+    // red mark on the wrong rows.
+    const resolved = resolveReview(session(ops, [false, true, true]));
+    expect(resolved.failures.map((failure) => failure.index)).toEqual([1, 2]);
+    expect(resolved.landed).toEqual([false, false, false]);
   });
 });
 
-describe('reviewed revisions', () => {
-  const proposal: Op[] = [
-    { op: 'trim', clipId: FIRST, sourceIn: S(2.4), rationale: 'starts on an inhale' },
-    { op: 'setSpeed', clipId: SECOND, speed: 1.5, rationale: 'the walk-over drags' },
-    { op: 'remove', clipId: SECOND, rationale: 'redundant with the intro' },
-  ];
+describe('previewOps', () => {
+  it('says what a trim takes off, and from which end', () => {
+    const [a] = ids();
+    const open = session([{ op: 'trim', clipId: a!, sourceIn: S(1.5), sourceOut: S(9) }]);
+    const [preview] = previewOps(open, open.baseline);
 
-  it('applies only the accepted ops but records every verdict', () => {
-    const verdicts: OpVerdict[] = [
-      { op: proposal[0]!, accepted: true },
-      { op: proposal[1]!, accepted: true },
-      { op: proposal[2]!, accepted: false, note: 'no, I want that section' },
+    expect(preview!.headline).toBe('Trim 1.50s off the head and 1.00s off the tail');
+    expect(preview!.beforeLengthUs).toBe(S(10));
+    expect(preview!.afterLengthUs).toBe(S(7.5));
+    expect(preview!.deltaUs).toBe(-S(2.5));
+    expect(preview!.applicable).toBe(true);
+  });
+
+  it('says what a speed change costs in seconds, not in multiples', () => {
+    const [, b] = ids();
+    const open = session([{ op: 'setSpeed', clipId: b!, speed: 2 }]);
+    expect(previewOps(open, open.baseline)[0]!.headline).toBe('Play at 2× — 12.00s becomes 6.00s');
+  });
+
+  it('says how much a dropped shot is worth', () => {
+    const [, , c] = ids();
+    const open = session([{ op: 'setEnabled', clipId: c!, enabled: false }]);
+    const [preview] = previewOps(open, open.baseline);
+    expect(preview!.headline).toBe('Drop this shot — 6.00s out');
+    expect(preview!.deltaUs).toBe(-S(6));
+  });
+
+  it('measures each suggestion on its own, against the untouched edit', () => {
+    const [a] = ids();
+    const ops: Op[] = [
+      { op: 'trim', clipId: a!, sourceIn: S(2) },
+      { op: 'trim', clipId: a!, sourceOut: S(8) },
     ];
-
-    const result = commitOps(
-      makeCoarseProject(),
-      verdicts.filter((v) => v.accepted).map((v) => v.op),
-      { by: 'llm', model: 'test-model', review: { verdicts }, ...testDeps('r') },
-    );
-
-    expect(result.revision.ops).toHaveLength(2);
-    // The rejected op leaves no mark on the timeline, so the review is the only
-    // place it survives — and rejections are the half of the label that is easy to lose.
-    expect(result.revision.review!.verdicts).toHaveLength(3);
-    expect(result.revision.review!.verdicts[2]!.accepted).toBe(false);
-    expect(result.revision.review!.verdicts[2]!.note).toBe('no, I want that section');
-    expect(result.project.timeline.tracks[0]!.clips).toHaveLength(3);
+    // Both accepted, both touching the same clip. Each preview still reports what *it*
+    // does to the original — the alternative, differencing cumulative states, would credit
+    // the second op with a shorter clip than the user is being asked about.
+    const previews = previewOps(session(ops, [true, true]), baseline());
+    expect(previews.map((preview) => preview.deltaUs)).toEqual([-S(2), -S(2)]);
   });
 
-  it('marks a pass rejected when the user waved everything away', () => {
-    const verdicts: OpVerdict[] = proposal.map((op) => ({ op, accepted: false }));
-    const result = commitOps(makeCoarseProject(), [], {
-      by: 'llm',
-      review: { verdicts },
-      ...testDeps('r'),
-    });
-
-    expect(result.revision.accepted).toBe(false);
-    expect(result.revision.ops).toEqual([]);
+  it('marks a suggestion whose clip has gone, and still gives it a position', () => {
+    const open = session([{ op: 'trim', clipId: 'clp_gone', sourceIn: S(1) }]);
+    const [preview] = previewOps(open, open.baseline);
+    expect(preview!.applicable).toBe(false);
+    expect(preview!.reason).toMatch(/clp_gone/);
+    expect(preview!.anchorUs).toBe(0);
   });
 
-  it('marks a pass accepted when anything at all survived', () => {
-    const verdicts: OpVerdict[] = [
-      { op: proposal[0]!, accepted: true },
-      { op: proposal[1]!, accepted: false },
+  it('anchors a bubble over its clip on the timeline actually on screen', () => {
+    const [a, b] = ids();
+    // Accepting the first suggestion pulls clip b two seconds earlier; the bubble for the
+    // second has to move with it, or it points at the wrong shot.
+    const ops: Op[] = [
+      { op: 'trim', clipId: a!, sourceIn: S(2) },
+      { op: 'setSpeed', clipId: b!, speed: 2 },
     ];
-    const result = commitOps(makeCoarseProject(), [proposal[0]!], {
-      by: 'llm',
-      review: { verdicts },
-      ...testDeps('r'),
-    });
+    const open = session(ops, [true, false]);
+    const visible = resolveReview(open).timeline;
 
-    expect(result.revision.accepted).toBe(true);
+    const [, moved] = previewOps(open, visible);
+    const [, unmoved] = previewOps(open, open.baseline);
+    expect(unmoved!.anchorUs - moved!.anchorUs).toBe(S(2));
+  });
+});
+
+describe('lengthStanding', () => {
+  it('says nothing about a target that was never set', () => {
+    expect(lengthStanding(baseline(), undefined)).toMatchObject({ overUs: null, label: '0:28' });
   });
 
-  it('leaves accepted absent on an unreviewed pass', () => {
-    const result = commitOps(makeCoarseProject(), [proposal[0]!], { by: 'llm', ...testDeps('r') });
-    expect(result.revision.accepted).toBeUndefined();
-    expect(result.revision.review).toBeUndefined();
-  });
-
-  it('survives a JSON round-trip with the verdicts intact', () => {
-    const verdicts: OpVerdict[] = [
-      { op: proposal[0]!, accepted: true },
-      { op: proposal[2]!, accepted: false, note: 'keep that bit' },
-    ];
-    const { project } = commitOps(makeCoarseProject(), [proposal[0]!], {
-      by: 'llm',
-      review: { verdicts },
-      ...testDeps('r'),
-    });
-
-    const reparsed = Project.parse(JSON.parse(JSON.stringify(project)));
-    expect(reparsed.revisions.at(-1)!.review!.verdicts).toEqual(verdicts);
+  it('says how far over, in the words someone cutting to length would use', () => {
+    expect(lengthStanding(baseline(), S(70)).label).toBe('0:28 of 1:10 — 0:42 under');
+    expect(lengthStanding(baseline(), S(10)).label).toBe('0:28 of 0:10 — 0:18 over');
+    expect(lengthStanding(baseline(), S(28)).label).toBe('0:28 — on target');
   });
 });

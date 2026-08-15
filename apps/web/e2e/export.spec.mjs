@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport } from './harness.mjs';
+import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport, scrubTo } from './harness.mjs';
 
 /**
  * The export, end to end, in a real browser.
@@ -33,8 +33,7 @@ await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
 // Seek into the take, cut there, and drop everything before the cut. The export then has
 // to start partway into the source — which is exactly what a whole-file re-encode gets
 // wrong while still producing a plausible-looking video.
-const ruler = await page.locator('.ruler').boundingBox();
-await page.mouse.click(ruler.x + ruler.width * 0.35, ruler.y + ruler.height / 2);
+await scrubTo(page, 0.35);
 await page.locator('button[aria-label="Cut at playhead"]').click();
 await page.locator('.clip-block').first().click();
 await page.locator('button[aria-label="Delete clip"]').click();

@@ -52,10 +52,16 @@ export const LOG_EVENT_TYPES = [
   'edit.redo',
   // handoff and refinement
   'coarse.commit',
+  // What the user said this video is meant to be, and how long. Steers every later pass.
+  'project.brief',
   'llm.request',
   'llm.plan',
   'llm.error',
   'llm.apply',
+  // One suggestion accepted or taken back. Its own row rather than a diff of the final
+  // state: a person who accepts an edit, watches it, and takes it back has told us
+  // something a final verdict cannot, and it is only visible here.
+  'llm.verdict',
   'llm.review',
   // output
   'render.start',

@@ -14,12 +14,8 @@ import type { RefinementSettings } from './settings.ts';
  * an attacker on the page can read — it is that the key is revocable in one click from the
  * Anthropic console, and the screen says where.
  *
- * ## About the brief
- *
- * A link to a reference video is inert: the model cannot watch it. What it can use is a
- * written description of what the reference *does* — pacing, how long a shot holds, where
- * the emphasis lands. So this asks for that, in those words, rather than offering a URL
- * field that would quietly do nothing.
+ * The style brief is deliberately *not* here. It is per video, and lives on the project —
+ * see `Brief.tsx`. What is on this screen is what belongs to the device.
  */
 export interface SettingsScreenProps {
   settings: RefinementSettings;
@@ -104,22 +100,9 @@ export function SettingsScreen({ settings, busy, onSave, onForgetKey, onClose }:
         </select>
       </label>
 
-      <label className="field">
-        <span>Style brief</span>
-        <textarea
-          value={draft.brief}
-          onChange={(event) => change('brief', event.target.value)}
-          rows={5}
-          placeholder="Describe the edit you want, the way you'd describe it to an editor. What the pacing feels like, how long a shot holds before it cuts, where the emphasis lands."
-        />
-      </label>
       <p className="meta">
-        {/*
-          Said here rather than discovered later: pasting a URL is the obvious thing to try
-          and the one thing that cannot work.
-        */}
-        A link to a video won’t help — the model can’t watch it. Describing what that video
-        does will.
+        What each video is meant to be — its brief and its target length — is asked for on
+        the video itself, when you tap Refine.
       </p>
 
       <div className="settings-actions">

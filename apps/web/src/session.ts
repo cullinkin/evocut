@@ -10,10 +10,14 @@ import {
   timelineDuration,
   type LogEvent,
   type LogEventType,
+  previewOps,
+  resolveReview,
   type Op,
+  type OpPreview,
   type OpVerdict,
   type Project,
   type RefinementPlan,
+  type ReviewSession,
 } from '@evocut/edl';
 import { planLocalRefinement, proposeRefinement } from '@evocut/agent';
 import type { SourceSignals } from '@evocut/signals';
@@ -34,7 +38,7 @@ import {
 import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
-import { useSettings, type RefinementSettings } from './settings.ts';
+import { EMPTY_SETTINGS, useSettings, type RefinementSettings } from './settings.ts';
 
 /**
  * Session state: the project, its media, its log, and any refinement awaiting review.
@@ -66,6 +70,20 @@ const SCRUB_LOG_INTERVAL_MS = 250;
 
 /** How many steps back the editor can go. */
 const HISTORY_LIMIT = 50;
+
+/**
+ * Bring the project's live timeline back in line with its open review.
+ *
+ * The invariant, in one function: `timeline === baseline + accepted ops`. Everything
+ * downstream — the player, the export, the EDL someone downloads — reads `timeline` and
+ * knows nothing about reviews, which is why this is maintained on write rather than
+ * derived at render time. Every path that touches `review` goes through here.
+ */
+function deriveReview(project: Project): Project {
+  if (!project.review) return project;
+  const resolved = resolveReview(project.review, { sources: project.sources });
+  return { ...project, timeline: resolved.timeline, updatedAt: new Date().toISOString() };
+}
 
 export type SessionStatus = 'loading' | 'empty' | 'ready';
 
@@ -111,9 +129,18 @@ export interface Session {
   busy: boolean;
   error: string | null;
 
-  /** A refinement pass awaiting review, with the user's verdict on each op so far. */
-  plan: RefinementPlan | null;
-  verdicts: Map<number, boolean>;
+  /**
+   * A refinement pass the user is still deciding on, or null.
+   *
+   * Live, not modal. The suggestions sit on the timeline as bubbles and each one is
+   * accepted or taken back independently, with the edit re-derived every time — so
+   * "I've changed my mind about that one" costs a tap rather than an undo stack.
+   */
+  review: ReviewSession | null;
+  /** What each suggestion does, in the terms the review UI draws. */
+  previews: OpPreview[];
+  /** Suggestions that were accepted but no longer apply, by index. */
+  reviewFailures: Map<number, string>;
 
   importFile(file: File): Promise<void>;
   relinkMedia(sourceId: string, file: File): Promise<void>;
@@ -157,7 +184,15 @@ export interface Session {
   refining: boolean;
   /** How the last pass was produced, for the review screen to say so. */
   refinedBy: 'model' | 'heuristics' | null;
-  requestRefinement(): void;
+  /**
+   * Ask for a pass.
+   *
+   * Takes the brief and target explicitly rather than reading them back off the project,
+   * because the brief sheet saves and runs in the same gesture and a `setProject` has not
+   * committed by the time the run starts. Passing them through means the pass is steered
+   * by what the person just typed, not by what it replaced.
+   */
+  requestRefinement(steer?: { brief: string; targetDurationUs: number | null }): void;
   cancelRefinement(): void;
 
   settings: RefinementSettings;
@@ -166,8 +201,13 @@ export interface Session {
   forgetApiKey(): Promise<void>;
   setVerdict(index: number, accepted: boolean): void;
   setAllVerdicts(accepted: boolean): void;
-  applyReview(): void;
+  /** Close the review, recording every verdict — including the rejections. */
+  finishReview(): void;
+  /** Close it and take everything back. */
   discardReview(): void;
+
+  /** What this edit is meant to be, and how long. Per project, not per device. */
+  saveBrief(brief: string, targetDurationUs: number | null): void;
 
   /** False on a browser with no video encoder; the export button says so rather than lying. */
   canExport: boolean;
@@ -187,8 +227,6 @@ export function useSession(): Session {
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [plan, setPlan] = useState<RefinementPlan | null>(null);
-  const [verdicts, setVerdicts] = useState<Map<number, boolean>>(new Map());
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [history, setHistory] = useState<Project[]>([]);
   const [seekingUnsupported, setSeekingUnsupported] = useState(false);
@@ -260,8 +298,6 @@ export function useSession(): Session {
       setProject(next);
       setEvents(existingEvents);
       setPlayhead(0);
-      setPlan(null);
-      setVerdicts(new Map());
       setSelectedClipId(null);
       setHistory([]);
       await bind(next);
@@ -405,7 +441,6 @@ export function useSession(): Session {
     releaseUrls();
     setProject(null);
     setEvents([]);
-    setPlan(null);
     setMediaUrls(new Map());
     setMissingMedia([]);
     setStatus('empty');
@@ -427,10 +462,23 @@ export function useSession(): Session {
     ) => {
       if (!project) return;
 
+      /*
+        A manual edit while a review is open goes to the *baseline*, not to what is on
+        screen.
+
+        The visible timeline is `baseline + accepted suggestions`, derived. Committing a
+        trim against the derived state would bake the accepted suggestions into it, and
+        the next tick of a bubble would then apply them a second time. Editing underneath
+        instead keeps the one rule intact: your edit and the machine's are separate layers,
+        and either can be changed without disturbing the other.
+      */
+      const open = project.review;
+      const target = open ? { ...project, timeline: open.baseline } : project;
+
       // Computed outside `setProject` on purpose. Logging and saving are side effects,
       // and StrictMode invokes state updaters twice — running them in there would
       // double every row in the log.
-      const result = commitOps(project, ops, {
+      const result = commitOps(target, ops, {
         by: options.by ?? 'human',
         ...(options.review ? { review: options.review } : {}),
         ...(options.model ? { model: options.model } : {}),
@@ -440,10 +488,14 @@ export function useSession(): Session {
         return;
       }
 
+      const next = open
+        ? deriveReview({ ...result.project, review: { ...open, baseline: result.project.timeline } })
+        : result.project;
+
       setHistory((previous) => [...previous, project].slice(-HISTORY_LIMIT));
-      setProject(result.project);
+      setProject(next);
       record(type, { ops: result.applied, revisionId: result.revision.id, playhead });
-      scheduleSave(result.project);
+      scheduleSave(next);
     },
     [playhead, project, record, scheduleSave],
   );
@@ -514,6 +566,8 @@ export function useSession(): Session {
     (report: SignalsReport) => record('signals.compute', { payload: { ...report } }),
     [record],
   );
+  const settingsRef = useRef<RefinementSettings>(EMPTY_SETTINGS);
+
   const { signals, pending: measuring, progress: measuringProgress } = useSourceSignals(
     stores,
     project,
@@ -522,6 +576,28 @@ export function useSession(): Session {
   );
   const settingsState = useSettings(stores);
   const { settings } = settingsState;
+  settingsRef.current = settings;
+
+  const review = project?.review ?? null;
+  /*
+    Recomputed whenever the review or the edit underneath it moves.
+
+    `previewOps` runs `applyOps` once per suggestion against the baseline, so this is
+    O(suggestions x clips) — a few dozen of each. Cheap enough to do on every toggle, and
+    doing it any other way would mean caching a derived value that must never be stale.
+  */
+  const previews = useMemo<OpPreview[]>(
+    () =>
+      review && project
+        ? previewOps(review, project.timeline, { sources: project.sources })
+        : [],
+    [project, review],
+  );
+  const reviewFailures = useMemo(() => {
+    if (!review || !project) return new Map<number, string>();
+    const resolved = resolveReview(review, { sources: project.sources });
+    return new Map(resolved.failures.map((failure) => [failure.index, failure.message]));
+  }, [project, review]);
 
   const commitTrim = useCallback(
     (clipId: string, sourceIn: number, sourceOut: number) => {
@@ -599,15 +675,33 @@ export function useSession(): Session {
   }, [project, record, scheduleSave]);
 
   /**
-   * Present a plan for review.
+   * Open a pass for review.
    *
    * Nothing is pre-accepted. A screen that opens with everything ticked collects consent,
    * not judgement, and the judgement is the entire point of the screen.
+   *
+   * The current timeline becomes the review's baseline, so the moment this lands the
+   * visible edit is unchanged — the suggestions are on the timeline as bubbles, and
+   * nothing has happened to the video until one is tapped.
    */
-  const presentPlan = useCallback(
+  const openReview = useCallback(
     (proposal: RefinementPlan, by: 'model' | 'heuristics', detail: Record<string, unknown>) => {
-      setPlan(proposal);
-      setVerdicts(new Map(proposal.ops.map((_, index) => [index, false])));
+      setProject((current) => {
+        if (!current) return current;
+        const session: ReviewSession = {
+          id: newId('revision'),
+          by,
+          ...(by === 'model' ? { model: settingsRef.current.model } : {}),
+          ...(proposal.summary ? { summary: proposal.summary } : {}),
+          ops: proposal.ops,
+          accepted: proposal.ops.map(() => false),
+          baseline: current.timeline,
+          createdAt: new Date().toISOString(),
+        };
+        const next = deriveReview({ ...current, review: session });
+        scheduleSave(next);
+        return next;
+      });
       setRefinedBy(by);
       record('llm.plan', {
         payload: {
@@ -621,7 +715,7 @@ export function useSession(): Session {
         },
       });
     },
-    [record, signals],
+    [record, scheduleSave, signals],
   );
 
   /**
@@ -632,11 +726,20 @@ export function useSession(): Session {
    * what makes the review screen usable, and testable, on a phone with no key and no
    * signal. Both paths produce the same `RefinementPlan` and land on the same screen.
    */
-  const requestRefinement = useCallback(() => {
+  const requestRefinement = useCallback(
+    (steer?: { brief: string; targetDurationUs: number | null }) => {
     if (!project || refining) return;
 
+    const steered: Project = steer
+      ? {
+          ...project,
+          brief: steer.brief,
+          ...(steer.targetDurationUs ? { targetDurationUs: steer.targetDurationUs } : { targetDurationUs: undefined }),
+        }
+      : project;
+
     if (!settings.apiKey) {
-      presentPlan(planLocalRefinement(project, { signals }), 'heuristics', {});
+      openReview(planLocalRefinement(steered, { signals }), 'heuristics', {});
       return;
     }
 
@@ -650,12 +753,13 @@ export function useSession(): Session {
       payload: {
         model: settings.model,
         effort: settings.effort || 'default',
-        clips: project.timeline.tracks[0]?.clips.filter((clip) => clip.enabled).length ?? 0,
+        clips: steered.timeline.tracks[0]?.clips.filter((clip) => clip.enabled).length ?? 0,
         measuredSources: signals.size,
         // A digest rather than the brief itself. Two passes with the same digest were
         // steered the same way, which is what a training set needs to group by — and the
         // brief is free text the user typed about their own life, which is not.
-        brief: settings.brief ? digest(settings.brief).slice(0, 12) : null,
+        brief: steered.brief ? digest(steered.brief).slice(0, 12) : null,
+        targetDurationUs: steered.targetDurationUs ?? null,
       },
     });
 
@@ -680,14 +784,14 @@ export function useSession(): Session {
           },
         );
 
-        const result = await proposeRefinement(project, {
+        const result = await proposeRefinement(steered, {
           complete,
           signals,
-          ...(settings.brief ? { instruction: settings.brief } : {}),
+          ...(steered.brief ? { instruction: steered.brief } : {}),
         });
         if (controller.signal.aborted) return;
 
-        presentPlan(result.plan, 'model', {
+        openReview(result.plan, 'model', {
           rounds: result.rounds,
           // Ops the engine refused even after a repair round. Logged rather than
           // discarded: a model that keeps proposing edits the schema rejects is a prompt
@@ -709,7 +813,9 @@ export function useSession(): Session {
         refineAbortRef.current = null;
       }
     })();
-  }, [presentPlan, project, record, refining, settings, signals]);
+    },
+    [openReview, project, record, refining, settings, signals],
+  );
 
   const cancelRefinement = useCallback(() => {
     refineAbortRef.current?.abort();
@@ -717,47 +823,131 @@ export function useSession(): Session {
     setRefining(false);
   }, []);
 
-  const setVerdict = useCallback((index: number, accepted: boolean) => {
-    setVerdicts((previous) => new Map(previous).set(index, accepted));
-  }, []);
+  /**
+   * Accept a suggestion, or take it back.
+   *
+   * Both directions are the same code path, which is the point: the timeline is re-derived
+   * from `baseline + accepted`, so un-ticking is not an undo of anything. There is nothing
+   * to reverse, so there is nothing to get wrong.
+   */
+  const setVerdicts = useCallback(
+    (next: (previous: boolean[]) => boolean[], logAs: Record<string, unknown>) => {
+      setProject((current) => {
+        if (!current?.review) return current;
+        const accepted = next(current.review.accepted);
+        const updated = deriveReview({ ...current, review: { ...current.review, accepted } });
+        scheduleSave(updated);
+        return updated;
+      });
+      record('llm.verdict', { payload: logAs });
+    },
+    [record, scheduleSave],
+  );
+
+  const setVerdict = useCallback(
+    (index: number, accepted: boolean) => {
+      setVerdicts(
+        (previous) => previous.map((value, at) => (at === index ? accepted : value)),
+        { index, accepted },
+      );
+    },
+    [setVerdicts],
+  );
 
   const setAllVerdicts = useCallback(
     (accepted: boolean) => {
-      if (!plan) return;
-      setVerdicts(new Map(plan.ops.map((_, index) => [index, accepted])));
+      setVerdicts((previous) => previous.map(() => accepted), { all: true, accepted });
     },
-    [plan],
+    [setVerdicts],
   );
 
-  const applyReview = useCallback(() => {
-    if (!plan) return;
-    const allVerdicts: OpVerdict[] = plan.ops.map((op, index) => ({
-      op,
-      accepted: verdicts.get(index) ?? false,
-    }));
-    const accepted = allVerdicts.filter((v) => v.accepted).map((v) => v.op);
+  /**
+   * Close the review and commit what survived it.
+   *
+   * One revision carrying *every* op with its verdict, not just the accepted subset — a
+   * rejected op leaves no mark on the timeline, so this is the only place it survives, and
+   * the rejections are half of what makes this a training set rather than a diff.
+   *
+   * The accepted ops are committed against the baseline, which is exactly how the derived
+   * timeline was built, so the revision chain lands on the picture the user is looking at.
+   */
+  const finishReview = useCallback(() => {
+    const open = project?.review;
+    if (!project || !open) return;
 
-    // The whole proposal goes into the revision, not just the accepted subset: a rejected
-    // op leaves no mark on the timeline, so this is the only place it survives.
-    edit('llm.review', accepted, {
-      by: 'llm',
-      review: { verdicts: allVerdicts },
-      // Which model proposed this. Without it the training set pools verdicts from
-      // different models — and "a human rejected this edit" means nothing if you cannot
-      // tell which model proposed it.
-      model: refinedBy === 'model' ? settings.model : 'local-heuristics',
-    });
-    setPlan(null);
-    setVerdicts(new Map());
+    const allVerdicts: OpVerdict[] = open.ops.map((op, index) => ({
+      op,
+      accepted: open.accepted[index] ?? false,
+    }));
+    const result = commitOps(
+      { ...project, timeline: open.baseline },
+      allVerdicts.filter((verdict) => verdict.accepted).map((verdict) => verdict.op),
+      {
+        by: 'llm',
+        review: { verdicts: allVerdicts },
+        // Which model proposed this. Without it the training set pools verdicts from
+        // different models — and "a human rejected this edit" means nothing if you cannot
+        // tell which model proposed it.
+        model: open.by === 'model' ? open.model ?? settings.model : 'local-heuristics',
+        ...(open.summary ? { summary: open.summary } : {}),
+      },
+    );
+
+    const { review: _closed, ...rest } = result.project;
+    setHistory((previous) => [...previous, project].slice(-HISTORY_LIMIT));
+    setProject(rest);
     setRefinedBy(null);
-  }, [edit, plan, refinedBy, settings.model, verdicts]);
+    record('llm.review', { ops: result.applied, revisionId: result.revision.id, playhead });
+    scheduleSave(rest);
+  }, [playhead, project, record, scheduleSave, settings.model]);
 
   const discardReview = useCallback(() => {
-    if (plan) record('llm.review', { payload: { discarded: true, ops: plan.ops.length, by: refinedBy } });
-    setPlan(null);
-    setVerdicts(new Map());
+    const open = project?.review;
+    if (!project || !open) return;
+    record('llm.review', { payload: { discarded: true, ops: open.ops.length, by: open.by } });
+    const { review: _dropped, ...rest } = project;
+    // Back to the baseline outright: discarding means none of it happened, and the
+    // baseline is by construction the timeline without any of it.
+    const next = { ...rest, timeline: open.baseline };
+    setProject(next);
     setRefinedBy(null);
-  }, [plan, record, refinedBy]);
+    scheduleSave(next);
+  }, [project, record, scheduleSave]);
+
+  /**
+   * What this edit is meant to be, and how long it should run.
+   *
+   * On the project, so it travels with the video rather than with the phone. A booster
+   * bundle and a twenty-minute build log want opposite things from the same model, and a
+   * device-wide brief would make every project after the first one wrong by default.
+   */
+  const saveBrief = useCallback(
+    (brief: string, targetDurationUs: number | null) => {
+      setProject((current) => {
+        if (!current) return current;
+        const next: Project = {
+          ...current,
+          brief: brief.trim(),
+          ...(targetDurationUs && targetDurationUs > 0
+            ? { targetDurationUs }
+            : { targetDurationUs: undefined }),
+          updatedAt: new Date().toISOString(),
+        };
+        scheduleSave(next);
+        return next;
+      });
+      record('project.brief', {
+        payload: {
+          // A digest, not the words. Two passes with the same digest were steered the same
+          // way, which is what a training set groups by; the brief itself is free text the
+          // user typed about their own life, which is not.
+          brief: brief.trim() ? digest(brief.trim()).slice(0, 12) : null,
+          targetDurationUs,
+        },
+      });
+    },
+    [record, scheduleSave],
+  );
 
   /**
    * How the renderer reaches the footage.
@@ -917,8 +1107,9 @@ export function useSession(): Session {
     events,
     busy,
     error,
-    plan,
-    verdicts,
+    review,
+    previews,
+    reviewFailures,
     importFile,
     relinkMedia,
     openProject,
@@ -939,8 +1130,9 @@ export function useSession(): Session {
     requestRefinement,
     setVerdict,
     setAllVerdicts,
-    applyReview,
+    finishReview,
     discardReview,
+    saveBrief,
     signals,
     measuring,
     measuringProgress,
