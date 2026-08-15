@@ -35,13 +35,87 @@ function stubTransport(reply: unknown, status = 200) {
       headers,
       body: init?.body ? JSON.parse(String(init.body)) : null,
     });
-    return new Response(JSON.stringify(reply), {
+
+    // Errors come back as JSON; the SDK never streams a non-2xx.
+    if (status !== 200) {
+      return new Response(JSON.stringify(reply), { status, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(sse(reply as AnyMessage), {
       status,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'text/event-stream' },
     });
   };
 
   return { fetchStub, calls };
+}
+
+interface AnyMessage {
+  content: Array<{ type: string; id?: string; name?: string; input?: unknown; text?: string; thinking?: string }>;
+  usage: { input_tokens: number; output_tokens: number };
+  stop_reason: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Re-encode a finished message as the event stream that produced it.
+ *
+ * The transport streams now, so a stub that answers with a whole JSON message is testing a
+ * code path the app no longer takes. This keeps the tests written in terms of the answer —
+ * `toolCallReply({ ops })` — while putting the SDK's real SSE decoder and its accumulator
+ * in the path, which is where a truncated tool call becomes `{}` and where the bug that
+ * produced "expected array at ops" actually lived.
+ *
+ * Deltas are emitted in pieces rather than whole, because a stream that always delivers a
+ * complete JSON value in one chunk cannot catch a counter that breaks across a boundary.
+ */
+function sse(message: AnyMessage): string {
+  const lines: string[] = [];
+  const emit = (type: string, data: Record<string, unknown>) =>
+    lines.push(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+
+  emit('message_start', {
+    message: { ...message, content: [], usage: { ...message.usage, output_tokens: 0 } },
+  });
+
+  message.content.forEach((block, index) => {
+    const body =
+      block.type === 'tool_use'
+        ? { type: 'tool_use', id: block.id ?? 'toolu_stub', name: block.name, input: {} }
+        : block.type === 'thinking'
+          ? { type: 'thinking', thinking: '', signature: '' }
+          : { type: 'text', text: '' };
+    emit('content_block_start', { index, content_block: body });
+
+    const payload =
+      block.type === 'tool_use'
+        ? JSON.stringify(block.input ?? {})
+        : block.type === 'thinking'
+          ? block.thinking ?? ''
+          : block.text ?? '';
+
+    for (let at = 0; at < payload.length; at += 7) {
+      const piece = payload.slice(at, at + 7);
+      const delta =
+        block.type === 'tool_use'
+          ? { type: 'input_json_delta', partial_json: piece }
+          : block.type === 'thinking'
+            ? { type: 'thinking_delta', thinking: piece }
+            : { type: 'text_delta', text: piece };
+      emit('content_block_delta', { index, delta });
+    }
+    if (block.type === 'thinking') {
+      emit('content_block_delta', { index, delta: { type: 'signature_delta', signature: 'sig' } });
+    }
+    emit('content_block_stop', { index });
+  });
+
+  emit('message_delta', {
+    delta: { stop_reason: message.stop_reason, stop_sequence: null },
+    usage: { output_tokens: message.usage.output_tokens },
+  });
+  emit('message_stop', {});
+
+  return lines.join('');
 }
 
 function toolCallReply(input: unknown, over: Record<string, unknown> = {}) {
@@ -164,6 +238,87 @@ describe('createAnthropicComplete', () => {
       typeof message.content === 'string' ? [{ type: 'text' }] : message.content,
     );
     expect(content.every((block: any) => block.type === 'text')).toBe(true);
+  });
+
+  /**
+   * Streamed, with room to finish.
+   *
+   * Both halves come from the same session. The first call spent nine minutes with nothing
+   * on the wire and died of `APIConnectionError` — a phone on LTE does not hold an idle
+   * socket that long. The second got through and hit the ceiling at exactly 16,000 output
+   * tokens with `stop_reason: max_tokens`, because a nine-minute assembly asked down to two
+   * and a half is a hundred-odd ops and the budget was sized for a handful.
+   */
+  it('streams, so a pass that takes minutes keeps the connection alive', async () => {
+    const { fetchStub, calls } = stubTransport(toolCallReply({ ops: [] }));
+    await createAnthropicComplete({ apiKey: 'sk-test', fetch: fetchStub })(request);
+    expect(calls[0]!.body.stream).toBe(true);
+  });
+
+  it('asks for enough room to emit a plan for a long timeline', async () => {
+    const { fetchStub, calls } = stubTransport(toolCallReply({ ops: [] }));
+    await createAnthropicComplete({ apiKey: 'sk-test', fetch: fetchStub })(request);
+    expect(calls[0]!.body.max_tokens).toBeGreaterThanOrEqual(64_000);
+  });
+
+  /**
+   * The bug this ordering exists for.
+   *
+   * A truncated tool call is still a `tool_use` block — the SDK hands back whatever partial
+   * JSON it could salvage, which for a plan cut mid-op is `{}`. Reading the input first
+   * therefore reported `expected "array" at path ["ops"]`: true, useless, and the actual
+   * text a person saw on their phone.
+   */
+  it('calls a truncated tool call what it is, not a schema error', async () => {
+    const { fetchStub } = stubTransport(
+      toolCallReply({ summary: 'Cutting the mid', ops: [{ op: 'remo' }] }, { stop_reason: 'max_tokens' }),
+    );
+    const complete = createAnthropicComplete({ apiKey: 'sk-test', fetch: fetchStub });
+    await expect(complete(request)).rejects.toThrow(/ran out of room/i);
+  });
+
+  it('reports how the plan is coming along while it comes along', async () => {
+    const { fetchStub } = stubTransport(
+      toolCallReply({
+        summary: 'Three edits.',
+        ops: [
+          { op: 'remove', clipId: 'clp_a' },
+          { op: 'remove', clipId: 'clp_b' },
+          { op: 'trim', clipId: 'clp_c', sourceIn: 10 },
+        ],
+      }),
+    );
+
+    const seen: Array<{ phase: string; ops: number; tokens: number }> = [];
+    await createAnthropicComplete({ apiKey: 'sk-test', fetch: fetchStub, onProgress: (p) => seen.push(p) })(
+      request,
+    );
+
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.at(-1)!.phase).toBe('drafting');
+    // Counted out of the partial JSON, across delta boundaries — the stub deliberately
+    // splits every seven characters, so `"op":` lands astride a chunk more than once.
+    expect(seen.at(-1)!.ops).toBe(3);
+    expect(seen.at(-1)!.tokens).toBeGreaterThan(0);
+  });
+
+  it('says when the model is still thinking rather than writing', async () => {
+    const { fetchStub } = stubTransport(
+      toolCallReply({ ops: [] }, {
+        content: [
+          { type: 'thinking', thinking: 'Weighing the joins against the target length.' },
+          { type: 'tool_use', id: 'toolu_01', name: 'propose_edits', input: { ops: [] } },
+        ],
+      }),
+    );
+
+    const seen: Array<{ phase: string }> = [];
+    await createAnthropicComplete({ apiKey: 'sk-test', fetch: fetchStub, onProgress: (p) => seen.push(p) })(
+      request,
+    );
+
+    expect(seen[0]!.phase).toBe('thinking');
+    expect(seen.at(-1)!.phase).toBe('drafting');
   });
 
   it('can be pointed at a proxy instead of the API', async () => {

@@ -35,12 +35,56 @@ await page.route('https://api.anthropic.com/**', async (route) => {
     return route.fulfill({ status: 204, headers: CORS });
   }
   sent.push({ url: request.url(), headers: request.headers(), body: request.postDataJSON() });
+  const status = reply?.status ?? 200;
+  if (status !== 200) {
+    return route.fulfill({
+      status,
+      headers: { ...CORS, 'content-type': 'application/json' },
+      body: JSON.stringify(reply?.body ?? {}),
+    });
+  }
+  // The app streams now, so the stub has to answer in events. A JSON body here would be
+  // testing a path the phone no longer takes.
   return route.fulfill({
-    status: reply?.status ?? 200,
-    headers: { ...CORS, 'content-type': 'application/json' },
-    body: JSON.stringify(reply?.body ?? {}),
+    status,
+    headers: { ...CORS, 'content-type': 'text/event-stream' },
+    body: sse(reply?.body ?? {}),
   });
 });
+
+/** A finished message, re-encoded as the event stream that would have produced it. */
+function sse(message) {
+  const out = [];
+  const emit = (type, data) => out.push(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+
+  emit('message_start', {
+    message: { ...message, content: [], usage: { ...message.usage, output_tokens: 0 } },
+  });
+  for (const [index, block] of (message.content ?? []).entries()) {
+    const isTool = block.type === 'tool_use';
+    emit('content_block_start', {
+      index,
+      content_block: isTool
+        ? { type: 'tool_use', id: block.id ?? 'toolu_stub', name: block.name, input: {} }
+        : { type: 'text', text: '' },
+    });
+    const payload = isTool ? JSON.stringify(block.input ?? {}) : block.text ?? '';
+    for (let at = 0; at < payload.length; at += 64) {
+      const piece = payload.slice(at, at + 64);
+      emit('content_block_delta', {
+        index,
+        delta: isTool ? { type: 'input_json_delta', partial_json: piece } : { type: 'text_delta', text: piece },
+      });
+    }
+    emit('content_block_stop', { index });
+  }
+  emit('message_delta', {
+    delta: { stop_reason: message.stop_reason ?? 'end_turn', stop_sequence: null },
+    usage: { output_tokens: message.usage?.output_tokens ?? 0 },
+  });
+  emit('message_stop', {});
+  return out.join('');
+}
 
 // --- Import, cut, freeze -----------------------------------------------------------
 await page.goto(APP_URL);

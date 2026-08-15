@@ -31,8 +31,14 @@
  * that were too large to load now have loudness where they had nothing; and motion is
  * sampled on its own schedule rather than the filmstrip's, which on a long take is the
  * difference between a sample every twenty seconds and one every three.
+ *
+ * 3: onsets are rate-capped to the sharpest few a minute, so twenty-seven minutes of talking
+ * yields hits rather than three and a half thousand syllables; and a slow seek no longer
+ * aborts the motion pass, which had been silently returning nothing on real footage. Both
+ * of those went wrong on a cached result that looked perfectly valid, which is the case
+ * this number exists for.
  */
-export const SIGNALS_VERSION = 2;
+export const SIGNALS_VERSION = 3;
 
 /** A transient: something struck, said hard, or landed. In source microseconds. */
 export interface Onset {

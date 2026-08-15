@@ -29,8 +29,26 @@ import { DEFAULT_MODEL } from './models.js';
  *
  * `max_tokens` caps thinking and response text together, and thinking is on by default on
  * this model — a budget sized around the ops alone truncates the answer mid-plan.
+ *
+ * It was 16,000, which was enough for the small passes it was built against and nowhere
+ * near enough for the pass this tool actually exists to run. Nine minutes of footage asked
+ * down to two and a half is fifty-odd clips to judge and a hundred-odd ops to emit; a real
+ * session hit the ceiling at exactly 16,000 output tokens, `stop_reason: max_tokens`, with
+ * the tool call cut off mid-emission. Sixty-four thousand is the model's limit and costs
+ * nothing when unused — `max_tokens` is a ceiling, not a purchase.
  */
-const MAX_TOKENS = 16_000;
+const MAX_TOKENS = 64_000;
+
+/**
+ * How long one call may take before the client gives up.
+ *
+ * A pass over fifty clips at high effort takes minutes, not seconds. The SDK's ten-minute
+ * default is close enough to that to lose a good answer at the last moment.
+ */
+const TIMEOUT_MS = 20 * 60_000;
+
+/** Roughly four characters to a token — only ever used to draw a progress line. */
+const CHARS_PER_TOKEN = 4;
 
 export interface AnthropicOptions {
   apiKey: string;
@@ -44,6 +62,8 @@ export interface AnthropicOptions {
   /** Off only where there is no browser to be dangerous in. */
   allowBrowser?: boolean;
   signal?: AbortSignal;
+  /** Called as the answer arrives, so a four-minute wait can show something. */
+  onProgress?: (progress: AnthropicProgress) => void;
 }
 
 export interface AnthropicUsage {
@@ -51,6 +71,22 @@ export interface AnthropicUsage {
   outputTokens: number;
   model: string;
   stopReason: string | null;
+}
+
+/**
+ * What the model is doing right now, as far as the wire can tell.
+ *
+ * `ops` is counted out of the partial JSON rather than parsed from it — a half-written
+ * plan is not valid JSON and never will be until it finishes. Counting `"op":` in the
+ * stream is exact for the schema this tool uses and is only ever shown as a number to
+ * someone waiting.
+ */
+export interface AnthropicProgress {
+  phase: 'thinking' | 'drafting';
+  /** Rough output tokens so far. */
+  tokens: number;
+  /** Edits the partial plan appears to contain. */
+  ops: number;
 }
 
 /**
@@ -68,13 +104,27 @@ export function createAnthropicComplete(
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
+    timeout: TIMEOUT_MS,
+    // One retry, not two. Each attempt at this size is minutes long, and three of them
+    // back to back is half an hour of a phone screen saying nothing.
+    maxRetries: 1,
     // Refuses to construct in a browser without this, which is the correct default for a
     // library and the wrong one for an app whose entire premise is running on the phone.
     dangerouslyAllowBrowser: options.allowBrowser ?? true,
   });
 
   return async ({ system, prompt, tool }) => {
-    const message = await client.messages.create(
+    /**
+     * Streamed, and not for the typewriter effect.
+     *
+     * A pass over fifty clips takes minutes, and a non-streaming request spends all of
+     * them with nothing on the wire. A phone on LTE does not keep an idle connection open
+     * that long — the first failure of a real session was `APIConnectionError` after nine
+     * minutes, which is not the API refusing anything, it is the socket going quiet and
+     * being collected. A stream has bytes moving throughout, and as a bonus it can say
+     * how the plan is coming along while it comes along.
+     */
+    const stream = client.messages.stream(
       {
         model: options.model ?? DEFAULT_MODEL,
         max_tokens: MAX_TOKENS,
@@ -95,6 +145,10 @@ export function createAnthropicComplete(
       options.signal ? { signal: options.signal } : {},
     );
 
+    if (options.onProgress) watch(stream, options.onProgress);
+
+    const message = await stream.finalMessage();
+
     onUsage?.({
       inputTokens: message.usage.input_tokens,
       outputTokens: message.usage.output_tokens,
@@ -106,6 +160,47 @@ export function createAnthropicComplete(
   };
 }
 
+/** Turn the raw event stream into something a progress line can show. */
+function watch(
+  stream: { on(event: 'streamEvent', handler: (event: unknown) => void): unknown },
+  report: (progress: AnthropicProgress) => void,
+): void {
+  let phase: AnthropicProgress['phase'] = 'thinking';
+  let chars = 0;
+  let ops = 0;
+  // Carried across deltas because the marker can be split across two of them. Exactly one
+  // character short of the marker, so anything found in `tail + piece` must reach into the
+  // new piece and cannot be something already counted.
+  const marker = '"op":';
+  let tail = '';
+
+  stream.on('streamEvent', (raw) => {
+    const event = raw as {
+      type?: string;
+      content_block?: { type?: string };
+      delta?: { type?: string; partial_json?: string; thinking?: string; text?: string };
+    };
+
+    if (event.type === 'content_block_start') {
+      phase = event.content_block?.type === 'thinking' ? 'thinking' : 'drafting';
+      return;
+    }
+    if (event.type !== 'content_block_delta') return;
+
+    const piece = event.delta?.partial_json ?? event.delta?.thinking ?? event.delta?.text ?? '';
+    if (!piece) return;
+    chars += piece.length;
+
+    if (event.delta?.partial_json !== undefined) {
+      const window = tail + piece;
+      ops += window.split(marker).length - 1;
+      tail = window.slice(-(marker.length - 1));
+    }
+
+    report({ phase, tokens: Math.round(chars / CHARS_PER_TOKEN), ops });
+  });
+}
+
 /**
  * Pull the proposal out of the response.
  *
@@ -115,8 +210,12 @@ export function createAnthropicComplete(
  *  - **A refusal.** Safety classifiers can decline a request; that arrives as a normal
  *    successful response with `stop_reason: "refusal"` and possibly no content at all, so
  *    reading `content[0]` first would throw something misleading.
- *  - **Truncation.** `stop_reason: "max_tokens"` means the plan was cut mid-emission. The
- *    tool input will not parse, and saying so beats a schema error.
+ *  - **Truncation.** `stop_reason: "max_tokens"` means the plan was cut mid-emission.
+ *    Checked *before* the tool call is read, which is the whole lesson: a truncated tool
+ *    call still arrives as a `tool_use` block, with whatever partial JSON the SDK could
+ *    salvage — usually `{}`. Reading it first therefore produced
+ *    `expected "array" at path ["ops"]`, which is a true statement about a corpse and
+ *    tells the person holding the phone nothing about what went wrong.
  *  - **Prose instead of a tool call.** The model answered in text. That is a real outcome
  *    of not forcing the tool, and the repair round exists for it — but the message should
  *    say what happened rather than reporting an empty plan.
@@ -132,12 +231,14 @@ export function readToolInput(
     throw new Error('The model declined this request. Nothing was changed.');
   }
 
+  if (message.stop_reason === 'max_tokens') {
+    throw new Error(
+      'The model ran out of room before finishing its plan. Try again — or lower how hard it thinks, in Settings, which leaves more of the budget for the edits themselves.',
+    );
+  }
+
   const call = message.content.find((block) => block.type === 'tool_use' && block.name === toolName);
   if (call) return call.input;
-
-  if (message.stop_reason === 'max_tokens') {
-    throw new Error('The model ran out of room before finishing its plan. Try a shorter timeline.');
-  }
 
   const said = message.content
     .filter((block) => block.type === 'text' && block.text)
@@ -169,7 +270,9 @@ export function describeApiError(cause: unknown): string {
     return 'Rate limited by the API. Wait a moment and try again.';
   }
   if (cause instanceof Anthropic.APIConnectionError) {
-    return 'Could not reach the API. Check your connection.';
+    // Worth the extra sentence: a pass over a long timeline runs for minutes, and the way
+    // it fails on a phone is the screen locking rather than the network being down.
+    return 'Could not reach the API. A pass over a long edit takes minutes — keep this tab in front and the phone awake, and try again.';
   }
   if (cause instanceof Anthropic.APIError) {
     return `The API returned an error (${cause.status ?? 'unknown'}): ${cause.message}`;

@@ -88,6 +88,20 @@ function deriveReview(project: Project): Project {
 export type SessionStatus = 'loading' | 'empty' | 'ready';
 
 /**
+ * A refinement pass, mid-flight.
+ *
+ * `ops` is counted out of the partial answer as it streams, which is the number that
+ * actually reassures someone: "34 edits so far" is a pass working, where a spinner is a
+ * pass that might have died four minutes ago.
+ */
+export interface RefineProgress {
+  phase: 'thinking' | 'drafting';
+  tokens: number;
+  ops: number;
+  startedAt: number;
+}
+
+/**
  * A render in flight, or the file it produced.
  *
  * The blob is held alongside its object URL because the two are used for different things:
@@ -182,6 +196,14 @@ export interface Session {
 
   /** True while a refinement pass is in flight. It is a network call now, not a function. */
   refining: boolean;
+  /**
+   * What the pass is doing right now, or null between passes.
+   *
+   * A pass over fifty clips runs for minutes. A screen that says only "Thinking…" for four
+   * of them is indistinguishable from one that has hung, and the first thing a person does
+   * about a hung screen is reload it — throwing away the pass they are waiting for.
+   */
+  refineProgress: RefineProgress | null;
   /** How the last pass was produced, for the review screen to say so. */
   refinedBy: 'model' | 'heuristics' | null;
   /**
@@ -233,6 +255,7 @@ export function useSession(): Session {
   const [seekingUnsupported, setSeekingUnsupported] = useState(false);
   const [exportState, setExportState] = useState<ExportState | null>(null);
   const [refining, setRefining] = useState(false);
+  const [refineProgress, setRefineProgress] = useState<RefineProgress | null>(null);
   const [refinedBy, setRefinedBy] = useState<'model' | 'heuristics' | null>(null);
 
   const loggerRef = useRef<ReturnType<typeof makeLogger> | null>(null);
@@ -757,6 +780,7 @@ export function useSession(): Session {
     const controller = new AbortController();
     refineAbortRef.current = controller;
     setRefining(true);
+    setRefineProgress({ phase: 'thinking', tokens: 0, ops: 0, startedAt: Date.now() });
     setError(null);
 
     const startedAt = Date.now();
@@ -789,6 +813,8 @@ export function useSession(): Session {
             model,
             ...(settings.effort ? { effort: settings.effort } : {}),
             signal: controller.signal,
+            onProgress: (progress) =>
+              setRefineProgress((current) => ({ ...progress, startedAt: current?.startedAt ?? startedAt })),
           },
           (reported) => {
             usage = { ...reported };
@@ -825,7 +851,10 @@ export function useSession(): Session {
           payload: { message, model, elapsedMs: Date.now() - startedAt, ...usage },
         });
       } finally {
-        if (!controller.signal.aborted) setRefining(false);
+        if (!controller.signal.aborted) {
+          setRefining(false);
+          setRefineProgress(null);
+        }
         refineAbortRef.current = null;
       }
     })();
@@ -837,6 +866,7 @@ export function useSession(): Session {
     refineAbortRef.current?.abort();
     refineAbortRef.current = null;
     setRefining(false);
+    setRefineProgress(null);
   }, []);
 
   /**
@@ -1153,6 +1183,7 @@ export function useSession(): Session {
     measuring,
     measuringProgress,
     refining,
+    refineProgress,
     refinedBy,
     cancelRefinement,
     settings: settingsState.settings,

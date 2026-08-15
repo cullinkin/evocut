@@ -9,7 +9,7 @@ import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { SuggestionSheet } from './Suggestion.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
-import { downloadLog, downloadProject, useSession } from './session.ts';
+import { downloadLog, downloadProject, useSession, type RefineProgress } from './session.ts';
 
 /**
  * The editor.
@@ -235,14 +235,11 @@ export function App() {
       </header>
 
       {session.refining && (
-        <p className="relink">
-          Asking Claude ({findModel(session.settings.model)?.label ?? session.settings.model}) for
-          edits. Only the timeline description and the
-          measurements leave this device — never the footage.{' '}
-          <button className="ghost small" onClick={session.cancelRefinement}>
-            Cancel
-          </button>
-        </p>
+        <RefineBanner
+          model={findModel(session.settings.model)?.label ?? session.settings.model}
+          progress={session.refineProgress}
+          onCancel={session.cancelRefinement}
+        />
       )}
 
       {session.missingMedia.length > 0 && (
@@ -429,6 +426,51 @@ export function App() {
         </button>
       </footer>
     </main>
+  );
+}
+
+/**
+ * What the pass is doing, while it does it.
+ *
+ * A pass over fifty clips runs for minutes, and the version of this that said "Thinking…"
+ * and nothing else was indistinguishable from a hang. The first thing anyone does about a
+ * hang is reload — which throws away the pass they were waiting for and bills them for it.
+ *
+ * So: a clock that visibly moves, and the count of edits drafted so far, read off the
+ * answer as it streams in.
+ */
+function RefineBanner({
+  model,
+  progress,
+  onCancel,
+}: {
+  model: string;
+  progress: RefineProgress | null;
+  onCancel(): void;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const seconds = progress ? Math.max(0, Math.round((now - progress.startedAt) / 1000)) : 0;
+  const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+  return (
+    <p className="relink">
+      Asking Claude ({model}) for edits — {elapsed}.{' '}
+      {progress?.phase === 'drafting'
+        ? progress.ops > 0
+          ? `Writing the edit: ${progress.ops} so far.`
+          : 'Writing the edit.'
+        : 'Reading the timeline.'}{' '}
+      Only the timeline description and the measurements leave this device — never the
+      footage. Keep this tab in front until it finishes.{' '}
+      <button className="ghost small" onClick={onCancel}>
+        Cancel
+      </button>
+    </p>
   );
 }
 
