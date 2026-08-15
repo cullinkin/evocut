@@ -21,11 +21,11 @@ for automating the first pass later.
 
 | | |
 | --- | --- |
-| `packages/edl` | **Working.** Schema, time model, op engine, validation, log. 78 tests. |
-| `packages/store` | **Working.** OPFS media, IndexedDB projects and logs. 36 tests. |
+| `packages/edl` | **Working.** Schema, time model, op engine, validation, log. 86 tests. |
+| `packages/store` | **Working.** OPFS media (IndexedDB fallback), projects and logs. 38 tests. |
 | `packages/renderer` | **Sampling core working**, WebCodecs pipeline not started. |
 | `packages/agent` | **Prompt, repair loop, and a local stand-in planner.** No provider wired. |
-| `apps/web` | **Coarse pass and refinement review working.** No render screen. |
+| `apps/web` | **Timeline editor and refinement review working.** No render screen. |
 
 Early prototype. The EDL is the piece everything else depends on, so it was built first
 and properly; the rest is scaffolding of varying thickness around it.
@@ -42,10 +42,16 @@ npm test
 npm run dev     # then open the printed network URL on a phone
 ```
 
-The coarse pass: pick a video, scrub, **Split here** at a cut point, **Drop** the clips you
-do not want, **Finish coarse pass** to freeze it. Then **Refine** proposes edits, each with
-a reason, and you keep or skip them one at a time. **Export EDL** and **Export log** give
-you the two artefacts.
+The coarse pass works like an editor: drag the playhead, **Cut** at it, tap a clip to
+select it, then drag either end to trim — or to pull footage back out of the original take,
+which the hatched band beside the clip shows you the reach of. **Delete** and **Undo** do
+what you expect. **Done** freezes the pass; **Refine** then proposes edits, each with a
+reason, and you keep or skip them one at a time. **Export EDL** and **Export log** give you
+the two artefacts.
+
+Built for a phone: full-screen layout with safe-area insets, 44px touch targets, real
+touch-drag gestures that iOS will not steal, and a manifest so it runs from the home
+screen without Safari's chrome.
 
 Everything is stored on the device — footage in OPFS, projects and logs in IndexedDB — so
 closing the tab and coming back resumes where you left off. Nothing is uploaded anywhere.
@@ -58,6 +64,7 @@ packages/store/       local persistence: OPFS media, IndexedDB projects and logs
 packages/renderer/    output pipeline; currently the pure sampling core
 packages/agent/       refinement pass: prompts, op validation, repair rounds
 apps/web/             mobile web app for the coarse pass
+apps/web/e2e/         browser checks: real touch gestures on an iPhone profile
 docs/edl-spec.md      the EDL model and why it is shaped this way
 docs/architecture.md  how the pieces fit, and what to build next
 ```

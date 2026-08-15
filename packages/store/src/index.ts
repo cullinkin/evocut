@@ -1,4 +1,5 @@
 import { IdbConnection, IdbMediaIndex, IdbProjectStore } from './idb.js';
+import { IdbMediaStore } from './idb-media.js';
 import { OpfsMediaStore } from './opfs.js';
 import { createMemoryStores } from './memory.js';
 import type { Stores } from './types.js';
@@ -6,8 +7,9 @@ import type { Stores } from './types.js';
 /**
  * `@evocut/store` — local persistence.
  *
- * Media goes to OPFS, everything else to IndexedDB. The split is about access pattern,
- * not taste: the renderer needs to stream a source lazily, which an OPFS file handle
+ * Media goes to OPFS where the browser can write to it, IndexedDB blobs where it cannot,
+ * and everything else to IndexedDB either way. The OPFS preference is about access
+ * pattern: the renderer needs to stream a source lazily, which an OPFS file handle
  * supports and an IndexedDB blob does not, while projects and log rows need querying and
  * partial updates, which is the opposite.
  *
@@ -20,31 +22,43 @@ export * from './fingerprint.js';
 export * from './bind.js';
 export * from './memory.js';
 export { OpfsMediaStore, type MediaIndex } from './opfs.js';
+export { IdbMediaStore } from './idb-media.js';
 export { IdbConnection, IdbProjectStore, IdbMediaIndex, CorruptProjectError, DB_NAME, DB_VERSION } from './idb.js';
 
-/** True when this browser can persist anything at all. */
-export function isPersistenceSupported(): boolean {
-  return OpfsMediaStore.isSupported() && IdbConnection.isSupported();
+/** How media is being stored, for the storage screen and for diagnosing a phone. */
+export type MediaBackend = 'opfs' | 'indexeddb' | 'memory';
+
+export interface AppStores extends Stores {
+  persistent: boolean;
+  backend: MediaBackend;
 }
 
 /**
- * The real stores, or in-memory ones when the browser cannot do better.
+ * The best stores this browser can manage.
  *
- * Falling back rather than failing is deliberate: a private window with OPFS disabled
+ * Degrading rather than failing is deliberate: a private window with storage disabled
  * should still let someone try the coarse pass, just without keeping it. The app tells
- * them which mode they are in via the returned `persistent` flag.
+ * them which mode they are in via `persistent`.
  */
-export function createStores(): Stores & { persistent: boolean } {
-  if (!isPersistenceSupported()) {
-    return { ...createMemoryStores(), persistent: false };
+export function createStores(): AppStores {
+  if (!IdbConnection.isSupported()) {
+    return { ...createMemoryStores(), persistent: false, backend: 'memory' };
   }
 
   const connection = new IdbConnection();
+  const index = new IdbMediaIndex(connection);
+  const opfs = OpfsMediaStore.isSupported();
+
   return {
-    media: new OpfsMediaStore(new IdbMediaIndex(connection)),
+    media: opfs ? new OpfsMediaStore(index) : new IdbMediaStore(connection, index),
     projects: new IdbProjectStore(connection),
     persistent: true,
+    backend: opfs ? 'opfs' : 'indexeddb',
   };
+}
+
+export function isPersistenceSupported(): boolean {
+  return IdbConnection.isSupported();
 }
 
 /**

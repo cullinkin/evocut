@@ -100,15 +100,55 @@ proposes forty trains people to hit "accept all", and an accept-all is worth not
 label. It also checks its own proposals apply cleanly before emitting them, because a
 rejected op wastes a review slot.
 
-### `@evocut/web` — coarse pass and review working, render screen not started
+### `@evocut/web` — editor and review working, render screen not started
 
-Vite + React, mobile-first, dark. Import a recording, scrub, split at the playhead, drop
-and restore clips, freeze the coarse pass, review the refinement, export the EDL and the
-log. Work is saved continuously and resumes after a reload.
+Vite + React, mobile-first, dark. A direct-manipulation timeline: drag the playhead, cut
+at it, tap a clip to select it, drag either end to trim or to pull footage back out of the
+original take, delete, undo. Work is saved continuously and resumes after a reload.
 
-There is intentionally no trim handle, no effect panel, no zoom control on the coarse
-screen. The bet is that a person on a phone is good at one judgement — "is this bit worth
-keeping?" — and that the refinement pass is what everything else is for.
+**This replaced an earlier design that deliberately had no trim handles.** That version
+bet a person on a phone was good at exactly one judgement — "is this bit worth keeping?" —
+and that everything finer belonged to the refinement pass. The bet was wrong in practice:
+a coarse cut you cannot nudge is a coarse cut you make twice, and the refinement pass
+cannot read your mind about which four frames were the problem. The two-pass model is
+unchanged; what changed is that the first pass is now a real editor rather than a list.
+
+#### Timeline mechanics worth knowing
+
+**A gapless track pins clip starts.** Clip N begins wherever clip N-1 ends, so trimming
+the head of a clip does not move its left edge — it changes the clip's *length*, and
+everything after it shifts. That is why a trim drag captures the state it started from:
+deriving the new edge from the clip's live position each frame feeds the drag into itself
+and the handle accelerates away from the finger.
+
+**One gesture, one op.** A trim drag renders from a local draft and emits a single `trim`
+op on release. Committing per frame would bury the revision chain and the log under
+gesture noise; what lands in the EDL should be the decision, not the finger movement.
+Scrub logging is throttled to 4/second for the same reason, with the final position of
+every drag always recorded.
+
+**The headroom ghost is load-bearing.** The hatched band beside a selected clip is the
+unused source on that side. Without it there is nothing on screen to say a clip can be
+made longer, or by how much — "drag the end to extend" is invisible otherwise.
+
+**Filmstrip frames are cached per source, not per clip**, so trimming changes which
+cached frames are visible rather than invalidating a strip, and two clips from the same
+take share one. Extraction runs in the background and the UI renders what has arrived.
+
+#### iPhone specifics
+
+The touch work is real work, not a media query. `touch-action` is set per element —
+`pan-x` on the timeline lane so it scrolls, `none` on the playhead and trim handles so a
+drag is a drag. That property is the only way to tell iOS a gesture is ours;
+`preventDefault` on touchmove is both too late and too blunt. Handles hit-test at 44px
+around a 12px paint, because a thumb is ~9mm and a trim handle cannot be. The layout is
+`100dvh` with `env(safe-area-inset-*)` padding, the page itself never scrolls, and the
+app ships a manifest and apple-touch-icon so it runs full-screen from the home screen.
+
+`packages/store` also feature-detects OPFS `createWritable` rather than checking for OPFS
+at all: iOS Safari exposed OPFS reads well before it could be written to, so the naive
+check reports success on an iPhone and then fails on the first import. Where it is
+missing, media falls back to IndexedDB blobs.
 
 The **review screen** is where usage becomes labelled data, and its design follows from
 that. Nothing starts accepted: a screen that opens with every box ticked collects consent,

@@ -1,8 +1,25 @@
 /*
- * Mobile first and dark by default: the coarse pass happens on a phone, often on
- * footage that was just shot, often not in a well-lit room. Controls are sized for a
- * thumb (44px minimum) and the clip list is the tallest thing on the page, because
- * scanning clips is the actual work.
+ * Mobile first, iPhone first, dark by default: the coarse pass happens on a phone, often
+ * on footage that was just shot, often not in a well-lit room.
+ *
+ * The iOS-specific decisions are all in one place here rather than scattered:
+ *
+ *  - `100dvh`, never `100vh`. iOS reports `vh` against the *expanded* viewport, so a
+ *    full-height layout hides its own bottom row behind the Safari toolbar.
+ *  - `env(safe-area-inset-*)` on the outer padding, with `viewport-fit=cover` in the
+ *    markup, so the timeline clears the home indicator instead of sitting under it.
+ *  - `touch-action` per element: `pan-x` on the timeline lane so it scrolls, `none` on
+ *    the playhead and trim handles so a drag is a drag. iOS has no other way to say
+ *    "this gesture is mine" — `preventDefault` on touchmove is too late and too blunt.
+ *  - `-webkit-tap-highlight-color: transparent` and `user-select: none`, because the
+ *    default grey flash and the text-selection loupe both fire constantly on a UI made
+ *    of small tappable blocks.
+ *  - `-webkit-touch-callout: none` on the timeline, or a long press on a thumbnail
+ *    offers to save the image.
+ *  - No text inputs under 16px. iOS zooms the whole page when focusing anything smaller,
+ *    and there is no way back out with `user-scalable=no` ignored.
+ *  - Controls are 44px minimum, Apple's own touch target floor. The trim handle paints
+ *    3px wide and hit-tests 44px, because a thumb is ~9mm and a trim handle cannot be.
  */
 
 :root {
@@ -14,11 +31,13 @@
   --muted: #9a9aab;
   --accent: #6c8cff;
   --danger: #ff6b6b;
+  --lane-height: 64px;
   color-scheme: dark;
 }
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
 html,
@@ -28,27 +47,47 @@ body {
   color: var(--text);
   font: 16px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   overscroll-behavior: none;
+  /* The editor is a fixed-viewport tool. Letting the page itself scroll means a
+     mis-aimed drag scrolls the UI instead of moving the playhead. */
+  overflow: hidden;
+  height: 100%;
+}
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .shell {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 100dvh;
-  max-width: 560px;
+  height: 100dvh;
+  max-width: 640px;
   margin: 0 auto;
-  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
 }
 
+/* Only the non-editing screens scroll. */
 .shell.empty {
   justify-content: center;
   text-align: center;
+  overflow-y: auto;
+}
+
+.shell.editor {
+  gap: 10px;
+  overflow: hidden;
 }
 
 h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lede {
@@ -59,13 +98,19 @@ h1 {
 header {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+header .title {
+  flex: 1;
+  min-width: 0;
 }
 
 .meta {
   margin: 2px 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 button {
@@ -78,10 +123,11 @@ button {
   font: inherit;
   font-size: 15px;
   cursor: pointer;
+  touch-action: manipulation; /* kills the 300ms double-tap-zoom delay on iOS */
 }
 
 button:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: default;
 }
 
@@ -92,11 +138,27 @@ button.primary {
   font-weight: 600;
 }
 
+button.small {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 14px;
+}
+
 button.ghost {
   background: transparent;
   border-color: transparent;
   color: var(--muted);
   padding: 0 10px;
+}
+
+button.icon {
+  min-width: 44px;
+  padding: 0 10px;
+  font-size: 16px;
+}
+
+button.danger {
+  color: var(--danger);
 }
 
 .picker input {
@@ -115,12 +177,14 @@ button.ghost {
   cursor: pointer;
 }
 
+/* --- Preview --- */
+
 .player {
+  flex: 1 1 auto;
+  min-height: 0;
   background: #000;
   border-radius: 12px;
   overflow: hidden;
-  aspect-ratio: 9 / 16;
-  max-height: 45dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -135,115 +199,321 @@ button.ghost {
 .transport {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  flex: 0 0 auto;
 }
 
-.transport input[type='range'] {
-  flex: 1;
-  accent-color: var(--accent);
-  min-height: 44px;
+button.play {
+  min-width: 64px;
+  font-size: 18px;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0b0f;
 }
 
 .clock {
   font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  margin-left: auto;
+}
+
+.clock em {
+  font-style: normal;
   color: var(--muted);
-  font-size: 13px;
-  min-width: 62px;
-  text-align: right;
 }
 
-.actions {
-  display: flex;
-  gap: 8px;
-}
+/* --- Timeline --- */
 
-.actions button {
-  flex: 1;
-}
-
-.clips {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.timeline {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  flex: 1;
+  gap: 6px;
+  -webkit-touch-callout: none;
 }
 
-.clip {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-.clip.active {
-  border-color: var(--accent);
-}
-
-/* A dropped clip stays on screen, dimmed. Vanishing it would make "undo" feel like a
-   recovery operation rather than a toggle, and this pass is meant to be reversible. */
-.clip.dropped {
-  opacity: 0.45;
-}
-
-.clip-main {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  text-align: left;
-  padding: 10px 12px;
-}
-
-.index {
-  width: 24px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.times {
-  display: flex;
-  flex-direction: column;
-}
-
-.times small {
-  color: var(--muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.clip-actions {
+.timeline-tools {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding-right: 8px;
 }
 
-.clip-actions button {
-  min-height: 36px;
-  padding: 0 10px;
+.timeline-clock {
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
-  border-radius: 8px;
+  color: var(--muted);
 }
 
-.clip-actions button:last-child {
-  color: var(--danger);
+.timeline-spacer {
+  flex: 1;
+}
+
+.timeline-tools button.icon {
+  min-height: 36px;
+  font-size: 14px;
+}
+
+.timeline-scroller {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  /* Horizontal panning only: a vertical swipe here must not scroll anything. */
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.timeline-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/* While a handle is being dragged the lane must not also pan under the finger. */
+.timeline-scroller.dragging {
+  touch-action: none;
+}
+
+.timeline-content {
+  position: relative;
+  height: calc(var(--lane-height) + 30px);
+}
+
+.ruler {
+  position: relative;
+  height: 30px;
+  touch-action: none;
+}
+
+/* Labels sit low in the ruler so the playhead's grip, which lives at the top, does not
+   cover the tick it is parked on. */
+.tick {
+  position: absolute;
+  top: 13px;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  padding-left: 4px;
+  border-left: 1px solid var(--line);
+  line-height: 14px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.timeline-lane {
+  position: relative;
+  height: var(--lane-height);
+}
+
+.clip-block {
+  position: absolute;
+  top: 0;
+  height: var(--lane-height);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+
+.clip-block.selected {
+  border-color: var(--accent);
+  z-index: 2;
+}
+
+/* A dropped clip stays visible, dimmed. Vanishing it would make restoring feel like a
+   recovery operation rather than a toggle. */
+.clip-block.dropped {
+  opacity: 0.35;
+}
+
+.clip-thumbs {
+  display: flex;
+  height: 100%;
+  pointer-events: none;
+}
+
+.clip-thumbs img,
+.thumb-placeholder {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb-placeholder {
+  background: linear-gradient(135deg, #2a2a37, #1e1e28);
+}
+
+.clip-badge {
+  position: absolute;
+  left: 4px;
+  bottom: 3px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.65);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.clip-badge em {
+  font-style: normal;
+  color: var(--accent);
+}
+
+/* The raw footage waiting either side of the selected clip. Without this drawn, nothing
+   on screen says a clip can be made longer, or by how much. */
+/* A band at the top rather than a full-height fill: the space beside a clip usually
+   belongs to its neighbour, and covering that neighbour's thumbnails to advertise reach
+   would trade one piece of information for another. */
+.headroom {
+  position: absolute;
+  top: 0;
+  height: 16px;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(108, 140, 255, 0.16),
+    rgba(108, 140, 255, 0.16) 5px,
+    transparent 5px,
+    transparent 10px
+  );
+  border-top: 1px dashed rgba(108, 140, 255, 0.5);
+  border-bottom: 1px dashed rgba(108, 140, 255, 0.5);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.trim-handle {
+  position: absolute;
+  top: -4px;
+  height: calc(var(--lane-height) + 8px);
+  width: 44px; /* the hit area */
+  margin-left: -22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  z-index: 4;
+  cursor: ew-resize;
+}
+
+.trim-handle .grip {
+  width: 12px;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  position: relative;
+}
+
+/* The two ridges that say "this is draggable" at a glance. */
+.trim-handle .grip::after {
+  content: '';
+  position: absolute;
+  inset: 40% 4px;
+  border-left: 1px solid rgba(11, 11, 15, 0.7);
+  border-right: 1px solid rgba(11, 11, 15, 0.7);
+}
+
+.trim-handle.active .grip {
+  background: #fff;
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.playhead-line {
+  position: absolute;
+  top: 12px;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: #fff;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+}
+
+.playhead-grip {
+  position: absolute;
+  top: 0;
+  width: 44px;
+  height: 44px;
+  margin-left: -22px;
+  touch-action: none;
+  z-index: 6;
+  cursor: grab;
+}
+
+.playhead-grip::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.playhead-grip.active::before {
+  background: var(--accent);
+  transform: scale(1.2);
+}
+
+/* --- Toolbar --- */
+
+.toolbar {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.toolbar button {
+  flex: 1;
+  min-height: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 0 4px;
+  font-size: 18px;
+}
+
+.toolbar button small {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.selection-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  flex: 0 0 auto;
 }
 
 footer {
   display: flex;
   gap: 8px;
   justify-content: center;
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
+  flex: 0 0 auto;
+}
+
+footer button {
+  min-height: 36px;
+  font-size: 13px;
 }
 
 .error {
@@ -253,9 +523,10 @@ footer {
   background: rgba(255, 107, 107, 0.12);
   color: var(--danger);
   font-size: 14px;
+  flex: 0 0 auto;
 }
 
-/* --- Project list, relink prompt, and the review screen --- */
+/* --- Project list and relink --- */
 
 .recents {
   list-style: none;
@@ -295,10 +566,6 @@ footer {
   font-size: 12px;
 }
 
-button.danger {
-  color: var(--danger);
-}
-
 .picker.small span {
   min-height: 40px;
   line-height: 40px;
@@ -316,6 +583,7 @@ button.danger {
   background: rgba(108, 140, 255, 0.1);
   border: 1px solid rgba(108, 140, 255, 0.35);
   font-size: 14px;
+  flex: 0 0 auto;
 }
 
 .relink p,
@@ -328,11 +596,16 @@ button.danger {
   color: var(--muted);
 }
 
+/* --- Review screen --- */
+
 .review {
   display: flex;
   flex-direction: column;
   gap: 12px;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .review h2 {
@@ -357,7 +630,6 @@ button.danger {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  flex: 1;
 }
 
 .proposal {
@@ -402,7 +674,7 @@ button.danger {
 }
 
 button.verdict {
-  min-height: 32px;
+  min-height: 36px;
   padding: 0 12px;
   font-size: 13px;
   border-radius: 8px;
@@ -421,7 +693,7 @@ button.verdict.on {
   gap: 8px;
   position: sticky;
   bottom: 0;
-  padding: 12px 0 calc(4px + env(safe-area-inset-bottom));
+  padding: 12px 0 4px;
   background: linear-gradient(to top, var(--bg) 70%, transparent);
 }
 
@@ -429,8 +701,16 @@ button.verdict.on {
   flex: 1;
 }
 
-.times em {
-  font-style: normal;
-  color: var(--muted);
-  font-weight: 400;
+/* Landscape on a phone: the preview and the timeline compete for a very short viewport,
+   so the preview yields and the timeline keeps its full height. */
+@media (max-height: 480px) {
+  .player {
+    min-height: 80px;
+  }
+  .toolbar button {
+    min-height: 44px;
+  }
+  footer {
+    display: none;
+  }
 }

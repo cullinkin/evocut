@@ -8,3 +8,4 @@ coverage/
 # Exported project artefacts, in case anyone dogfoods inside the repo.
 *.evocut.json
 *.evocut.jsonl
+**/e2e/artifacts/

@@ -17,6 +17,7 @@ import {
 } from '@evocut/edl';
 import { CorruptProjectError, IdbConnection, IdbMediaIndex, IdbProjectStore } from '../src/idb.js';
 import { MemoryMediaStore, MemoryProjectStore } from '../src/memory.js';
+import { IdbMediaStore } from '../src/idb-media.js';
 import { bindProjectMedia, orphanedMedia, rebindSource } from '../src/bind.js';
 import { fingerprintFile, mediaPath } from '../src/fingerprint.js';
 import type { ProjectStore } from '../src/types.js';
@@ -374,5 +375,44 @@ describe('the import path end to end', () => {
     expect(reopened!.timeline.tracks[0]!.clips[0]!.sourceOut).toBe(S(60));
     expect(bound.missing).toEqual([]);
     expect(bound.urls.size).toBe(1);
+  });
+});
+
+describe('IdbMediaStore', () => {
+  it('behaves like the OPFS store for browsers that cannot write to OPFS', async () => {
+    // iOS Safari exposed OPFS reads before `createWritable`, so this path is what an
+    // older iPhone actually runs. It has to satisfy the same contract.
+    const connection = new IdbConnection(new IDBFactory());
+    const media = new IdbMediaStore(connection, new IdbMediaIndex(connection));
+
+    const record = await media.put(makeFile('take1.mp4', 'footage'));
+    expect(record.path).toBe(mediaPath(record.fingerprint));
+    expect(await media.has(record.path)).toBe(true);
+
+    const readBack = await media.get(record.path);
+    expect(await readBack!.text()).toBe('footage');
+    expect(readBack!.name).toBe('take1.mp4');
+    expect(readBack!.type).toBe('video/mp4');
+
+    // Same dedupe behaviour as OPFS.
+    const again = await media.put(makeFile('take1-copy.mp4', 'footage'));
+    expect(again.path).toBe(record.path);
+    expect(await media.list()).toHaveLength(1);
+    expect(await media.usage()).toBe(7);
+
+    await media.delete(record.path);
+    expect(await media.get(record.path)).toBeNull();
+    expect(await media.list()).toEqual([]);
+  });
+
+  it('binds a loaded project to media it holds', async () => {
+    const connection = new IdbConnection(new IDBFactory());
+    const media = new IdbMediaStore(connection, new IdbMediaIndex(connection));
+    const record = await media.put(makeFile('take1.mp4', 'footage'));
+    const project = rebindSource(makeProject(), 'src_take1', record.path, record.fingerprint);
+
+    const bound = await bindProjectMedia(project, media);
+    expect(bound.missing).toEqual([]);
+    expect(bound.urls.get('src_take1')).toMatch(/^blob:/);
   });
 });

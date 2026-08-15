@@ -1,24 +1,32 @@
-import { useCallback, useState } from 'react';
-import { clipEnd, formatTimecode, outputDuration, timelineDuration, type Clip } from '@evocut/edl';
+import { useCallback, useEffect, useState } from 'react';
+import { formatTimecode, timelineDuration } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
 import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
+import { TimelineEditor } from './Timeline.tsx';
 import { downloadLog, downloadProject, useSession } from './session.ts';
 
 /**
- * The coarse pass, and the review of what the machine proposed afterwards.
+ * The editor.
  *
- * There is intentionally no trim handle, no effect panel, and no zoom control on the
- * coarse screen. The product bet is that a person on a phone is good at one judgement —
- * "is this bit worth keeping?" — and that the refinement pass is what everything else is
- * for. The review screen is where they judge that pass.
+ * Laid out for a phone held in one hand: preview on top, transport under it, the timeline
+ * at the bottom where a thumb naturally rests. Nothing scrolls vertically during editing —
+ * the whole screen is the tool, and a page that moves under a drag is the fastest way to
+ * make touch editing feel broken.
  */
 export function App() {
   const session = useSession();
   const [playing, setPlaying] = useState(false);
 
-  const onTime = useCallback((t: number) => session.seek(t), [session]);
+  const onTime = useCallback((t: number) => session.seek(t, false), [session]);
   const onEnded = useCallback(() => setPlaying(false), []);
+
+  // Any edit stops playback. Trimming the clip you are watching while it plays fights
+  // the seek logic and makes the preview stutter for no benefit.
+  const editing = session.selectedClipId;
+  useEffect(() => {
+    if (editing) setPlaying(false);
+  }, [editing]);
 
   if (session.status === 'loading') {
     return (
@@ -28,7 +36,7 @@ export function App() {
     );
   }
 
-  if (session.status === 'empty' || !session.project) {
+  if (session.status === 'empty' || !session.project || !session.previewTimeline) {
     return (
       <StartScreen
         busy={session.busy}
@@ -42,11 +50,12 @@ export function App() {
     );
   }
 
-  const { project, playhead, plan } = session;
-  const clips = project.timeline.tracks[0]?.clips ?? [];
+  const { project, previewTimeline, playhead, plan } = session;
+  const clips = previewTimeline.tracks[0]?.clips ?? [];
   const kept = clips.filter((clip) => clip.enabled);
-  const total = timelineDuration(project.timeline);
+  const total = timelineDuration(previewTimeline);
   const frozen = project.stage !== 'coarse';
+  const selected = clips.find((c) => c.id === session.selectedClipId) ?? null;
   const mediaUrl = session.mediaUrls.get(clips[0]?.sourceId ?? '') ?? null;
 
   if (plan) {
@@ -56,7 +65,7 @@ export function App() {
           <button className="ghost" onClick={session.discardReview} aria-label="Back">
             ←
           </button>
-          <div>
+          <div className="title">
             <h1>{project.name}</h1>
             <p className="meta">Refinement review</p>
           </div>
@@ -76,12 +85,12 @@ export function App() {
   }
 
   return (
-    <main className="shell">
+    <main className="shell editor">
       <header>
-        <button className="ghost" onClick={session.closeProject} aria-label="Back">
+        <button className="ghost" onClick={session.closeProject} aria-label="Projects">
           ←
         </button>
-        <div>
+        <div className="title">
           <h1>{project.name}</h1>
           <p className="meta">
             {kept.length} {kept.length === 1 ? 'clip' : 'clips'} ·{' '}
@@ -89,6 +98,15 @@ export function App() {
             {!session.persistent && ' · not saved'}
           </p>
         </div>
+        {frozen ? (
+          <button className="primary small" onClick={session.requestRefinement}>
+            Refine
+          </button>
+        ) : (
+          <button className="primary small" onClick={session.finishCoarsePass} disabled={kept.length === 0}>
+            Done
+          </button>
+        )}
       </header>
 
       {session.missingMedia.length > 0 && (
@@ -102,7 +120,7 @@ export function App() {
       {mediaUrl && (
         <Player
           objectUrl={mediaUrl}
-          timeline={project.timeline}
+          timeline={previewTimeline}
           playhead={playhead}
           playing={playing}
           onTime={onTime}
@@ -111,50 +129,65 @@ export function App() {
       )}
 
       <div className="transport">
-        <button className="primary" onClick={() => setPlaying((p) => !p)} disabled={!mediaUrl}>
-          {playing ? 'Pause' : 'Play'}
+        <button className="icon" onClick={() => session.seek(0)} aria-label="Back to start">
+          ⏮
         </button>
-        <input
-          type="range"
-          min={0}
-          max={Math.max(total - 1, 0)}
-          value={Math.min(playhead, total)}
-          onChange={(event) => session.seek(Number(event.target.value), true)}
-        />
-        <span className="clock">{formatTimecode(playhead, undefined, { compact: true })}</span>
+        <button className="play" onClick={() => setPlaying((p) => !p)} disabled={!mediaUrl}>
+          {playing ? '❚❚' : '▶'}
+        </button>
+        <span className="clock">
+          {formatTimecode(playhead, undefined, { compact: true })}
+          <em> / {formatTimecode(total, undefined, { compact: true })}</em>
+        </span>
       </div>
 
-      <div className="actions">
-        <button onClick={session.splitAtPlayhead} disabled={frozen}>
-          Split here
+      <TimelineEditor
+        timeline={previewTimeline}
+        sources={project.sources}
+        mediaUrls={session.mediaUrls}
+        playhead={playhead}
+        selectedClipId={session.selectedClipId}
+        frozen={frozen}
+        onSeek={session.seek}
+        onSelect={session.select}
+        onTrimPreview={session.previewTrim}
+        onTrimCommit={session.commitTrim}
+        onTrimCancel={session.cancelTrim}
+      />
+
+      <nav className="toolbar" aria-label="Editing tools">
+        <button onClick={session.undo} disabled={!session.canUndo} aria-label="Undo">
+          <span aria-hidden="true">⤺</span>
+          <small>Undo</small>
         </button>
-        {frozen ? (
-          <button className="primary" onClick={session.requestRefinement}>
-            Refine
-          </button>
-        ) : (
-          <button onClick={session.finishCoarsePass} disabled={kept.length === 0}>
-            Finish coarse pass
-          </button>
-        )}
-      </div>
+        <button onClick={session.splitAtPlayhead} disabled={frozen} aria-label="Cut at playhead">
+          <span aria-hidden="true">✂</span>
+          <small>Cut</small>
+        </button>
+        <button
+          onClick={() => selected && session.toggleClip(selected.id)}
+          disabled={frozen || !selected}
+          aria-label={selected?.enabled === false ? 'Restore clip' : 'Drop clip'}
+        >
+          <span aria-hidden="true">{selected?.enabled === false ? '◍' : '◌'}</span>
+          <small>{selected?.enabled === false ? 'Restore' : 'Drop'}</small>
+        </button>
+        <button
+          className="danger"
+          onClick={session.deleteSelected}
+          disabled={frozen || !selected}
+          aria-label="Delete clip"
+        >
+          <span aria-hidden="true">🗑</span>
+          <small>Delete</small>
+        </button>
+      </nav>
 
-      <ol className="clips">
-        {clips.map((clip, index) => (
-          <ClipRow
-            key={clip.id}
-            clip={clip}
-            index={index}
-            active={playhead >= clip.start && playhead < clipEnd(clip)}
-            frozen={frozen}
-            onSeek={() => session.seek(clip.start)}
-            onToggle={() => session.toggleClip(clip.id)}
-            onKeepOnly={() => session.keepOnly(clip.id)}
-            onRemove={() => session.removeClip(clip.id)}
-          />
-        ))}
-      </ol>
-
+      {selected && (
+        <p className="selection-hint">
+          Clip {clips.indexOf(selected) + 1} selected · drag either end to trim or extend
+        </p>
+      )}
       {session.error && <p className="error">{session.error}</p>}
 
       <footer>
@@ -192,6 +225,10 @@ function StartScreen({ busy, error, persistent, recents, onPick, onOpen, onDelet
       </p>
 
       <label className="picker">
+        {/*
+          `capture` is deliberately absent: on iOS adding it forces the camera and hides
+          the library, and the footage people want to edit is already on their phone.
+        */}
         <input
           type="file"
           accept="video/*"
@@ -269,50 +306,5 @@ function RelinkPrompt({
         </label>
       ))}
     </div>
-  );
-}
-
-interface ClipRowProps {
-  clip: Clip;
-  index: number;
-  active: boolean;
-  frozen: boolean;
-  onSeek(): void;
-  onToggle(): void;
-  onKeepOnly(): void;
-  onRemove(): void;
-}
-
-function ClipRow({ clip, index, active, frozen, onSeek, onToggle, onKeepOnly, onRemove }: ClipRowProps) {
-  const classes = ['clip', active ? 'active' : '', clip.enabled ? '' : 'dropped'].filter(Boolean);
-
-  return (
-    <li className={classes.join(' ')}>
-      <button className="clip-main" onClick={onSeek}>
-        <span className="index">{index + 1}</span>
-        <span className="times">
-          <strong>
-            {formatTimecode(outputDuration(clip), undefined, { compact: true })}
-            {clip.speed !== 1 && <em> · {clip.speed}×</em>}
-            {clip.effects.length > 0 && <em> · {clip.effects.length} fx</em>}
-          </strong>
-          <small>
-            source {formatTimecode(clip.sourceIn, undefined, { compact: true })}–
-            {formatTimecode(clip.sourceOut, undefined, { compact: true })}
-          </small>
-        </span>
-      </button>
-      <div className="clip-actions">
-        <button onClick={onToggle} disabled={frozen} title={clip.enabled ? 'Drop this clip' : 'Bring it back'}>
-          {clip.enabled ? 'Drop' : 'Keep'}
-        </button>
-        <button onClick={onKeepOnly} disabled={frozen || !clip.enabled} title="Drop every other clip">
-          Only
-        </button>
-        <button onClick={onRemove} disabled={frozen} title="Delete permanently">
-          ✕
-        </button>
-      </div>
-    </li>
   );
 }

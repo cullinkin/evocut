@@ -91,3 +91,44 @@ export function sourceToTimeline(clip: Clip, sourceAt: Micros): Micros | null {
   if (sourceAt < clip.sourceIn || sourceAt >= clip.sourceOut) return null;
   return clip.start + Math.round((sourceAt - clip.sourceIn) / clip.speed);
 }
+
+/**
+ * How far each edge of a clip can be dragged.
+ *
+ * A trim handle can move in two directions and they mean different things: inwards
+ * shortens the clip, outwards recovers footage the coarse pass cut away. The outward
+ * limit is the source itself, so this is where "drag the end to extend" gets its stop.
+ *
+ * `headroom` is what the UI draws as the ghost either side of a selected clip — without
+ * it, nothing on screen says that extending is even possible.
+ */
+export interface TrimBounds {
+  /** Range `sourceIn` may take. */
+  inMin: Micros;
+  inMax: Micros;
+  /** Range `sourceOut` may take. */
+  outMin: Micros;
+  outMax: Micros;
+  /** Unused source before and after the clip, in source time. */
+  headroom: { head: Micros; tail: Micros };
+}
+
+export function trimBounds(
+  clip: Pick<Clip, 'sourceIn' | 'sourceOut'>,
+  sourceDurationUs: Micros,
+  minDurationUs = 100_000,
+): TrimBounds {
+  // Never let a drag collapse a clip to nothing; `normalizeTimeline` would drop it and
+  // the user would watch their clip vanish mid-gesture.
+  const floor = Math.min(minDurationUs, Math.max(1, sourceDurationUs));
+  return {
+    inMin: 0,
+    inMax: Math.max(0, clip.sourceOut - floor),
+    outMin: Math.min(clip.sourceIn + floor, sourceDurationUs),
+    outMax: sourceDurationUs,
+    headroom: {
+      head: clip.sourceIn,
+      tail: Math.max(0, sourceDurationUs - clip.sourceOut),
+    },
+  };
+}

@@ -3,12 +3,13 @@ import type { MediaIndex } from './opfs.js';
 import type { LoadedProject, MediaRecord, ProjectStore, ProjectSummary } from './types.js';
 
 export const DB_NAME = 'evocut';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
 const PROJECTS = 'projects';
 const EVENTS = 'events';
 const MEDIA = 'media';
 const META = 'meta';
+const BLOBS = 'blobs';
 
 /**
  * Thrown when a stored project no longer matches the schema.
@@ -61,6 +62,9 @@ export class IdbConnection {
         }
         if (!db.objectStoreNames.contains(MEDIA)) db.createObjectStore(MEDIA, { keyPath: 'fingerprint' });
         if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'key' });
+        // Only used by `IdbMediaStore`, the fallback for browsers that cannot write to
+        // OPFS. Created unconditionally so switching backends never needs an upgrade.
+        if (!db.objectStoreNames.contains(BLOBS)) db.createObjectStore(BLOBS, { keyPath: 'path' });
       };
 
       request.onsuccess = () => resolve(request.result);

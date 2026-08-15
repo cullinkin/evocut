@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  applyOps,
   commitOps,
   freezeCoarsePass,
   makeLogger,
@@ -13,6 +14,7 @@ import {
   type OpVerdict,
   type Project,
   type RefinementPlan,
+  type Timeline,
 } from '@evocut/edl';
 import { planLocalRefinement } from '@evocut/agent';
 import {
@@ -44,12 +46,31 @@ const stores = createStores();
 /** Coalesces saves. A scrub can fire many edits a second; IndexedDB should not see them all. */
 const SAVE_DEBOUNCE_MS = 400;
 
+/**
+ * Scrub logging is throttled to this.
+ *
+ * A drag emits sixty positions a second. The log wants the attention trail — where the
+ * playhead lingered before a cut landed — and sixty samples a second is noise wrapped
+ * around that signal, not more of it. The final position of every drag is always logged.
+ */
+const SCRUB_LOG_INTERVAL_MS = 250;
+
+/** How many steps back the editor can go. */
+const HISTORY_LIMIT = 50;
+
 export type SessionStatus = 'loading' | 'empty' | 'ready';
 
 export interface Session {
   status: SessionStatus;
   persistent: boolean;
   project: Project | null;
+  /**
+   * The timeline to render: the project's, with any in-progress trim drag applied.
+   * Both the player and the timeline read this, so a drag previews everywhere at once.
+   */
+  previewTimeline: Timeline | null;
+  selectedClipId: string | null;
+  canUndo: boolean;
   /** Object URLs by source id. */
   mediaUrls: Map<string, string>;
   missingMedia: MissingMedia[];
@@ -70,12 +91,21 @@ export interface Session {
   deleteProject(id: string): Promise<void>;
   closeProject(): void;
 
-  seek(to: number, viaScrub?: boolean): void;
+  seek(to: number, final?: boolean): void;
+  select(clipId: string | null): void;
   splitAtPlayhead(): void;
   removeClip(clipId: string): void;
+  deleteSelected(): void;
   toggleClip(clipId: string): void;
   keepOnly(clipId: string): void;
+  undo(): void;
   finishCoarsePass(): void;
+
+  /** Live feedback during a trim drag. Does not touch the project or the log. */
+  previewTrim(clipId: string, sourceIn: number, sourceOut: number): void;
+  /** End of a trim drag: one op, one revision, one log row. */
+  commitTrim(clipId: string, sourceIn: number, sourceOut: number): void;
+  cancelTrim(): void;
 
   requestRefinement(): void;
   setVerdict(index: number, accepted: boolean): void;
@@ -96,10 +126,14 @@ export function useSession(): Session {
   const [error, setError] = useState<string | null>(null);
   const [plan, setPlan] = useState<RefinementPlan | null>(null);
   const [verdicts, setVerdicts] = useState<Map<number, boolean>>(new Map());
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [draftTrim, setDraftTrim] = useState<{ clipId: string; sourceIn: number; sourceOut: number } | null>(null);
+  const [history, setHistory] = useState<Project[]>([]);
 
   const loggerRef = useRef<ReturnType<typeof makeLogger> | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const urlsRef = useRef<Map<string, string>>(new Map());
+  const lastScrubLogRef = useRef(0);
 
   const releaseUrls = useCallback(() => {
     for (const url of urlsRef.current.values()) URL.revokeObjectURL(url);
@@ -156,6 +190,9 @@ export function useSession(): Session {
       setPlayhead(0);
       setPlan(null);
       setVerdicts(new Map());
+      setSelectedClipId(null);
+      setDraftTrim(null);
+      setHistory([]);
       await bind(next);
       await stores.projects.setLastOpened(next.id);
       setStatus('ready');
@@ -321,6 +358,7 @@ export function useSession(): Session {
         return;
       }
 
+      setHistory((previous) => [...previous, project].slice(-HISTORY_LIMIT));
       setProject(result.project);
       record(type, { ops: result.applied, revisionId: result.revision.id, playhead });
       scheduleSave(result.project);
@@ -328,13 +366,62 @@ export function useSession(): Session {
     [playhead, project, record, scheduleSave],
   );
 
+  /**
+   * Step back one edit.
+   *
+   * Restores the whole previous project, `revisions` included, so the chain stays
+   * replayable rather than describing a timeline that no longer exists. The undone ops go
+   * into the log with the `edit.undo` row — "the user tried this and took it back" is
+   * signal we would otherwise throw away by rolling the revision off.
+   */
+  const undo = useCallback(() => {
+    const previous = history.at(-1);
+    if (!previous || !project) return;
+
+    const undone = project.revisions.at(-1);
+    setHistory((stack) => stack.slice(0, -1));
+    setProject(previous);
+    setDraftTrim(null);
+    setSelectedClipId(null);
+    record('edit.undo', {
+      ...(undone ? { ops: undone.ops, revisionId: undone.id } : {}),
+      playhead,
+    });
+    scheduleSave(previous);
+  }, [history, playhead, project, record, scheduleSave]);
+
   const seek = useCallback(
-    (to: number, viaScrub = false) => {
+    (to: number, final = true) => {
       const target = Math.max(0, to);
       setPlayhead(target);
-      record(viaScrub ? 'playback.scrub' : 'playback.seek', { playhead: target });
+
+      const now = Date.now();
+      if (!final && now - lastScrubLogRef.current < SCRUB_LOG_INTERVAL_MS) return;
+      lastScrubLogRef.current = now;
+      record(final ? 'playback.seek' : 'playback.scrub', { playhead: target });
     },
     [record],
+  );
+
+  const select = useCallback((clipId: string | null) => setSelectedClipId(clipId), []);
+
+  const previewTrim = useCallback(
+    (clipId: string, sourceIn: number, sourceOut: number) => setDraftTrim({ clipId, sourceIn, sourceOut }),
+    [],
+  );
+
+  const cancelTrim = useCallback(() => setDraftTrim(null), []);
+
+  const commitTrim = useCallback(
+    (clipId: string, sourceIn: number, sourceOut: number) => {
+      setDraftTrim(null);
+      const clip = project?.timeline.tracks[0]?.clips.find((c) => c.id === clipId);
+      // A drag that ended where it started is not an edit; recording one would put a
+      // no-op revision in the chain and a meaningless row in the training data.
+      if (!clip || (clip.sourceIn === sourceIn && clip.sourceOut === sourceOut)) return;
+      edit('clip.trim', [{ op: 'trim', clipId, sourceIn, sourceOut }]);
+    },
+    [edit, project],
   );
 
   const clipAtPlayhead = useCallback(() => {
@@ -353,7 +440,17 @@ export function useSession(): Session {
     edit('clip.split', [{ op: 'split', clipId: clip.id, at: playhead }]);
   }, [clipAtPlayhead, edit, playhead]);
 
-  const removeClip = useCallback((clipId: string) => edit('clip.remove', [{ op: 'remove', clipId }]), [edit]);
+  const removeClip = useCallback(
+    (clipId: string) => {
+      edit('clip.remove', [{ op: 'remove', clipId }]);
+      setSelectedClipId((current) => (current === clipId ? null : current));
+    },
+    [edit],
+  );
+
+  const deleteSelected = useCallback(() => {
+    if (selectedClipId) removeClip(selectedClipId);
+  }, [removeClip, selectedClipId]);
 
   const toggleClip = useCallback(
     (clipId: string) => {
@@ -436,12 +533,39 @@ export function useSession(): Session {
     setVerdicts(new Map());
   }, [plan, record]);
 
-  const duration = useMemo(() => (project ? timelineDuration(project.timeline) : 0), [project]);
+  /**
+   * The project's timeline with the in-progress trim applied.
+   *
+   * Derived rather than stored so there is exactly one timeline in play: the player, the
+   * timeline strip, and the duration readout all render this, which is why a trim drag
+   * previews in the preview window and not just under the finger.
+   */
+  const previewTimeline = useMemo(() => {
+    if (!project) return null;
+    if (!draftTrim) return project.timeline;
+
+    const result = applyOps(
+      project.timeline,
+      [{ op: 'trim', clipId: draftTrim.clipId, sourceIn: draftTrim.sourceIn, sourceOut: draftTrim.sourceOut }],
+      { sources: project.sources },
+    );
+    // A drag that would produce an invalid clip just shows the last good state; the
+    // handle stops rather than the preview flickering.
+    return result.errors.length > 0 ? project.timeline : result.timeline;
+  }, [project, draftTrim]);
+
+  const duration = useMemo(
+    () => (previewTimeline ? timelineDuration(previewTimeline) : 0),
+    [previewTimeline],
+  );
 
   return {
     status,
     persistent: stores.persistent,
     project,
+    previewTimeline,
+    selectedClipId,
+    canUndo: history.length > 0,
     mediaUrls,
     missingMedia,
     recentProjects,
@@ -458,11 +582,17 @@ export function useSession(): Session {
     deleteProject,
     closeProject,
     seek,
+    select,
     splitAtPlayhead,
     removeClip,
+    deleteSelected,
     toggleClip,
     keepOnly,
+    undo,
     finishCoarsePass,
+    previewTrim,
+    commitTrim,
+    cancelTrim,
     requestRefinement,
     setVerdict,
     setAllVerdicts,

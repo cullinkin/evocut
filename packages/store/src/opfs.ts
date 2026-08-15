@@ -22,8 +22,20 @@ export class OpfsMediaStore implements MediaStore {
     this.#index = index;
   }
 
+  /**
+   * Feature-detected, not version-detected.
+   *
+   * `getDirectory` alone is not enough: iOS Safari exposed OPFS reads well before
+   * `createWritable`, so a version check on "does OPFS exist" would report success on an
+   * iPhone and then fail on the first import. Both halves have to be present.
+   */
   static isSupported(): boolean {
-    return typeof navigator !== 'undefined' && typeof navigator.storage?.getDirectory === 'function';
+    return (
+      typeof navigator !== 'undefined' &&
+      typeof navigator.storage?.getDirectory === 'function' &&
+      typeof FileSystemFileHandle !== 'undefined' &&
+      'createWritable' in FileSystemFileHandle.prototype
+    );
   }
 
   async put(file: File): Promise<MediaRecord> {

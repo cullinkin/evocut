@@ -2,10 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <!-- viewport-fit=cover so the timeline can sit under the home indicator on iOS -->
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <!--
+      viewport-fit=cover lets the layout paint under the notch and home indicator, with
+      env(safe-area-inset-*) in the CSS pulling the controls back into the safe region.
+      user-scalable=no is ignored by iOS Safari by design; double-tap zoom is suppressed
+      with `touch-action: manipulation` on the controls instead, which is the mechanism
+      that actually works.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1"
+    />
     <meta name="theme-color" content="#0b0b0f" />
-    <!-- Inline so there is no second request; the app is meant to open fast on a phone. -->
+    <meta name="color-scheme" content="dark" />
+
+    <!-- Added to the home screen, this opens without Safari's chrome. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="EvoCut" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!-- Inline so there is no second request; the app should open fast on a phone. -->
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0b0f'/%3E%3Cpath d='M9 8h14M9 16h10M9 24h14' stroke='%236c8cff' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E"
