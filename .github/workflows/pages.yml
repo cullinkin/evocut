@@ -5,9 +5,9 @@ name: Deploy to Pages
 # `storage.persist()` behind a secure context, so a plain-HTTP LAN address from `npm run
 # dev` works but silently falls back to weaker storage.
 #
-# This needs Pages enabled at Settings -> Pages -> Source: GitHub Actions, and Pages on a
-# *private* repo needs a paid GitHub plan. If neither applies, `netlify.toml` in the repo
-# root configures the same build on Netlify's free tier, which serves private repos.
+# Pages on a *private* repo needs a paid GitHub plan. `netlify.toml` in the repo root
+# configures the same build on a free tier that does serve private repos, for anyone who
+# needs that instead.
 on:
   push:
     # Feature branches deploy too, because the whole point is trying the thing on a
@@ -42,10 +42,12 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      # No `enablement: true` here: the workflow token cannot create a Pages site
-      # ("Resource not accessible by integration"), and asking it to turns the clear
-      # "enable Pages on this repo" message into a confusing permissions one.
+      # `enablement` creates the Pages site through the API, so nobody has to find the
+      # setting. It is refused on a private repo without a paid plan, which is what the
+      # note above is about; on a public repo the workflow can set itself up.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: apps/web/dist
