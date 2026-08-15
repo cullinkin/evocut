@@ -1,4 +1,5 @@
 import { fingerprintFile, mediaPath } from './fingerprint.js';
+import { fingerprintFromPath, mimeOf, restoreFile } from './media-file.js';
 import type { MediaRecord, MediaStore } from './types.js';
 
 /**
@@ -63,7 +64,7 @@ export class OpfsMediaStore implements MediaStore {
       path,
       filename: file.name,
       sizeBytes: file.size,
-      ...(file.type ? { mimeType: file.type } : {}),
+      ...mimeOf(file),
       importedAt: new Date().toISOString(),
     };
     await this.#index.put(record);
@@ -73,7 +74,14 @@ export class OpfsMediaStore implements MediaStore {
   async get(path: string): Promise<File | null> {
     const handle = await this.#fileHandle(path, false);
     if (!handle) return null;
-    return handle.getFile();
+
+    const bytes = await handle.getFile();
+    // OPFS names a file after its path, and media paths carry no extension, so what
+    // comes back is called `000002eeec…` with `type: ""`. Safari will not decode an
+    // untyped blob URL, so the identity recorded at import is reapplied here.
+    const fingerprint = fingerprintFromPath(path);
+    const record = fingerprint ? await this.#index.get(fingerprint) : null;
+    return record ? restoreFile(bytes, record) : bytes;
   }
 
   async has(path: string): Promise<boolean> {

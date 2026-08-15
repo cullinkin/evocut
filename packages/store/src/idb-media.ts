@@ -1,4 +1,5 @@
 import { fingerprintFile, mediaPath } from './fingerprint.js';
+import { mimeOf, restoreFile } from './media-file.js';
 import type { IdbConnection } from './idb.js';
 import type { MediaIndex } from './opfs.js';
 import type { MediaRecord, MediaStore } from './types.js';
@@ -34,8 +35,9 @@ export class IdbMediaStore implements MediaStore {
     const existing = await this.#index.get(fingerprint);
     if (existing && (await this.has(path))) return existing;
 
+    const mime = mimeOf(file);
     await this.#db.run(BLOBS, 'readwrite', (store) =>
-      store.put({ path, blob: file, filename: file.name, type: file.type }),
+      store.put({ path, blob: file, filename: file.name, type: mime.mimeType ?? '' }),
     );
 
     const record: MediaRecord = {
@@ -43,7 +45,7 @@ export class IdbMediaStore implements MediaStore {
       path,
       filename: file.name,
       sizeBytes: file.size,
-      ...(file.type ? { mimeType: file.type } : {}),
+      ...mime,
       importedAt: new Date().toISOString(),
     };
     await this.#index.put(record);
@@ -58,7 +60,7 @@ export class IdbMediaStore implements MediaStore {
     );
     if (!row) return null;
     // Stored as a Blob; the app wants a File so the rest of the pipeline is uniform.
-    return new File([row.blob], row.filename, { type: row.type });
+    return restoreFile(row.blob, { filename: row.filename, mimeType: row.type });
   }
 
   async has(path: string): Promise<boolean> {

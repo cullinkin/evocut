@@ -43,6 +43,20 @@ check(
   [],
 );
 
+// The blob the player is handed must carry a MIME type. It did not, once: OPFS names a
+// file after its extension-less storage path, Chromium sniffed the container out of the
+// bytes and played it, and Safari refused — so this passed everywhere except the one
+// platform the app is for.
+check(
+  'mediaBlobIsTyped',
+  await page.evaluate(async () => {
+    const src = document.querySelector('.player video')?.src;
+    if (!src) return 'no video element';
+    return (await (await fetch(src)).blob()).type;
+  }),
+  'video/webm',
+);
+
 await page.waitForFunction(() => document.querySelectorAll('.clip-thumbs img').length > 0, null, {
   timeout: 25000,
 });

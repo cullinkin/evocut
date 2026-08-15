@@ -20,7 +20,8 @@ import { MemoryMediaStore, MemoryProjectStore } from '../src/memory.js';
 import { IdbMediaStore } from '../src/idb-media.js';
 import { bindProjectMedia, orphanedMedia, rebindSource } from '../src/bind.js';
 import { fingerprintFile, mediaPath } from '../src/fingerprint.js';
-import type { ProjectStore } from '../src/types.js';
+import { fingerprintFromPath, mimeFromFilename } from '../src/media-file.js';
+import type { MediaStore, ProjectStore } from '../src/types.js';
 
 function deps(seed = 's') {
   let tick = 0;
@@ -414,5 +415,64 @@ describe('IdbMediaStore', () => {
     const bound = await bindProjectMedia(project, media);
     expect(bound.missing).toEqual([]);
     expect(bound.urls.get('src_take1')).toMatch(/^blob:/);
+  });
+});
+
+describe('media identity survives storage', () => {
+  // The bug this pins: media is stored at `media/<fingerprint>` with no extension, and
+  // both backends derive a File's name and type from that path. Chromium sniffs the
+  // container out of the bytes and plays it anyway; Safari refuses to decode an untyped
+  // blob URL, so an iPhone got "Could not read 000002eeec…" on every import while every
+  // test passed. The type has to be carried in the index and reapplied on the way out.
+  const backends: Array<[string, () => MediaStore]> = [
+    ['MemoryMediaStore', () => new MemoryMediaStore()],
+    [
+      'IdbMediaStore',
+      () => {
+        const connection = new IdbConnection(new IDBFactory());
+        return new IdbMediaStore(connection, new IdbMediaIndex(connection));
+      },
+    ],
+  ];
+
+  it.each(backends)('%s gives back the original name and MIME type', async (_name, create) => {
+    const media = create();
+    const record = await media.put(makeFile('IMG_0421.MOV', 'footage', 'video/quicktime'));
+
+    const readBack = (await media.get(record.path))!;
+    expect(readBack.name).toBe('IMG_0421.MOV');
+    expect(readBack.type).toBe('video/quicktime');
+    expect(await readBack.text()).toBe('footage');
+  });
+
+  it.each(backends)('%s infers a type when the picker did not set one', async (_name, create) => {
+    // iOS hands .MOV out of the Photos picker and does not always set a type.
+    const media = create();
+    const record = await media.put(new File(['footage'], 'clip.mov', {}));
+
+    expect(record.mimeType).toBe('video/quicktime');
+    expect((await media.get(record.path))!.type).toBe('video/quicktime');
+  });
+
+  it('maps the container types an iPhone actually produces', () => {
+    expect(mimeFromFilename('IMG_0421.MOV')).toBe('video/quicktime');
+    expect(mimeFromFilename('clip.mp4')).toBe('video/mp4');
+    expect(mimeFromFilename('take1.webm')).toBe('video/webm');
+    expect(mimeFromFilename('no-extension')).toBeUndefined();
+  });
+
+  it('recovers the index key from a media path', () => {
+    expect(fingerprintFromPath('media/000002eeec3e2b5bc776254630b0')).toBe('000002eeec3e2b5bc776254630b0');
+  });
+
+  it('gives a bound object URL a typed blob', async () => {
+    const media = new MemoryMediaStore();
+    const record = await media.put(makeFile('IMG_0421.MOV', 'footage', 'video/quicktime'));
+    const project = rebindSource(makeProject(), 'src_take1', record.path, record.fingerprint);
+
+    const bound = await bindProjectMedia(project, media);
+    const blob = await (await fetch(bound.urls.get('src_take1')!)).blob();
+    // An untyped blob here is exactly what Safari refuses to play.
+    expect(blob.type).toBe('video/quicktime');
   });
 });

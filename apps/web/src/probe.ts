@@ -28,8 +28,15 @@ export function probeVideo(file: File): Promise<VideoMetadata> {
       finish(value);
     };
 
-    video.onerror = () =>
-      done(reject, new Error(`Could not read ${file.name}. It may be a format this browser cannot decode.`));
+    video.onerror = () => {
+      // The type matters enough to name it: an empty one is the usual cause on Safari,
+      // which — unlike Chromium — will not sniff a container out of an untyped blob.
+      const kind = file.type || 'unknown type';
+      done(
+        reject,
+        new Error(`Could not read ${file.name} (${kind}). It may be a format this browser cannot decode.`),
+      );
+    };
 
     video.onloadedmetadata = () => {
       if (!Number.isFinite(video.duration) || video.duration <= 0) {

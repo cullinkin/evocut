@@ -249,11 +249,17 @@ export function useSession(): Session {
       try {
         // Media first: a project is never persisted pointing at bytes we have not stored.
         const stored = await stores.media.put(file);
-        const bytes = await stores.media.get(stored.path);
-        if (!bytes) throw new Error('The file was saved but could not be read back.');
 
-        const meta = await probeVideo(bytes);
+        // Probed from the file the user picked, not the copy read back out of storage.
+        // Same bytes either way, but this one still has its real name, so a failure here
+        // says "IMG_0421.MOV" instead of the fingerprint the storage path is named after.
+        const meta = await probeVideo(file);
         const created = projectFromSource(sourceFromMedia(stored, meta));
+
+        // The copy is what every later session will play, so check it opens now rather
+        // than leaving the user a project that only fails the next time they open it.
+        const playable = await stores.media.get(stored.path);
+        if (!playable) throw new Error(`${file.name} was saved but could not be read back.`);
 
         await stores.projects.save(created);
         await adopt(created, []);

@@ -1,6 +1,7 @@
 import type { LogEvent, Project } from '@evocut/edl';
 import { LogEvent as LogEventSchema, Project as ProjectSchema } from '@evocut/edl';
 import { fingerprintFile, mediaPath } from './fingerprint.js';
+import { mimeOf, restoreFile } from './media-file.js';
 import type { MediaRecord, MediaStore, ProjectStore, ProjectSummary, Stores } from './types.js';
 
 /**
@@ -28,7 +29,7 @@ export class MemoryMediaStore implements MediaStore {
       path,
       filename: file.name,
       sizeBytes: file.size,
-      ...(file.type ? { mimeType: file.type } : {}),
+      ...mimeOf(file),
       importedAt: new Date().toISOString(),
     };
     this.#files.set(path, file);
@@ -37,7 +38,13 @@ export class MemoryMediaStore implements MediaStore {
   }
 
   async get(path: string): Promise<File | null> {
-    return this.#files.get(path) ?? null;
+    const bytes = this.#files.get(path);
+    if (!bytes) return null;
+    // Rebuilt from the record rather than handed back verbatim, because that is what
+    // the OPFS and IndexedDB stores do — a double that preserved the original File
+    // object would have hidden the bug that made Safari refuse to decode.
+    const record = [...this.#records.values()].find((r) => r.path === path);
+    return record ? restoreFile(bytes, record) : bytes;
   }
 
   async has(path: string): Promise<boolean> {

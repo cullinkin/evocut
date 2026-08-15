@@ -19,6 +19,7 @@ import type { Stores } from './types.js';
 
 export * from './types.js';
 export * from './fingerprint.js';
+export * from './media-file.js';
 export * from './bind.js';
 export * from './memory.js';
 export { OpfsMediaStore, type MediaIndex } from './opfs.js';
