@@ -33,7 +33,15 @@ const EMPTY: Filmstrip = { frames: [], ready: false, aspect: 9 / 16 };
 /** Cap on frames per source: enough to read a 10-minute take, cheap enough for a phone. */
 const MAX_FRAMES = 80;
 const MIN_INTERVAL_US = 1_000_000;
-const FRAME_HEIGHT = 56;
+/**
+ * Frames are captured well above their display size.
+ *
+ * The lane is 64 CSS px tall on a 3x screen, so a slot is ~190 device pixels wide. Phone
+ * footage is portrait, so a frame captured at 56px tall is only ~31px wide — upscaled six
+ * times on an iPhone, which is what made the strip look like smeared paint rather than
+ * video. 144 gives ~81px for 9:16 and reads as an actual picture.
+ */
+const FRAME_HEIGHT = 144;
 const SEEK_TIMEOUT_MS = 4000;
 
 const cache = new Map<string, Filmstrip>();
@@ -124,7 +132,7 @@ async function extractFrames(
       video.currentTime = t / 1_000_000;
       await once(video, 'seeked', SEEK_TIMEOUT_MS);
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      if (!emit({ t, url: canvas.toDataURL('image/jpeg', 0.55) }, aspect)) break;
+      if (!emit({ t, url: canvas.toDataURL('image/jpeg', 0.6) }, aspect)) break;
     }
 
     return aspect;

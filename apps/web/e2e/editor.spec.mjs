@@ -15,6 +15,8 @@ const { report, check, set, finish } = makeReport({
 });
 
 const clip = await ensureClip(page);
+/** Mirrors AUTOSCROLL_MARGIN in Timeline.tsx. */
+const AUTOSCROLL_MARGIN_PX = 44;
 
 // --- Import ---------------------------------------------------------------------
 await page.goto(APP_URL);
@@ -101,6 +103,76 @@ set('widthBefore', widthBefore);
 set('widthAfterShorten', widthAfter);
 check('outTrimShortens', widthAfter < widthBefore - 20, true);
 
+// --- Holding still must not keep trimming ----------------------------------------
+// The bug the user hit: edge auto-scroll changed the time under a *motionless* finger,
+// the trim followed it, and that moved the scroll range in turn. A four-second clip
+// collapsed to the 0.1s minimum in about a second of holding.
+//
+// Zoomed in so the content overflows and auto-scroll has room to run, then the lane is
+// scrolled so the handle already sits near the right edge — that way a short drag lands
+// inside the margin without trimming far enough to hit the clamp, and the hold is the
+// only variable left.
+{
+  await page.locator('button[aria-label="Zoom in"]').click();
+  await page.locator('button[aria-label="Zoom in"]').click();
+  await page.waitForTimeout(300);
+
+  const box = await page.locator('.timeline-scroller').boundingBox();
+  const parkAt = box.x + box.width - 70;
+  const handleBefore = await centre(page.locator('.trim-handle.in'));
+  await page.evaluate((dx) => {
+    document.querySelector('.timeline-scroller').scrollLeft += dx;
+  }, handleBefore.x - parkAt);
+  await page.waitForTimeout(200);
+
+  const handle = await centre(page.locator('.trim-handle.in'));
+  // What matters is where the finger *ends up*: inside the margin, where the old
+  // auto-scroll would have started pulling.
+  check('fingerEndsInsideAutoscrollMargin', handle.x + 30 > box.x + box.width - AUTOSCROLL_MARGIN_PX, true);
+
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: handle.x, y: handle.y, id: 1 }],
+  });
+  for (let i = 1; i <= 5; i++) {
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x: handle.x + (30 * i) / 5, y: handle.y, id: 1 }],
+    });
+    await page.waitForTimeout(16);
+  }
+  await page.waitForTimeout(120);
+
+  const readDrag = () =>
+    page.evaluate(() => {
+      const block = document.querySelectorAll('.clip-block')[1];
+      return {
+        width: Math.round(block.getBoundingClientRect().width),
+        scrollLeft: Math.round(document.querySelector('.timeline-scroller').scrollLeft),
+      };
+    });
+
+  const atRest = await readDrag();
+  await page.waitForTimeout(1500); // finger perfectly still, inside the margin
+  const afterHolding = await readDrag();
+
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForTimeout(400);
+
+  set('widthAtRest', atRest.width);
+  set('widthAfterHolding', afterHolding.width);
+  check('holdingStillChangesNothing', afterHolding.width, atRest.width);
+  check('holdingStillDoesNotScroll', afterHolding.scrollLeft, atRest.scrollLeft);
+  // Not vacuous: the clip has to be somewhere other than pinned at its minimum.
+  check('trimIsNotAtTheLimit', atRest.width > 40, true);
+
+  await page.locator('button[aria-label="Undo"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('button[aria-label="Fit timeline"]').click();
+  await page.locator('.clip-block').nth(1).tap(); // undo clears the selection
+  await page.waitForTimeout(200);
+}
+
 // --- Drag the in handle outward: recovers footage the coarse pass cut ------------
 const before = await exportEdl(page, 'editor-before.json');
 const inBefore = before.timeline.tracks[0].clips[1].sourceIn;
@@ -119,6 +191,29 @@ check('inTrimStaysInBounds', inAfter >= 0, true);
 const trims = after.revisions.filter((r) => r.ops.some((op) => op.op === 'trim'));
 set('trimRevisionCount', trims.length);
 check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
+
+// --- Dragging the playhead must show the frame it lands on -----------------------
+// It did not: playback kept writing the playhead back from the video's own position
+// every frame, so a drag looked like it did nothing at all.
+{
+  await page.locator('button.play').click(); // start playing
+  await page.waitForTimeout(500);
+
+  const before = await page.evaluate(() => document.querySelector('.player video').currentTime);
+  const gripNow = await centre(page.locator('.playhead-grip'));
+  const box = await page.locator('.timeline-scroller').boundingBox();
+  await touchDrag(cdp, page, gripNow, { x: box.x + box.width * 0.85, y: gripNow.y });
+  await page.waitForTimeout(500);
+
+  const after = await page.evaluate(() => ({
+    time: document.querySelector('.player video').currentTime,
+    paused: document.querySelector('.player video').paused,
+  }));
+  set('videoTimeBeforeScrub', Number(before.toFixed(2)));
+  set('videoTimeAfterScrub', Number(after.time.toFixed(2)));
+  check('scrubMovedThePreview', Math.abs(after.time - before) > 0.3, true);
+  check('scrubPausedPlayback', after.paused, true);
+}
 
 // --- Undo ------------------------------------------------------------------------
 await page.locator('button[aria-label="Undo"]').click();

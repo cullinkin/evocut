@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  applyOps,
   commitOps,
   freezeCoarsePass,
   makeLogger,
@@ -14,7 +13,6 @@ import {
   type OpVerdict,
   type Project,
   type RefinementPlan,
-  type Timeline,
 } from '@evocut/edl';
 import { planLocalRefinement } from '@evocut/agent';
 import {
@@ -64,11 +62,6 @@ export interface Session {
   status: SessionStatus;
   persistent: boolean;
   project: Project | null;
-  /**
-   * The timeline to render: the project's, with any in-progress trim drag applied.
-   * Both the player and the timeline read this, so a drag previews everywhere at once.
-   */
-  previewTimeline: Timeline | null;
   selectedClipId: string | null;
   canUndo: boolean;
   /** Object URLs by source id. */
@@ -101,11 +94,8 @@ export interface Session {
   undo(): void;
   finishCoarsePass(): void;
 
-  /** Live feedback during a trim drag. Does not touch the project or the log. */
-  previewTrim(clipId: string, sourceIn: number, sourceOut: number): void;
   /** End of a trim drag: one op, one revision, one log row. */
   commitTrim(clipId: string, sourceIn: number, sourceOut: number): void;
-  cancelTrim(): void;
 
   requestRefinement(): void;
   setVerdict(index: number, accepted: boolean): void;
@@ -127,7 +117,6 @@ export function useSession(): Session {
   const [plan, setPlan] = useState<RefinementPlan | null>(null);
   const [verdicts, setVerdicts] = useState<Map<number, boolean>>(new Map());
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const [draftTrim, setDraftTrim] = useState<{ clipId: string; sourceIn: number; sourceOut: number } | null>(null);
   const [history, setHistory] = useState<Project[]>([]);
 
   const loggerRef = useRef<ReturnType<typeof makeLogger> | null>(null);
@@ -191,7 +180,6 @@ export function useSession(): Session {
       setPlan(null);
       setVerdicts(new Map());
       setSelectedClipId(null);
-      setDraftTrim(null);
       setHistory([]);
       await bind(next);
       await stores.projects.setLastOpened(next.id);
@@ -387,7 +375,6 @@ export function useSession(): Session {
     const undone = project.revisions.at(-1);
     setHistory((stack) => stack.slice(0, -1));
     setProject(previous);
-    setDraftTrim(null);
     setSelectedClipId(null);
     record('edit.undo', {
       ...(undone ? { ops: undone.ops, revisionId: undone.id } : {}),
@@ -411,16 +398,8 @@ export function useSession(): Session {
 
   const select = useCallback((clipId: string | null) => setSelectedClipId(clipId), []);
 
-  const previewTrim = useCallback(
-    (clipId: string, sourceIn: number, sourceOut: number) => setDraftTrim({ clipId, sourceIn, sourceOut }),
-    [],
-  );
-
-  const cancelTrim = useCallback(() => setDraftTrim(null), []);
-
   const commitTrim = useCallback(
     (clipId: string, sourceIn: number, sourceOut: number) => {
-      setDraftTrim(null);
       const clip = project?.timeline.tracks[0]?.clips.find((c) => c.id === clipId);
       // A drag that ended where it started is not an edit; recording one would put a
       // no-op revision in the chain and a meaningless row in the training data.
@@ -539,37 +518,15 @@ export function useSession(): Session {
     setVerdicts(new Map());
   }, [plan, record]);
 
-  /**
-   * The project's timeline with the in-progress trim applied.
-   *
-   * Derived rather than stored so there is exactly one timeline in play: the player, the
-   * timeline strip, and the duration readout all render this, which is why a trim drag
-   * previews in the preview window and not just under the finger.
-   */
-  const previewTimeline = useMemo(() => {
-    if (!project) return null;
-    if (!draftTrim) return project.timeline;
-
-    const result = applyOps(
-      project.timeline,
-      [{ op: 'trim', clipId: draftTrim.clipId, sourceIn: draftTrim.sourceIn, sourceOut: draftTrim.sourceOut }],
-      { sources: project.sources },
-    );
-    // A drag that would produce an invalid clip just shows the last good state; the
-    // handle stops rather than the preview flickering.
-    return result.errors.length > 0 ? project.timeline : result.timeline;
-  }, [project, draftTrim]);
-
   const duration = useMemo(
-    () => (previewTimeline ? timelineDuration(previewTimeline) : 0),
-    [previewTimeline],
+    () => (project ? timelineDuration(project.timeline) : 0),
+    [project],
   );
 
   return {
     status,
     persistent: stores.persistent,
     project,
-    previewTimeline,
     selectedClipId,
     canUndo: history.length > 0,
     mediaUrls,
@@ -596,9 +553,7 @@ export function useSession(): Session {
     keepOnly,
     undo,
     finishCoarsePass,
-    previewTrim,
     commitTrim,
-    cancelTrim,
     requestRefinement,
     setVerdict,
     setAllVerdicts,

@@ -10,9 +10,21 @@ import { sampleTimeline } from '@evocut/renderer';
  * `sampleTimeline` — the same function the export will use. Reimplementing the mapping
  * here would be the classic editor bug where the preview and the export disagree at cuts.
  *
+ * ## Scrubbing
+ *
+ * `scrubSourceTime` overrides everything while a drag is live: show *this* frame of the
+ * source, now. A trim is a decision about one frame and cannot be made without seeing it,
+ * and routing that through the timeline mapping would mean re-deriving a timeline that is
+ * deliberately not being modified until the drag ends.
+ *
+ * Scrub seeks go through `fastSeek` where it exists. Safari implements it precisely for
+ * this — it lands on the nearest keyframe instead of decoding to an exact position, which
+ * is the difference between a preview that tracks a finger and one that lurches a second
+ * behind it. The final, exact seek happens when the drag ends.
+ *
  * Playback across a cut is a seek, not a crossfade: the element jumps to the next clip's
- * source position when it runs off the end of the current one. That stutters slightly on
- * a phone, which is acceptable for a coarse pass whose whole purpose is deciding what to
+ * source position when it runs off the end of the current one. That stutters slightly on a
+ * phone, which is acceptable for a coarse pass whose whole purpose is deciding what to
  * keep. Gapless preview is the renderer's job, not the `<video>` element's.
  */
 export interface PlayerProps {
@@ -20,6 +32,8 @@ export interface PlayerProps {
   timeline: Timeline;
   playhead: number;
   playing: boolean;
+  /** While set, the preview shows this source time and playback logic stands down. */
+  scrubSourceTime?: number | null;
   onTime(outputTime: number): void;
   onEnded(): void;
 }
@@ -27,11 +41,28 @@ export interface PlayerProps {
 /** Below this, a seek is more disruptive than the drift it would correct. */
 const SEEK_TOLERANCE_US = 60_000;
 
-export function Player({ objectUrl, timeline, playhead, playing, onTime, onEnded }: PlayerProps) {
+export function Player({
+  objectUrl,
+  timeline,
+  playhead,
+  playing,
+  scrubSourceTime = null,
+  onTime,
+  onEnded,
+}: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const frameRef = useRef<number | null>(null);
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
+  const scrubRef = useRef<number | null>(scrubSourceTime);
+  scrubRef.current = scrubSourceTime;
+
+  const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {
+    if (Math.abs(secondsToMicros(video.currentTime) - sourceUs) <= SEEK_TOLERANCE_US) return;
+    const seconds = microsToSeconds(sourceUs);
+    if (approximate && typeof video.fastSeek === 'function') video.fastSeek(seconds);
+    else video.currentTime = seconds;
+  }, []);
 
   /**
    * Put the element where the timeline says it should be.
@@ -45,23 +76,28 @@ export function Player({ objectUrl, timeline, playhead, playing, onTime, onEnded
     const video = videoRef.current;
     if (!video) return;
 
+    const scrub = scrubRef.current;
+    if (scrub !== null) {
+      seekTo(video, scrub, true);
+      return;
+    }
+
     const layer = sampleTimeline(timeline, playheadRef.current).layers[0];
     if (!layer) return;
-
     video.playbackRate = layer.clip.speed;
-    if (Math.abs(secondsToMicros(video.currentTime) - layer.sourceTime) > SEEK_TOLERANCE_US) {
-      video.currentTime = microsToSeconds(layer.sourceTime);
-    }
-  }, [timeline]);
+    seekTo(video, layer.sourceTime, false);
+  }, [seekTo, timeline]);
 
-  // Follow external seeks (scrubber, clip taps) without fighting playback.
-  useEffect(sync, [sync, playhead]);
+  useEffect(sync, [sync, playhead, scrubSourceTime]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    if (!playing) {
+    // A drag owns the element for its duration. Letting the playback loop keep writing
+    // the playhead from `currentTime` is what made dragging the playhead look like it did
+    // nothing: every frame, the loop put it back.
+    if (!playing || scrubSourceTime !== null) {
       video.pause();
       return;
     }
@@ -82,11 +118,15 @@ export function Player({ objectUrl, timeline, playhead, playing, onTime, onEnded
 
       const sourceNow = secondsToMicros(video.currentTime);
 
-      if (sourceNow >= layer.clip.sourceOut) {
-        // Ran off the end of this clip: jump to whatever the timeline says comes next.
-        const nextOutput = layer.clip.start + Math.round((layer.clip.sourceOut - layer.clip.sourceIn) / layer.clip.speed);
+      // `video.ended` matters as much as the clip's own out point: a clip trimmed to the
+      // very end of the source never reaches `sourceOut`, because the element stops a
+      // fraction short. Without this the playhead parks mid-timeline and looks stuck.
+      if (sourceNow >= layer.clip.sourceOut || video.ended) {
+        const nextOutput =
+          layer.clip.start + Math.round((layer.clip.sourceOut - layer.clip.sourceIn) / layer.clip.speed);
         const next = sampleTimeline(timeline, nextOutput).layers[0];
         if (!next) {
+          onTime(nextOutput);
           onEnded();
           return;
         }
@@ -104,7 +144,7 @@ export function Player({ objectUrl, timeline, playhead, playing, onTime, onEnded
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     };
-  }, [playing, timeline, onTime, onEnded]);
+  }, [playing, scrubSourceTime, timeline, onTime, onEnded]);
 
   return (
     <div className="player">

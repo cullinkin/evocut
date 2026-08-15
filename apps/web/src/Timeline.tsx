@@ -8,34 +8,50 @@ import {
   type Clip,
   type Source,
   type Timeline as TimelineDoc,
+  type TrimBounds,
 } from '@evocut/edl';
 import { frameAt, useFilmstrip } from './filmstrip.ts';
 
 /**
  * The editing timeline: draggable playhead, tap-to-select clips, drag-the-edges trimming.
  *
- * ## Touch, specifically
+ * ## A trim drag does not touch the timeline until it ends
  *
- * Everything here is built on Pointer Events with `setPointerCapture`, not touch events:
- * capture means a drag keeps receiving moves even when the finger leaves the element it
- * started on, which is most drags on a phone screen this size.
+ * The first version applied a `trim` op on every pointermove and re-rendered from the
+ * result. That produced a genuine runaway: the reflowed clip changed the content width,
+ * which changed the scroll range, which changed the time under a *stationary* finger,
+ * which trimmed further. Holding a finger near the screen edge for a second was enough to
+ * collapse a four-second clip to the hundred-millisecond minimum on its own.
  *
- * The lane scrolls natively (`touch-action: pan-x`) while the playhead and trim handles
- * set `touch-action: none`. That combination is what stops iOS from stealing a trim
- * gesture and turning it into a scroll — the property is per-element, so the two
- * behaviours can coexist without a global gesture manager.
+ * So a drag now moves nothing. It carries a draft, the dragged clip is *drawn* from that
+ * draft, and exactly one op is committed on release. Nothing the drag does can feed back
+ * into the measurement it depends on, and the phone stops cloning the whole timeline sixty
+ * times a second.
  *
- * Handles are 44px of touch target around a 3px line. A thumb is about 9mm across, and
- * the visual affordance for a trim handle cannot be, so the hit area and the paint are
- * deliberately different sizes.
+ * ## The dragged edge follows the finger
  *
- * ## Live drags, single ops
+ * On a gapless track a clip's `start` is pinned by whatever precedes it, so trimming the
+ * head really changes the clip's *length* — the left edge cannot move and the right edge
+ * does. Correct, and unreadable: you drag left and the far end of the clip moves.
  *
- * A trim drag fires sixty times a second; committing an op per move would bury the
- * revision chain and the log under gesture noise. The drag renders from a local draft and
- * emits exactly one `trim` op on release — so what lands in the EDL is the decision, not
- * the finger movement that produced it.
+ * While dragging, the clip is therefore drawn with the *opposite* edge pinned, so the edge
+ * under your finger is the edge that moves. On release the track ripples closed in one
+ * step. This is what every editor with a gapless timeline does, and it is the only version
+ * where the gesture means what it looks like it means.
+ *
+ * ## Touch
+ *
+ * Pointer Events with `setPointerCapture`, so a drag keeps receiving moves after the
+ * finger leaves the element it started on. `touch-action: pan-x` on the lane so it scrolls;
+ * `none` on the playhead and handles so a drag is a drag. Handles hit-test at 44px around
+ * a 12px paint, because a thumb is ~9mm and a trim handle cannot be.
  */
+export interface TimelineDragState {
+  kind: 'playhead' | 'trim';
+  /** Source time the preview should show while dragging. */
+  scrubSourceTime?: number;
+}
+
 export interface TimelineProps {
   timeline: TimelineDoc;
   sources: Source[];
@@ -45,40 +61,40 @@ export interface TimelineProps {
   frozen: boolean;
   onSeek(us: number, final: boolean): void;
   onSelect(clipId: string | null): void;
-  onTrimPreview(clipId: string, sourceIn: number, sourceOut: number): void;
   onTrimCommit(clipId: string, sourceIn: number, sourceOut: number): void;
-  onTrimCancel(): void;
+  onDragChange(drag: TimelineDragState | null): void;
 }
 
 /** Horizontal padding inside the scroller, so the first and last frame can be reached. */
 const EDGE_PAD = 24;
 const MIN_PPS = 4;
 const MAX_PPS = 400;
-/** Within this many pixels of the edge, a drag scrolls the lane along with it. */
+/** Within this many pixels of the edge, a *playhead* drag scrolls the lane along with it. */
 const AUTOSCROLL_MARGIN = 44;
 const AUTOSCROLL_MAX_PPF = 14;
 
-/**
- * A live drag.
- *
- * Trim drags carry the state they started from. They have to: the track is gapless, so a
- * clip's `start` is pinned by whatever precedes it and only its *length* changes. Deriving
- * the new edge from the clip's current position each frame would feed the drag back into
- * itself — the edge moves, the next frame measures against the moved edge, and the handle
- * accelerates away from the finger. Measuring against the position the drag began at is
- * stable and gives the finger a 1:1 relationship with source time.
- */
+interface TrimDraft {
+  clipId: string;
+  edge: 'in' | 'out';
+  sourceIn: number;
+  sourceOut: number;
+  /** True when the drag is pressed against a limit, so the handle can say so. */
+  clamped: boolean;
+}
+
 type DragKind =
   | { type: 'playhead' }
   | {
       type: 'trim';
       clipId: string;
       edge: 'in' | 'out';
+      /** Timeline time under the finger at pointerdown, so the edge never jumps to it. */
       grabTime: number;
       originIn: number;
       originOut: number;
+      originStart: number;
       speed: number;
-      start: number;
+      bounds: TrimBounds;
     };
 
 export function TimelineEditor({
@@ -90,21 +106,19 @@ export function TimelineEditor({
   frozen,
   onSeek,
   onSelect,
-  onTrimPreview,
   onTrimCommit,
-  onTrimCancel,
+  onDragChange,
 }: TimelineProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [pxPerSecond, setPxPerSecond] = useState(40);
   const [drag, setDrag] = useState<DragKind | null>(null);
-  const pointerXRef = useRef(0);
+  const [draft, setDraft] = useState<TrimDraft | null>(null);
   const dragRef = useRef<DragKind | null>(null);
-  const lastTrimRef = useRef<{ sourceIn: number; sourceOut: number } | null>(null);
+  const draftRef = useRef<TrimDraft | null>(null);
+  const pointerXRef = useRef(0);
 
-  const track = timeline.tracks[0];
-  const clips = track?.clips ?? [];
-  const total = timelineDuration(timeline);
-  const contentWidth = (total / 1_000_000) * pxPerSecond + EDGE_PAD * 2;
+  const clips = timeline.tracks[0]?.clips ?? [];
+  const committedTotal = timelineDuration(timeline);
 
   const toX = useCallback((us: number) => (us / 1_000_000) * pxPerSecond + EDGE_PAD, [pxPerSecond]);
 
@@ -119,20 +133,44 @@ export function TimelineEditor({
     [pxPerSecond],
   );
 
-  /** Fit the whole timeline on first sight, and whenever it would otherwise overflow badly. */
+  /** Geometry of a clip in content pixels, accounting for a drag in progress. */
+  const geometryOf = useCallback(
+    (clip: Clip): { left: number; width: number } => {
+      const normal = {
+        left: toX(clip.start),
+        width: Math.max(6, (outputDuration(clip) / 1_000_000) * pxPerSecond),
+      };
+      if (!draft || draft.clipId !== clip.id) return normal;
+
+      const length = (draft.sourceOut - draft.sourceIn) / clip.speed;
+      const width = Math.max(6, (length / 1_000_000) * pxPerSecond);
+      // The pinned edge is the one the finger is *not* holding.
+      return draft.edge === 'in'
+        ? { left: toX(clipEnd(clip)) - width, width }
+        : { left: toX(clip.start), width };
+    },
+    [draft, pxPerSecond, toX],
+  );
+
+  // Wide enough for a drag that has pushed a clip past the committed end.
+  const contentWidth = Math.max(
+    (committedTotal / 1_000_000) * pxPerSecond + EDGE_PAD * 2,
+    ...clips.map((clip) => geometryOf(clip).left + geometryOf(clip).width + EDGE_PAD),
+  );
+
   const fit = useCallback(() => {
     const scroller = scrollerRef.current;
-    if (!scroller || total <= 0) return;
+    if (!scroller || committedTotal <= 0) return;
     const usable = Math.max(120, scroller.clientWidth - EDGE_PAD * 2);
-    setPxPerSecond(clamp((usable / (total / 1_000_000)), MIN_PPS, MAX_PPS));
-  }, [total]);
+    setPxPerSecond(clamp(usable / (committedTotal / 1_000_000), MIN_PPS, MAX_PPS));
+  }, [committedTotal]);
 
   const fittedRef = useRef(false);
   useEffect(() => {
-    if (fittedRef.current || total <= 0) return;
+    if (fittedRef.current || committedTotal <= 0) return;
     fittedRef.current = true;
     fit();
-  }, [fit, total]);
+  }, [fit, committedTotal]);
 
   // Keep the playhead on screen during playback and after a seek from elsewhere.
   useEffect(() => {
@@ -142,21 +180,75 @@ export function TimelineEditor({
 
     const x = toX(playhead);
     const left = scroller.scrollLeft;
-    const right = left + scroller.clientWidth;
-    if (x < left + AUTOSCROLL_MARGIN || x > right - AUTOSCROLL_MARGIN) {
+    if (x < left + AUTOSCROLL_MARGIN || x > left + scroller.clientWidth - AUTOSCROLL_MARGIN) {
       scroller.scrollTo({ left: Math.max(0, x - scroller.clientWidth / 2), behavior: 'smooth' });
     }
   }, [playhead, toX, drag]);
 
+  const applyDrag = useCallback(
+    (clientX: number) => {
+      const current = dragRef.current;
+      if (!current) return;
+      const time = toTime(clientX);
+
+      if (current.type === 'playhead') {
+        onSeek(Math.min(time, Math.max(0, committedTotal)), false);
+        return;
+      }
+
+      const delta = (time - current.grabTime) * current.speed;
+      const next: TrimDraft =
+        current.edge === 'in'
+          ? {
+              clipId: current.clipId,
+              edge: 'in',
+              sourceIn: clamp(
+                Math.round(current.originIn + delta),
+                current.bounds.inMin,
+                current.bounds.inMax,
+              ),
+              sourceOut: current.originOut,
+              clamped: false,
+            }
+          : {
+              clipId: current.clipId,
+              edge: 'out',
+              sourceIn: current.originIn,
+              sourceOut: clamp(
+                Math.round(current.originOut + delta),
+                current.bounds.outMin,
+                current.bounds.outMax,
+              ),
+              clamped: false,
+            };
+
+      // Say so when the drag is pushing against a limit, rather than silently pinning.
+      const wanted = current.edge === 'in' ? current.originIn + delta : current.originOut + delta;
+      const landed = current.edge === 'in' ? next.sourceIn : next.sourceOut;
+      next.clamped = Math.abs(wanted - landed) > 1000;
+
+      draftRef.current = next;
+      setDraft(next);
+      onDragChange({
+        kind: 'trim',
+        // Show the frame at the edge being dragged. A trim is a decision about one
+        // frame, and it is not reviewable without seeing it.
+        scrubSourceTime: current.edge === 'in' ? next.sourceIn : Math.max(next.sourceIn, next.sourceOut - 40_000),
+      });
+    },
+    [committedTotal, onDragChange, onSeek, toTime],
+  );
+
   /**
-   * While a drag is live, scroll the lane when the finger nears an edge.
+   * Edge auto-scroll, for playhead drags only.
    *
-   * Runs on its own frame loop rather than off pointermove, because a finger parked at the
-   * edge of the screen stops producing move events — and that is exactly the moment the
-   * user is asking to keep going.
+   * Deliberately not applied to trims. It is the mechanism that made a stationary finger
+   * keep trimming: scrolling changes the time under the finger, and a trim that responds
+   * to that changes the scroll range in turn. A playhead drag has no such loop — it reads
+   * the position and writes nothing that affects it.
    */
   useEffect(() => {
-    if (!drag) return;
+    if (drag?.type !== 'playhead') return;
     let frame = 0;
 
     const tick = () => {
@@ -178,62 +270,34 @@ export function TimelineEditor({
 
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drag]);
-
-  const applyDrag = useCallback(
-    (clientX: number) => {
-      const current = dragRef.current;
-      if (!current) return;
-      const time = toTime(clientX);
-
-      if (current.type === 'playhead') {
-        onSeek(Math.min(time, Math.max(0, total)), false);
-        return;
-      }
-
-      const source = sources.find((s) => s.id === clips.find((c) => c.id === current.clipId)?.sourceId);
-      if (!source) return;
-
-      // Bounds come from the drag's origin, not the live clip, for the same reason the
-      // delta does — otherwise the limit moves as the clip does.
-      const bounds = trimBounds({ sourceIn: current.originIn, sourceOut: current.originOut }, source.duration);
-      const deltaSource = (time - current.grabTime) * current.speed;
-
-      if (current.edge === 'in') {
-        const sourceIn = clamp(Math.round(current.originIn + deltaSource), bounds.inMin, bounds.inMax);
-        lastTrimRef.current = { sourceIn, sourceOut: current.originOut };
-        onTrimPreview(current.clipId, sourceIn, current.originOut);
-        // Park the playhead on the clip's first frame so the preview shows the edit
-        // being made rather than wherever the playhead happened to be.
-        onSeek(current.start, false);
-      } else {
-        const sourceOut = clamp(Math.round(current.originOut + deltaSource), bounds.outMin, bounds.outMax);
-        lastTrimRef.current = { sourceIn: current.originIn, sourceOut };
-        onTrimPreview(current.clipId, current.originIn, sourceOut);
-        const length = (sourceOut - current.originIn) / current.speed;
-        onSeek(Math.max(current.start, current.start + Math.round(length) - 40_000), false);
-      }
-    },
-    [clips, onSeek, onTrimPreview, sources, toTime, total],
-  );
+  }, [drag, applyDrag]);
 
   const startDrag = useCallback(
     (event: React.PointerEvent, kind: DragKind) => {
       if (frozen && kind.type === 'trim') return;
       event.preventDefault();
       event.stopPropagation();
-      (event.target as Element).setPointerCapture(event.pointerId);
+      (event.target as Element).setPointerCapture?.(event.pointerId);
+
       dragRef.current = kind;
-      lastTrimRef.current = null;
+      draftRef.current = null;
       pointerXRef.current = event.clientX;
       setDrag(kind);
-      // Playhead drags jump to the finger; trim drags do not. Grabbing a 3px edge with a
-      // 44px target means the finger is never exactly on it, and snapping the edge to
-      // wherever it landed would nudge the cut before the user moved at all.
-      if (kind.type === 'playhead') applyDrag(event.clientX);
+      setDraft(null);
+
+      if (kind.type === 'playhead') {
+        onDragChange({ kind: 'playhead' });
+        applyDrag(event.clientX);
+      } else {
+        // No `applyDrag` here. The finger is somewhere inside a 44px target around a 12px
+        // handle, so acting on pointerdown would nudge the cut before the user moved.
+        onDragChange({
+          kind: 'trim',
+          scrubSourceTime: kind.edge === 'in' ? kind.originIn : Math.max(kind.originIn, kind.originOut - 40_000),
+        });
+      }
     },
-    [applyDrag, frozen],
+    [applyDrag, frozen, onDragChange],
   );
 
   const moveDrag = useCallback(
@@ -251,21 +315,22 @@ export function TimelineEditor({
       const current = dragRef.current;
       if (!current) return;
       (event.target as Element).releasePointerCapture?.(event.pointerId);
+
+      const pending = draftRef.current;
       dragRef.current = null;
+      draftRef.current = null;
       setDrag(null);
+      setDraft(null);
+      onDragChange(null);
 
       if (current.type === 'playhead') {
         onSeek(toTime(event.clientX), true);
-        return;
+      } else if (pending) {
+        // One op for the whole gesture.
+        onTrimCommit(current.clipId, pending.sourceIn, pending.sourceOut);
       }
-
-      const pending = lastTrimRef.current;
-      lastTrimRef.current = null;
-      // One op for the whole gesture. Nothing moved means nothing to record.
-      if (pending) onTrimCommit(current.clipId, pending.sourceIn, pending.sourceOut);
-      else onTrimCancel();
     },
-    [onSeek, onTrimCancel, onTrimCommit, toTime],
+    [onDragChange, onSeek, onTrimCommit, toTime],
   );
 
   const zoom = (factor: number) => {
@@ -274,8 +339,8 @@ export function TimelineEditor({
     setPxPerSecond((previous) => {
       const next = clamp(previous * factor, MIN_PPS, MAX_PPS);
       if (scroller) {
-        // Zoom around the playhead, not the scroll origin: the playhead is where the
-        // user is looking, and zooming away from it means re-finding your place.
+        // Zoom around the playhead: it is where the user is looking, and zooming away
+        // from it means re-finding your place.
         requestAnimationFrame(() => {
           const x = (anchor / 1_000_000) * next + EDGE_PAD;
           scroller.scrollLeft = Math.max(0, x - scroller.clientWidth / 2);
@@ -312,7 +377,7 @@ export function TimelineEditor({
         onPointerCancel={endDrag}
       >
         <div className="timeline-content" style={{ width: contentWidth }}>
-          <Ruler total={total} pxPerSecond={pxPerSecond} onScrub={startDrag} />
+          <Ruler total={committedTotal} pxPerSecond={pxPerSecond} onScrub={startDrag} />
 
           <div className="timeline-lane" onPointerDown={() => onSelect(null)}>
             {clips.map((clip, index) => (
@@ -322,8 +387,8 @@ export function TimelineEditor({
                 index={index}
                 source={sources.find((s) => s.id === clip.sourceId) ?? null}
                 mediaUrl={mediaUrls.get(clip.sourceId) ?? null}
-                pxPerSecond={pxPerSecond}
-                left={toX(clip.start)}
+                geometry={geometryOf(clip)}
+                draft={draft?.clipId === clip.id ? draft : null}
                 selected={clip.id === selectedClipId}
                 onSelect={() => onSelect(clip.id)}
               />
@@ -333,10 +398,10 @@ export function TimelineEditor({
               <TrimHandles
                 clip={selected}
                 source={selectedSource}
+                geometry={geometryOf(selected)}
+                draft={draft?.clipId === selected.id ? draft : null}
                 pxPerSecond={pxPerSecond}
-                toX={toX}
                 onStart={startDrag}
-                dragging={drag?.type === 'trim' ? drag.edge : null}
               />
             )}
           </div>
@@ -352,7 +417,7 @@ export function TimelineEditor({
             role="slider"
             aria-label="Playhead"
             aria-valuemin={0}
-            aria-valuemax={total}
+            aria-valuemax={committedTotal}
             aria-valuenow={playhead}
             tabIndex={0}
           />
@@ -393,8 +458,8 @@ function ClipBlock({
   index,
   source,
   mediaUrl,
-  pxPerSecond,
-  left,
+  geometry,
+  draft,
   selected,
   onSelect,
 }: {
@@ -402,33 +467,36 @@ function ClipBlock({
   index: number;
   source: Source | null;
   mediaUrl: string | null;
-  pxPerSecond: number;
-  left: number;
+  geometry: { left: number; width: number };
+  draft: TrimDraft | null;
   selected: boolean;
   onSelect(): void;
 }) {
   const strip = useFilmstrip(clip.sourceId, mediaUrl, source?.duration ?? 0);
-  const width = Math.max(8, (outputDuration(clip) / 1_000_000) * pxPerSecond);
-  const classes = ['clip-block', selected ? 'selected' : '', clip.enabled ? '' : 'dropped'].filter(Boolean);
+  const sourceIn = draft ? draft.sourceIn : clip.sourceIn;
+  const sourceOut = draft ? draft.sourceOut : clip.sourceOut;
+  const classes = ['clip-block', selected ? 'selected' : '', clip.enabled ? '' : 'dropped', draft ? 'trimming' : '']
+    .filter(Boolean)
+    .join(' ');
 
-  // One thumbnail per ~64px of block, sampled from the source range this clip uses.
-  const slots = Math.max(1, Math.round(width / 64));
-  const thumbs = Array.from({ length: slots }, (_, i) => {
-    const at = clip.sourceIn + ((i + 0.5) / slots) * (clip.sourceOut - clip.sourceIn);
-    return frameAt(strip, at);
-  });
+  // One thumbnail per ~56px of block, sampled across the range the clip currently uses,
+  // so the strip re-aims as the edge moves instead of stretching.
+  const slots = Math.max(1, Math.round(geometry.width / 56));
+  const thumbs = Array.from({ length: slots }, (_, i) =>
+    frameAt(strip, sourceIn + ((i + 0.5) / slots) * (sourceOut - sourceIn)),
+  );
 
   return (
     <div
-      className={classes.join(' ')}
-      style={{ left, width }}
+      className={classes}
+      style={{ left: geometry.left, width: geometry.width }}
       onPointerDown={(event) => {
         event.stopPropagation();
         onSelect();
       }}
       role="button"
       aria-pressed={selected}
-      aria-label={`Clip ${index + 1}, ${formatTimecode(outputDuration(clip), undefined, { compact: true })}`}
+      aria-label={`Clip ${index + 1}, ${formatTimecode(sourceOut - sourceIn, undefined, { compact: true })}`}
     >
       <div className="clip-thumbs">
         {thumbs.map((frame, i) =>
@@ -445,6 +513,11 @@ function ClipBlock({
         {clip.effects.length > 0 && <em> fx</em>}
         {!clip.enabled && <em> off</em>}
       </span>
+      {draft && (
+        <span className="clip-length">
+          {formatTimecode(Math.round((sourceOut - sourceIn) / clip.speed), undefined, { compact: true })}
+        </span>
+      )}
     </div>
   );
 }
@@ -454,86 +527,69 @@ function ClipBlock({
  *
  * The ghost is not decoration. "Drag the end to extend" is invisible otherwise — there is
  * nothing on screen to suggest the clip could get longer, or by how much. Drawing the
- * available raw footage as a dimmed extension makes the affordance and its limit the same
- * shape.
+ * available raw footage as a dimmed band makes the affordance and its limit one shape.
  */
 function TrimHandles({
   clip,
   source,
+  geometry,
+  draft,
   pxPerSecond,
-  toX,
   onStart,
-  dragging,
 }: {
   clip: Clip;
   source: Source;
+  geometry: { left: number; width: number };
+  draft: TrimDraft | null;
   pxPerSecond: number;
-  toX(us: number): number;
   onStart(event: React.PointerEvent, kind: DragKind): void;
-  dragging: 'in' | 'out' | null;
 }) {
   const bounds = trimBounds(clip, source.duration);
   const px = (us: number) => (us / 1_000_000 / clip.speed) * pxPerSecond;
-  const inX = toX(clip.start);
-  const outX = toX(clipEnd(clip));
+  const inX = geometry.left;
+  const outX = geometry.left + geometry.width;
+
+  const grab = (edge: 'in' | 'out'): DragKind => ({
+    type: 'trim',
+    clipId: clip.id,
+    edge,
+    grabTime: edge === 'in' ? clip.start : clipEnd(clip),
+    originIn: clip.sourceIn,
+    originOut: clip.sourceOut,
+    originStart: clip.start,
+    speed: clip.speed,
+    bounds,
+  });
 
   return (
     <>
       {bounds.headroom.head > 0 && (
         <div className="headroom" style={{ left: inX - px(bounds.headroom.head), width: px(bounds.headroom.head) }} />
       )}
-      {bounds.headroom.tail > 0 && (
-        <div className="headroom" style={{ left: outX, width: px(bounds.headroom.tail) }} />
-      )}
+      {bounds.headroom.tail > 0 && <div className="headroom" style={{ left: outX, width: px(bounds.headroom.tail) }} />}
 
-      <div
-        className={dragging === 'in' ? 'trim-handle in active' : 'trim-handle in'}
-        style={{ left: inX }}
-        onPointerDown={(event) =>
-          onStart(event, {
-            type: 'trim',
-            clipId: clip.id,
-            edge: 'in',
-            grabTime: clip.start,
-            originIn: clip.sourceIn,
-            originOut: clip.sourceOut,
-            speed: clip.speed,
-            start: clip.start,
-          })
-        }
-        role="slider"
-        aria-label="Clip start"
-        aria-valuemin={bounds.inMin}
-        aria-valuemax={bounds.inMax}
-        aria-valuenow={clip.sourceIn}
-        tabIndex={0}
-      >
-        <span className="grip" />
-      </div>
-      <div
-        className={dragging === 'out' ? 'trim-handle out active' : 'trim-handle out'}
-        style={{ left: outX }}
-        onPointerDown={(event) =>
-          onStart(event, {
-            type: 'trim',
-            clipId: clip.id,
-            edge: 'out',
-            grabTime: clipEnd(clip),
-            originIn: clip.sourceIn,
-            originOut: clip.sourceOut,
-            speed: clip.speed,
-            start: clip.start,
-          })
-        }
-        role="slider"
-        aria-label="Clip end"
-        aria-valuemin={bounds.outMin}
-        aria-valuemax={bounds.outMax}
-        aria-valuenow={clip.sourceOut}
-        tabIndex={0}
-      >
-        <span className="grip" />
-      </div>
+      {(['in', 'out'] as const).map((edge) => {
+        const active = draft?.edge === edge;
+        const classes = ['trim-handle', edge, active ? 'active' : '', active && draft.clamped ? 'clamped' : '']
+          .filter(Boolean)
+          .join(' ');
+        return (
+          <div
+            key={edge}
+            className={classes}
+            style={{ left: edge === 'in' ? inX : outX }}
+            onPointerDown={(event) => onStart(event, grab(edge))}
+            role="slider"
+            aria-label={edge === 'in' ? 'Clip start' : 'Clip end'}
+            aria-valuemin={edge === 'in' ? bounds.inMin : bounds.outMin}
+            aria-valuemax={edge === 'in' ? bounds.inMax : bounds.outMax}
+            aria-valuenow={edge === 'in' ? clip.sourceIn : clip.sourceOut}
+            tabIndex={0}
+          >
+            <span className="grip" />
+          </div>
+        );
+      })}
     </>
   );
 }

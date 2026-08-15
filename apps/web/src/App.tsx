@@ -3,7 +3,7 @@ import { formatTimecode, timelineDuration } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
 import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
-import { TimelineEditor } from './Timeline.tsx';
+import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
 import { downloadLog, downloadProject, useSession } from './session.ts';
 
 /**
@@ -17,16 +17,21 @@ import { downloadLog, downloadProject, useSession } from './session.ts';
 export function App() {
   const session = useSession();
   const [playing, setPlaying] = useState(false);
+  const [drag, setDrag] = useState<TimelineDragState | null>(null);
 
   const onTime = useCallback((t: number) => session.seek(t, false), [session]);
   const onEnded = useCallback(() => setPlaying(false), []);
 
-  // Any edit stops playback. Trimming the clip you are watching while it plays fights
-  // the seek logic and makes the preview stutter for no benefit.
-  const editing = session.selectedClipId;
+  /**
+   * A drag stops playback.
+   *
+   * Not tidiness: the playback loop writes the playhead from the video's own position
+   * every frame, so dragging the playhead while playing was a tug of war the loop won.
+   * The preview looked frozen because every drag position was immediately overwritten.
+   */
   useEffect(() => {
-    if (editing) setPlaying(false);
-  }, [editing]);
+    if (drag) setPlaying(false);
+  }, [drag]);
 
   if (session.status === 'loading') {
     return (
@@ -36,7 +41,7 @@ export function App() {
     );
   }
 
-  if (session.status === 'empty' || !session.project || !session.previewTimeline) {
+  if (session.status === 'empty' || !session.project) {
     return (
       <StartScreen
         busy={session.busy}
@@ -50,10 +55,10 @@ export function App() {
     );
   }
 
-  const { project, previewTimeline, playhead, plan } = session;
-  const clips = previewTimeline.tracks[0]?.clips ?? [];
+  const { project, playhead, plan } = session;
+  const clips = project.timeline.tracks[0]?.clips ?? [];
   const kept = clips.filter((clip) => clip.enabled);
-  const total = timelineDuration(previewTimeline);
+  const total = timelineDuration(project.timeline);
   const frozen = project.stage !== 'coarse';
   const selected = clips.find((c) => c.id === session.selectedClipId) ?? null;
   const mediaUrl = session.mediaUrls.get(clips[0]?.sourceId ?? '') ?? null;
@@ -120,9 +125,10 @@ export function App() {
       {mediaUrl && (
         <Player
           objectUrl={mediaUrl}
-          timeline={previewTimeline}
+          timeline={project.timeline}
           playhead={playhead}
           playing={playing}
+          scrubSourceTime={drag?.scrubSourceTime ?? null}
           onTime={onTime}
           onEnded={onEnded}
         />
@@ -142,7 +148,7 @@ export function App() {
       </div>
 
       <TimelineEditor
-        timeline={previewTimeline}
+        timeline={project.timeline}
         sources={project.sources}
         mediaUrls={session.mediaUrls}
         playhead={playhead}
@@ -150,9 +156,8 @@ export function App() {
         frozen={frozen}
         onSeek={session.seek}
         onSelect={session.select}
-        onTrimPreview={session.previewTrim}
         onTrimCommit={session.commitTrim}
-        onTrimCancel={session.cancelTrim}
+        onDragChange={setDrag}
       />
 
       <nav className="toolbar" aria-label="Editing tools">

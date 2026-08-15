@@ -422,6 +422,31 @@ button.play {
   background: #fff;
 }
 
+/* Pressed against a limit. Silently pinning the handle is how a drag ends up collapsing
+   a clip without the user ever seeing it stop. */
+.trim-handle.clamped .grip {
+  background: var(--danger);
+}
+
+/* The clip being dragged sits above its neighbours and says how long it now is, so the
+   gesture has a number attached rather than only a width. */
+.clip-block.trimming {
+  z-index: 3;
+  border-color: #fff;
+}
+
+.clip-length {
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.75);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
 .playhead {
   position: absolute;
   top: 0;
