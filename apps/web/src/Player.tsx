@@ -38,6 +38,8 @@ export interface PlayerProps {
   scrubSourceTime?: number | null;
   onTime(outputTime: number): void;
   onEnded(): void;
+  /** Reports what the element can do with this media, once metadata has loaded. */
+  onDiagnostics?(info: Record<string, unknown>): void;
 }
 
 /** Below this, a seek is more disruptive than the drift it would correct. */
@@ -54,6 +56,7 @@ export function Player({
   scrubSourceTime = null,
   onTime,
   onEnded,
+  onDiagnostics,
 }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const frameRef = useRef<number | null>(null);
@@ -73,6 +76,9 @@ export function Player({
   onTimeRef.current = onTime;
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
+  const onDiagnosticsRef = useRef(onDiagnostics);
+  onDiagnosticsRef.current = onDiagnostics;
+  const reportedForRef = useRef<string | null>(null);
 
   const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {
     if (Math.abs(secondsToMicros(video.currentTime) - sourceUs) <= SEEK_TOLERANCE_US) return;
@@ -106,6 +112,31 @@ export function Player({
   }, [seekTo, timeline]);
 
   useEffect(sync, [sync, playhead, scrubSourceTime, scrubbing]);
+
+  /**
+   * Once metadata is in, say whether this element can seek at all.
+   *
+   * `seekable.length === 0` is the definitive form of the iOS blob-URL failure: the media
+   * loads, reports a duration, plays — and every `currentTime` assignment is ignored. From
+   * the outside that is indistinguishable from an editor whose cuts do nothing, so it is
+   * worth stating plainly rather than inferring from behaviour.
+   */
+  const reportDiagnostics = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || reportedForRef.current === objectUrl) return;
+    reportedForRef.current = objectUrl;
+
+    const ranges = video.seekable;
+    onDiagnosticsRef.current?.({
+      seekable: ranges.length > 0,
+      seekableRanges: ranges.length,
+      seekableEnd: ranges.length > 0 ? Number(ranges.end(ranges.length - 1).toFixed(3)) : 0,
+      duration: Number.isFinite(video.duration) ? Number(video.duration.toFixed(3)) : null,
+      readyState: video.readyState,
+      urlScheme: objectUrl.startsWith('blob:') ? 'blob' : 'http',
+      fastSeek: typeof video.fastSeek === 'function',
+    });
+  }, [objectUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -177,7 +208,16 @@ export function Player({
 
   return (
     <div className="player">
-      <video ref={videoRef} src={objectUrl} playsInline preload="auto" onLoadedMetadata={sync} />
+      <video
+        ref={videoRef}
+        src={objectUrl}
+        playsInline
+        preload="auto"
+        onLoadedMetadata={() => {
+          sync();
+          reportDiagnostics();
+        }}
+      />
     </div>
   );
 }

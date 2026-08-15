@@ -16,14 +16,30 @@ export interface BoundMedia {
   missing: MissingMedia[];
 }
 
-export async function bindProjectMedia(project: Project, media: MediaStore): Promise<BoundMedia> {
+export interface BindOptions {
+  /**
+   * How a stored file becomes a URL the player can use.
+   *
+   * Injected rather than fixed at `URL.createObjectURL`, because that is the one thing
+   * iOS Safari cannot seek inside — the app serves media through a range-answering
+   * service worker instead, and this package has no business knowing about it.
+   */
+  createUrl?(file: File, source: Source): string;
+}
+
+export async function bindProjectMedia(
+  project: Project,
+  media: MediaStore,
+  options: BindOptions = {},
+): Promise<BoundMedia> {
+  const createUrl = options.createUrl ?? ((file: File) => URL.createObjectURL(file));
   const urls = new Map<string, string>();
   const missing: MissingMedia[] = [];
 
   for (const source of project.sources) {
     const file = await openSource(source, media);
     if (file) {
-      urls.set(source.id, URL.createObjectURL(file));
+      urls.set(source.id, createUrl(file, source));
     } else {
       missing.push({
         sourceId: source.id,

@@ -24,6 +24,7 @@ import {
   type ProjectSummary,
 } from '@evocut/store';
 import { probeVideo, sourceFromMedia } from './probe.ts';
+import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
 
 /**
  * Session state: the project, its media, its log, and any refinement awaiting review.
@@ -97,6 +98,10 @@ export interface Session {
   /** End of a trim drag: one op, one revision, one log row. */
   commitTrim(clipId: string, sourceIn: number, sourceOut: number): void;
 
+  /** True once the player has reported that this browser cannot seek the media. */
+  seekingUnsupported: boolean;
+  reportMediaDiagnostics(info: Record<string, unknown>): void;
+
   requestRefinement(): void;
   setVerdict(index: number, accepted: boolean): void;
   setAllVerdicts(accepted: boolean): void;
@@ -118,6 +123,7 @@ export function useSession(): Session {
   const [verdicts, setVerdicts] = useState<Map<number, boolean>>(new Map());
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [history, setHistory] = useState<Project[]>([]);
+  const [seekingUnsupported, setSeekingUnsupported] = useState(false);
 
   const loggerRef = useRef<ReturnType<typeof makeLogger> | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -125,7 +131,7 @@ export function useSession(): Session {
   const lastScrubLogRef = useRef(0);
 
   const releaseUrls = useCallback(() => {
-    for (const url of urlsRef.current.values()) URL.revokeObjectURL(url);
+    for (const url of urlsRef.current.values()) releaseMediaUrl(url);
     urlsRef.current = new Map();
   }, []);
 
@@ -155,7 +161,10 @@ export function useSession(): Session {
   const bind = useCallback(
     async (next: Project) => {
       releaseUrls();
-      const bound = await bindProjectMedia(next, stores.media);
+      // Waited on, not fired and forgotten: media bound before the range server controls
+      // the page would be stuck on an unseekable blob URL for the rest of the session.
+      await startMediaServer();
+      const bound = await bindProjectMedia(next, stores.media, { createUrl: (file, source) => mediaUrlFor(source, file).url });
       urlsRef.current = bound.urls;
       setMediaUrls(bound.urls);
       setMissingMedia(bound.missing);
@@ -398,6 +407,23 @@ export function useSession(): Session {
 
   const select = useCallback((clipId: string | null) => setSelectedClipId(clipId), []);
 
+  /**
+   * Record what the media element can actually do.
+   *
+   * "Plays but will not seek" is invisible from the EDL — every cut looks fine and the
+   * playback is simply wrong. Putting it in the log means the next exported session says
+   * so outright instead of needing another round of guessing.
+   */
+  const reportMediaDiagnostics = useCallback(
+    (info: Record<string, unknown>) => {
+      setSeekingUnsupported(info.seekable === false);
+      record('media.diagnostics', {
+        payload: { ...info, rangeServer: isMediaServerActive(), backend: stores.backend },
+      });
+    },
+    [record],
+  );
+
   const commitTrim = useCallback(
     (clipId: string, sourceIn: number, sourceOut: number) => {
       const clip = project?.timeline.tracks[0]?.clips.find((c) => c.id === clipId);
@@ -554,6 +580,8 @@ export function useSession(): Session {
     undo,
     finishCoarsePass,
     commitTrim,
+    seekingUnsupported,
+    reportMediaDiagnostics,
     requestRefinement,
     setVerdict,
     setAllVerdicts,

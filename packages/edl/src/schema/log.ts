@@ -25,6 +25,10 @@ export const LOG_EVENT_TYPES = [
   'project.open',
   'source.import',
   'source.probe',
+  // What the media element reports it can do with the bytes it was handed. Logged
+  // because "the video plays but will not seek" is invisible from the EDL alone, and it
+  // is the difference between an editor and a video player.
+  'media.diagnostics',
   // transport — the attention trail
   'playback.play',
   'playback.pause',

@@ -45,16 +45,49 @@ check(
   [],
 );
 
+// --- The media must be seekable, and served by the range server ------------------
+// iOS Safari cannot seek inside a `blob:` URL: it loads, reports a duration, plays, and
+// ignores every `currentTime` assignment. That one limitation broke cuts, scrubbing and
+// the playhead at once, because all three are seeks. Media therefore goes through a
+// service worker that answers Range requests, and the element gets an http(s) URL.
+await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, { timeout: 20000 });
+check(
+  'mediaServedOverHttp',
+  await page.evaluate(() => (document.querySelector('.player video')?.src ?? '').startsWith('blob:')),
+  false,
+);
+check(
+  'rangeServerAnswersPartialContent',
+  await page.evaluate(async () => {
+    const src = document.querySelector('.player video').src;
+    const response = await fetch(src, { headers: { Range: 'bytes=0-99' } });
+    return {
+      status: response.status,
+      hasContentRange: response.headers.has('Content-Range'),
+      acceptRanges: response.headers.get('Accept-Ranges'),
+    };
+  }),
+  { status: 206, hasContentRange: true, acceptRanges: 'bytes' },
+);
+check(
+  'mediaIsSeekable',
+  await page.evaluate(() => {
+    const video = document.querySelector('.player video');
+    return video.seekable.length > 0;
+  }),
+  true,
+);
+
 // The blob the player is handed must carry a MIME type. It did not, once: OPFS names a
 // file after its extension-less storage path, Chromium sniffed the container out of the
 // bytes and played it, and Safari refused — so this passed everywhere except the one
 // platform the app is for.
 check(
-  'mediaBlobIsTyped',
+  'mediaIsTyped',
   await page.evaluate(async () => {
     const src = document.querySelector('.player video')?.src;
     if (!src) return 'no video element';
-    return (await (await fetch(src)).blob()).type;
+    return (await fetch(src)).headers.get('Content-Type');
   }),
   'video/webm',
 );

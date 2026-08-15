@@ -132,7 +132,16 @@ export function App() {
           scrubSourceTime={drag?.scrubSourceTime ?? null}
           onTime={onTime}
           onEnded={onEnded}
+          onDiagnostics={session.reportMediaDiagnostics}
         />
+      )}
+
+      {session.seekingUnsupported && (
+        <p className="warning">
+          This browser will play this video but will not seek inside it, so cuts and
+          scrubbing have no effect on the preview. The edit itself is still being recorded
+          correctly — it is only the preview that is wrong.
+        </p>
       )}
 
       <div className="transport">
