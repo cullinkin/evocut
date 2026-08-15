@@ -48,6 +48,10 @@ export const LOG_EVENT_TYPES = [
   'clip.remove',
   'clip.move',
   'clip.restore',
+  // Colour and tone. Its own row rather than a generic edit, because "what did they do to
+  // make it look right" is a different question from "what did they keep", and a training
+  // set that cannot tell them apart learns neither.
+  'clip.color',
   'edit.undo',
   'edit.redo',
   // handoff and refinement

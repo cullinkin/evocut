@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { microsToSeconds, secondsToMicros, sourceToTimeline, type Timeline } from '@evocut/edl';
-import { sampleTimeline } from '@evocut/renderer';
+import { microsToSeconds, secondsToMicros, sourceToTimeline, type ColorValue, type Timeline } from '@evocut/edl';
+import { filterFor, sampleTimeline } from '@evocut/renderer';
 
 /**
  * Preview player.
@@ -59,6 +59,19 @@ export interface PlayerProps {
   scrubbing?: boolean;
   /** While set, the preview shows this source time instead of following the playhead. */
   scrubSourceTime?: number | null;
+  /**
+   * Overrides one clip's grade while the Adjust sheet is open.
+   *
+   * The sliders must show their effect on the picture, and writing every intermediate
+   * value into the EDL would put a hundred revisions in the log on the way to one look.
+   * So the sheet holds a draft, the draft comes through here, and only the value it
+   * settles on is committed.
+   *
+   * Carries the clip id because the playhead can move while the sheet is open, and a draft
+   * that leaked onto whatever clip happened to be under the playhead would be showing a
+   * change that is not going to be made.
+   */
+  previewColor?: { clipId: string; value: ColorValue } | null;
   onTime(outputTime: number): void;
   onEnded(): void;
   /** Reports what the element can do with this media, once metadata has loaded. */
@@ -105,6 +118,7 @@ export function Player({
   playing,
   scrubbing = false,
   scrubSourceTime = null,
+  previewColor = null,
   onTime,
   onEnded,
   onDiagnostics,
@@ -133,6 +147,8 @@ export function Player({
   scrubRef.current = scrubSourceTime;
   const scrubbingRef = useRef(scrubbing);
   scrubbingRef.current = scrubbing;
+  const previewColorRef = useRef(previewColor);
+  previewColorRef.current = previewColor;
 
   // Held in refs so the playback effect does not depend on them. The session hook returns
   // a fresh object every render, so a callback in the dependency list tore the loop down
@@ -184,10 +200,14 @@ export function Player({
     const layer = sampleTimeline(timeline, playheadRef.current).layers[0];
     if (!layer) return;
     video.playbackRate = layer.clip.speed;
+    // The same string the export sets on its canvas — one function, two surfaces, so the
+    // graded preview is evidence about the graded file rather than a second opinion.
+    const draft = previewColorRef.current;
+    video.style.filter = filterFor(draft && draft.clipId === layer.clip.id ? draft.value : layer.color);
     seekTo(video, layer.sourceTime, scrubbingRef.current);
   }, [liveVideo, seekTo, timeline]);
 
-  useEffect(sync, [sync, playhead, scrubSourceTime, scrubbing]);
+  useEffect(sync, [sync, playhead, scrubSourceTime, scrubbing, previewColor]);
 
   /**
    * Park the spare on the first frame of whatever plays at `outputUs`.
@@ -209,6 +229,9 @@ export function Player({
       }
       preppedRef.current = next.sourceTime;
       spare.playbackRate = next.clip.speed;
+      // Graded before it is shown. The handoff is a swap of two live elements, so a spare
+      // still wearing the outgoing clip's look would flash it for a frame at every cut.
+      spare.style.filter = filterFor(next.color);
       spare.currentTime = Math.max(0, microsToSeconds(next.sourceTime));
     },
     [spareVideo, timeline],

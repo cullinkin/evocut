@@ -62,7 +62,8 @@ await page.locator('button:has-text("Refine")').click();
 await page.locator('.sheet').waitFor({ timeout: 10000 });
 
 await page.locator('.sheet textarea').fill('Punchy. Hold on the hits, cut the dead air.');
-await page.locator('.sheet input[type=text]').fill('0:08');
+await page.locator('.sheet input[aria-label="Target length, minutes"]').fill('0');
+await page.locator('.sheet input[aria-label="Target length, seconds"]').fill('8');
 await page.screenshot({ path: artifact('brief-sheet.png') });
 await page.locator('.sheet-actions .primary').click();
 await page.locator('.bubble').first().waitFor({ timeout: 15000 });
@@ -136,7 +137,21 @@ await page.locator('.review').waitFor({ timeout: 10000 });
 const proposals = await page.locator('.proposal').count();
 set('proposalCount', proposals);
 check('enoughProposalsToReview', proposals >= 2, true);
-check('listAgreesWithTheBubbles', proposals, bubbles);
+/*
+  Every proposal is reachable from the timeline — which is not the same as one bubble each.
+  Suggestions closer together than a thumb are drawn as one bubble wearing its count, so
+  the invariant is that the counts add up, not that they match one for one. Asserting
+  equality passed for a while on the luck of where the heuristics put their edits.
+*/
+const reachable = await page.evaluate(() =>
+  [...document.querySelectorAll('.bubble')].reduce((total, bubble) => {
+    const grouped = /^(\d+) suggestions here$/.exec(bubble.getAttribute('aria-label') ?? '');
+    return total + (grouped ? Number(grouped[1]) : 1);
+  }, 0),
+);
+set('reachableFromTheTimeline', reachable);
+check('everyProposalIsOnTheTimeline', reachable, proposals);
+check('andTheyAreClustered', bubbles <= proposals, true);
 set('firstProposal', await page.locator('.proposal').first().locator('strong').innerText());
 check('preAccepted', await page.locator('.proposal.accepted').count(), 0);
 check('finishLabelBeforeAnyChoice', await page.locator('.review-actions .primary').innerText(), 'Done — kept none');

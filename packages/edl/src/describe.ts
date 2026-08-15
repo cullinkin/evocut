@@ -1,7 +1,7 @@
 import { outputDuration, sourceDuration, clipEnd } from './schema/clip.js';
 import { findClip, timelineDuration, type Timeline } from './schema/timeline.js';
 import type { Project } from './schema/project.js';
-import type { Effect } from './schema/effects.js';
+import type { ColorValue, Effect } from './schema/effects.js';
 import type { Op } from './schema/ops.js';
 import { formatTimecode } from './time.js';
 
@@ -185,6 +185,11 @@ export function describeOp(op: Op, timeline?: Timeline): string {
       return `Adjust audio on ${named(op.clipId)}`;
     }
 
+    case 'setColor':
+      return op.color === null
+        ? `Clear the colour adjustment on ${named(op.clipId)}`
+        : `Adjust colour on ${named(op.clipId)}: ${describeColor(op.color)}`;
+
     case 'setLabel':
       return `Label ${named(op.clipId)} "${op.label}"`;
 
@@ -209,7 +214,22 @@ function describeNewEffect(effect: Effect): string {
       return 'Ride the volume';
     case 'opacity':
       return 'Fade';
+    case 'color':
+      return `Adjust colour: ${describeColor(effect.value)}`;
   }
+}
+
+/**
+ * A grade in words, naming only what was actually moved.
+ *
+ * Six controls listed every time — five of them at zero — is a sentence nobody reads. The
+ * two or three that were touched are the whole content of the change.
+ */
+function describeColor(value: ColorValue): string {
+  const moved = (Object.entries(value) as Array<[keyof ColorValue, number]>)
+    .filter(([, amount]) => amount !== 0)
+    .map(([name, amount]) => `${name} ${amount > 0 ? '+' : ''}${Math.round(amount * 100)}`);
+  return moved.length > 0 ? moved.join(', ') : 'nothing';
 }
 
 function formatRate(value: number): string {

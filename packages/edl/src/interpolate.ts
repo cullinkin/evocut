@@ -96,7 +96,9 @@ export function sampleNumber(keyframes: ReadonlyArray<Keyframe<number>>, t: numb
  * jumping back to the nearest authored keyframe.
  */
 export function splitEffect(effect: Effect, offset: number): [Effect, Effect] {
-  if (effect.type === 'crop') {
+  // Nothing to interpolate: both halves of the shot were lit the same way and cropped the
+  // same way, and a split is not a reason for either to change.
+  if (effect.type === 'crop' || effect.type === 'color') {
     return [{ ...effect }, { ...effect }];
   }
 

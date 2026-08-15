@@ -1,10 +1,12 @@
 import {
+  NEUTRAL_COLOR,
   clipEnd,
   outputDuration,
   sampleNumber,
   sampleTransform,
   timelineToSource,
   type Clip,
+  type ColorValue,
   type CropRect,
   type Timeline,
   type TransformValue,
@@ -30,6 +32,8 @@ export interface FrameLayer {
   transform: TransformValue;
   crop: CropRect;
   opacity: number;
+  /** Colour and tone for this clip. Static, so it is the same at every instant of it. */
+  color: ColorValue;
   /** Combined clip gain and volume keyframes at this instant. */
   gain: number;
   /** How far into the clip's output we are. Handy for debug overlays. */
@@ -89,10 +93,11 @@ export function sampleClip(clip: Clip, t: number): FrameLayer | null {
 function sampleEffects(
   clip: Clip,
   offset: number,
-): { transform: TransformValue; crop: CropRect; opacity: number } {
+): { transform: TransformValue; crop: CropRect; opacity: number; color: ColorValue } {
   let transform = IDENTITY_TRANSFORM;
   let crop = FULL_FRAME;
   let opacity = 1;
+  let color = NEUTRAL_COLOR;
 
   for (const effect of clip.effects) {
     if (!effect.enabled) continue;
@@ -106,12 +111,15 @@ function sampleEffects(
       case 'opacity':
         opacity = sampleNumber(effect.keyframes, offset);
         break;
+      case 'color':
+        color = effect.value;
+        break;
       case 'volume':
         break;
     }
   }
 
-  return { transform, crop, opacity };
+  return { transform, crop, opacity, color };
 }
 
 function sampleClipVolume(clip: Clip, offset: number): number {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ClipId, EffectId, NonNegativeMicrosSchema, SourceId, TrackId } from './common.js';
-import { Effect } from './effects.js';
+import { ColorValue, Effect } from './effects.js';
 import { ClipAudio } from './clip.js';
 
 /**
@@ -93,6 +93,21 @@ export const AddEffectOp = z.object({
   ...withRationale,
 });
 
+/**
+ * Set (or clear) a clip's colour grade.
+ *
+ * Not `addEffect`, because a grade is one per clip and a slider emits a new value every
+ * time it moves. An add would stack a hundred effects on the way to one look; this
+ * replaces, so the op is idempotent and the EDL says what the clip looks like rather than
+ * how the person arrived at it. `null` clears the grade entirely — which is what Reset is.
+ */
+export const SetColorOp = z.object({
+  op: z.literal('setColor'),
+  clipId: ClipId,
+  color: ColorValue.nullable(),
+  ...withRationale,
+});
+
 export const RemoveEffectOp = z.object({
   op: z.literal('removeEffect'),
   clipId: ClipId,
@@ -136,6 +151,7 @@ export const Op = z.discriminatedUnion('op', [
   MoveOp,
   SetSpeedOp,
   AddEffectOp,
+  SetColorOp,
   RemoveEffectOp,
   SetAudioOp,
   SetLabelOp,
@@ -151,6 +167,7 @@ export type SetEnabledOp = z.infer<typeof SetEnabledOp>;
 export type MoveOp = z.infer<typeof MoveOp>;
 export type SetSpeedOp = z.infer<typeof SetSpeedOp>;
 export type AddEffectOp = z.infer<typeof AddEffectOp>;
+export type SetColorOp = z.infer<typeof SetColorOp>;
 export type RemoveEffectOp = z.infer<typeof RemoveEffectOp>;
 export type SetAudioOp = z.infer<typeof SetAudioOp>;
 export type SetLabelOp = z.infer<typeof SetLabelOp>;

@@ -12,6 +12,7 @@ import {
   type LogEventType,
   previewOps,
   resolveReview,
+  type ColorValue,
   type Op,
   type OpPreview,
   type OpVerdict,
@@ -174,6 +175,11 @@ export interface Session {
 
   /** End of a trim drag: one op, one revision, one log row. */
   commitTrim(clipId: string, sourceIn: number, sourceOut: number): void;
+
+  /** Colour and tone for one clip. `null` clears it. */
+  setClipColor(clipId: string, color: ColorValue | null): void;
+  /** The same grade on every clip in the timeline, as one revision. */
+  applyColorToAll(color: ColorValue | null): void;
 
   /** True once the player has reported that this browser cannot seek the media. */
   seekingUnsupported: boolean;
@@ -630,6 +636,41 @@ export function useSession(): Session {
       // no-op revision in the chain and a meaningless row in the training data.
       if (!clip || (clip.sourceIn === sourceIn && clip.sourceOut === sourceOut)) return;
       edit('clip.trim', [{ op: 'trim', clipId, sourceIn, sourceOut }]);
+    },
+    [edit, project],
+  );
+
+  /**
+   * Set one clip's grade, or clear it.
+   *
+   * One op, one revision, one log row — committed when the sheet closes rather than as the
+   * slider moves. The sheet holds the draft in the meantime and the preview reads it
+   * directly, so a look someone spent a minute finding arrives here as a single decision
+   * instead of two hundred.
+   */
+  const setClipColor = useCallback(
+    (clipId: string, color: ColorValue | null) => {
+      edit('clip.color', [{ op: 'setColor', clipId, color }]);
+    },
+    [edit],
+  );
+
+  /**
+   * Put the same grade on every clip.
+   *
+   * One revision covering all of them, not one per clip: undo should take back "I made
+   * them all match", which is the thing that was decided, rather than walking backwards
+   * through fifty-one identical steps. Disabled clips are included — a clip that comes
+   * back later should come back looking like its neighbours.
+   */
+  const applyColorToAll = useCallback(
+    (color: ColorValue | null) => {
+      const clips = project?.timeline.tracks.flatMap((track) => track.clips) ?? [];
+      if (clips.length === 0) return;
+      edit(
+        'clip.color',
+        clips.map((clip) => ({ op: 'setColor' as const, clipId: clip.id, color })),
+      );
     },
     [edit, project],
   );
@@ -1171,6 +1212,8 @@ export function useSession(): Session {
     undo,
     finishCoarsePass,
     commitTrim,
+    setClipColor,
+    applyColorToAll,
     seekingUnsupported,
     reportMediaDiagnostics,
     requestRefinement,

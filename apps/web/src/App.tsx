@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { findModel } from '@evocut/agent';
-import { formatTimecode, lengthStanding, timelineDuration } from '@evocut/edl';
+import {
+  NEUTRAL_COLOR,
+  formatTimecode,
+  lengthStanding,
+  timelineDuration,
+  type Clip,
+  type ColorValue,
+} from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
+import { AdjustSheet } from './Adjust.tsx';
 import { BriefSheet } from './Brief.tsx';
 import { ExportPanel } from './Export.tsx';
 import { SettingsScreen } from './Settings.tsx';
@@ -27,6 +35,8 @@ export function App() {
   const [showMetadata, setShowMetadata] = useState(false);
   const [showBrief, setShowBrief] = useState(false);
   const [showList, setShowList] = useState(false);
+  /** The clip whose grade is being adjusted, and the uncommitted value. */
+  const [adjusting, setAdjusting] = useState<{ clipId: string; value: ColorValue } | null>(null);
   /** Index of the suggestion whose sheet is open, or null. */
   const [openSuggestion, setOpenSuggestion] = useState<number | null>(null);
 
@@ -170,6 +180,16 @@ export function App() {
   const total = timelineDuration(project.timeline);
   const frozen = project.stage !== 'coarse';
   const selected = clips.find((c) => c.id === session.selectedClipId) ?? null;
+  // What Adjust acts on: the selected clip if there is one, otherwise whatever is under
+  // the playhead — which is the clip you are looking at, and so the one you mean.
+  const adjustTarget =
+    selected ??
+    kept.find((clip) => {
+      const end = clip.start + Math.round((clip.sourceOut - clip.sourceIn) / clip.speed);
+      return playhead >= clip.start && playhead < end;
+    }) ??
+    kept[0] ??
+    null;
   const mediaUrl = session.mediaUrls.get(clips[0]?.sourceId ?? '') ?? null;
 
   // The export owns the whole screen while it runs. It takes about as long as the video
@@ -258,6 +278,7 @@ export function App() {
           playing={playing}
           scrubbing={drag !== null}
           scrubSourceTime={drag?.scrubSourceTime ?? null}
+          previewColor={adjusting}
           onTime={onTime}
           onEnded={onEnded}
           onDiagnostics={session.reportMediaDiagnostics}
@@ -327,7 +348,41 @@ export function App() {
           <span aria-hidden="true">🗑</span>
           <small>Delete</small>
         </button>
+        {/*
+          Not disabled by `frozen`. Colour is not part of the coarse pass and the moment
+          you most want it is after the refinement has settled what the video actually is.
+        */}
+        <button
+          onClick={() => adjustTarget && setAdjusting({ clipId: adjustTarget.id, value: colorOf(adjustTarget) })}
+          disabled={!adjustTarget}
+          aria-label="Adjust colour"
+        >
+          <span aria-hidden="true">◐</span>
+          <small>Adjust</small>
+        </button>
       </nav>
+
+      {adjusting && (
+        <AdjustSheet
+          clipNumber={clips.findIndex((clip) => clip.id === adjusting.clipId) + 1 || null}
+          clipCount={clips.length}
+          value={adjusting.value}
+          // Read straight off the DOM rather than threaded through a ref: Auto needs the
+          // element that is *on screen*, and which of the player's two that is changes at
+          // every cut. The class is the same thing the player uses to decide.
+          videoFor={() => document.querySelector<HTMLVideoElement>('.player video.live')}
+          onChange={(value) => setAdjusting((current) => (current ? { ...current, value } : current))}
+          onCommit={(value) => {
+            session.setClipColor(adjusting.clipId, value);
+            setAdjusting(null);
+          }}
+          onApplyToAll={(value) => {
+            session.applyColorToAll(value);
+            setAdjusting(null);
+          }}
+          onClose={() => setAdjusting(null)}
+        />
+      )}
 
       {showBrief && (
         <BriefSheet
@@ -427,6 +482,14 @@ export function App() {
       </footer>
     </main>
   );
+}
+
+/** A clip's grade, or a neutral one — the sheet always opens on a full set of controls. */
+function colorOf(clip: Clip): ColorValue {
+  for (const effect of clip.effects) {
+    if (effect.type === 'color' && effect.enabled) return { ...effect.value };
+  }
+  return { ...NEUTRAL_COLOR };
 }
 
 /**

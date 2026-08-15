@@ -23,6 +23,7 @@
 
 export * from './sample.js';
 export * from './compose.js';
+export * from './color.js';
 export * from './audio.js';
 export * from './demux.js';
 export * from './decode-audio.js';

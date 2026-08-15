@@ -53,6 +53,49 @@ export const CropRect = z.object({
 });
 export type CropRect = z.infer<typeof CropRect>;
 
+/**
+ * A colour grade, in the terms a person adjusts one in.
+ *
+ * Every control is **−1 to 1 with 0 meaning untouched**, rather than each carrying its own
+ * natural units (a brightness multiplier around 1, a hue in degrees, a saturation
+ * percentage). One range for everything is what makes "reset", "is this clip graded?",
+ * "copy this to every clip" and a row of identical sliders all fall out for free, and it
+ * is the range the sliders are in anyway.
+ *
+ * The names are the ones iOS Photos uses, because that is where the muscle memory is.
+ * `brilliance` is the only one that is not a single primitive — see `filterFor` in the
+ * renderer, which is the one place any of these turn into an actual image operation, so the
+ * preview and the export cannot drift apart.
+ */
+export const ColorValue = z.object({
+  /** Overall lightness. */
+  exposure: z.number().min(-1).max(1).default(0),
+  /** Opens the shadows and holds the highlights — flat footage, lifted. */
+  brilliance: z.number().min(-1).max(1).default(0),
+  contrast: z.number().min(-1).max(1).default(0),
+  saturation: z.number().min(-1).max(1).default(0),
+  /** Toward orange at +1, toward blue at −1. */
+  warmth: z.number().min(-1).max(1).default(0),
+  /** Toward magenta at +1, toward green at −1. */
+  tint: z.number().min(-1).max(1).default(0),
+});
+export type ColorValue = z.infer<typeof ColorValue>;
+
+/** Every control at rest. Deep-copied on read so callers can mutate their own. */
+export const NEUTRAL_COLOR: ColorValue = Object.freeze({
+  exposure: 0,
+  brilliance: 0,
+  contrast: 0,
+  saturation: 0,
+  warmth: 0,
+  tint: 0,
+});
+
+/** True when a grade would change nothing, so it can be dropped rather than stored. */
+export function isNeutralColor(value: ColorValue): boolean {
+  return (Object.keys(NEUTRAL_COLOR) as Array<keyof ColorValue>).every((key) => value[key] === 0);
+}
+
 const effectBase = {
   id: EffectId,
   enabled: z.boolean().default(true),
@@ -91,11 +134,27 @@ export const OpacityEffect = z.object({
 });
 export type OpacityEffect = z.infer<typeof OpacityEffect>;
 
+/**
+ * Colour and tone. Static, unlike its neighbours here, and deliberately so.
+ *
+ * A grade is a property of how a shot was lit, not a thing that happens at a moment in it.
+ * Keyframing one would mean the picture drifting mid-shot, which is a mistake far more
+ * often than it is an effect — and the cost of leaving it out is that `setColor` can be
+ * idempotent, which is what lets a slider write straight into the EDL.
+ */
+export const ColorEffect = z.object({
+  ...effectBase,
+  type: z.literal('color'),
+  value: ColorValue,
+});
+export type ColorEffect = z.infer<typeof ColorEffect>;
+
 export const Effect = z.discriminatedUnion('type', [
   TransformEffect,
   CropEffect,
   VolumeEffect,
   OpacityEffect,
+  ColorEffect,
 ]);
 export type Effect = z.infer<typeof Effect>;
 

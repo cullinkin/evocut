@@ -1,5 +1,6 @@
 import { newId as defaultNewId, type EntityKind } from './schema/common.js';
 import { clipEnd, outputDuration, timelineToSource, type Clip } from './schema/clip.js';
+import { isNeutralColor, type ColorValue } from './schema/effects.js';
 import { findClip, findTrack, type Timeline } from './schema/timeline.js';
 import type { Op } from './schema/ops.js';
 import type { Source } from './schema/source.js';
@@ -156,6 +157,40 @@ function applyOne(timeline: Timeline, op: Op, ctx: Required<Pick<ApplyContext, '
       return replaceClip(timeline, track.id, index, {
         ...clip,
         effects: [...clip.effects, op.effect],
+      });
+    }
+
+    /**
+     * Replace the clip's grade, or take it off.
+     *
+     * Idempotent by construction: any existing colour effect is dropped first, so a
+     * slider dragged across its whole range leaves one effect behind rather than two
+     * hundred. A neutral value is stored as *no effect at all* — "graded to nothing" and
+     * "not graded" should be the same clip, or Reset would leave a trace in the EDL that
+     * every downstream reader would have to know to ignore.
+     */
+    case 'setColor': {
+      const { clip, track, index } = locate(timeline, op.clipId);
+      const others = clip.effects.filter((effect) => effect.type !== 'color');
+      const keep = op.color !== null && !isNeutralColor(op.color);
+      const existing = clip.effects.find((effect) => effect.type === 'color');
+      return replaceClip(timeline, track.id, index, {
+        ...clip,
+        effects: keep
+          ? [
+              ...others,
+              {
+                // Reusing the id when there already was one keeps a clip's grade a single
+                // identity across every adjustment, which is what makes `removeEffect`
+                // and a diff of two EDLs both readable.
+                id: existing?.id ?? ctx.newId('effect'),
+                type: 'color',
+                enabled: true,
+                ...(op.rationale ? { origin: { by: 'human', rationale: op.rationale } } : {}),
+                value: op.color as ColorValue,
+              },
+            ]
+          : others,
       });
     }
 

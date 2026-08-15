@@ -1,4 +1,5 @@
-import type { CropRect, TransformValue } from '@evocut/edl';
+import type { ColorValue, CropRect, TransformValue } from '@evocut/edl';
+import { filterFor } from './color.js';
 
 /**
  * Where a decoded frame lands inside the output frame.
@@ -46,6 +47,8 @@ export interface Placeable {
   transform: TransformValue;
   crop: CropRect;
   opacity: number;
+  /** Absent means ungraded, which is what every clip is until someone adjusts one. */
+  color?: ColorValue | null;
 }
 
 export function placeLayer(layer: Placeable, source: FrameSize, out: FrameSize): Placement {
@@ -79,6 +82,13 @@ export type Canvas2D = Pick<
   globalAlpha: number;
   fillStyle: unknown;
   imageSmoothingQuality?: ImageSmoothingQuality;
+  /**
+   * Optional because not every 2D context has it — it arrived in Safari 17 — and because
+   * an export that silently drops the grade is better than one that throws. Where it is
+   * missing the picture is ungraded and everything else is exactly right, which is a
+   * degradation someone can see and report rather than a file that never appears.
+   */
+  filter?: string;
 };
 
 /**
@@ -100,6 +110,9 @@ export function drawLayer(
 
   ctx.save();
   ctx.globalAlpha = Math.min(1, at.opacity);
+  // The same string the preview puts in `style.filter`. Set inside the save/restore, so a
+  // graded clip cannot leak its look onto the next layer.
+  if ('filter' in ctx) ctx.filter = filterFor(layer.color);
   ctx.translate(at.cx, at.cy);
   if (at.rotation !== 0) ctx.rotate(at.rotation);
   ctx.drawImage(image, at.sx, at.sy, at.sw, at.sh, -at.dw / 2, -at.dh / 2, at.dw, at.dh);
@@ -110,6 +123,9 @@ export function drawLayer(
 export function clearFrame(ctx: Canvas2D, out: FrameSize, background: string): void {
   ctx.save();
   ctx.globalAlpha = 1;
+  // Explicitly, rather than trusting the last `restore`: the background is not footage and
+  // must never carry a clip's grade.
+  if ('filter' in ctx) ctx.filter = 'none';
   ctx.fillStyle = background;
   ctx.fillRect(0, 0, out.width, out.height);
   ctx.restore();
