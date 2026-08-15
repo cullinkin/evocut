@@ -15,6 +15,9 @@ export default defineConfig({
       '@evocut/edl': fileURLToPath(new URL('../../packages/edl/src/index.ts', import.meta.url)),
       '@evocut/renderer': fileURLToPath(new URL('../../packages/renderer/src/index.ts', import.meta.url)),
       '@evocut/signals': fileURLToPath(new URL('../../packages/signals/src/index.ts', import.meta.url)),
+      '@evocut/agent/anthropic': fileURLToPath(
+        new URL('../../packages/agent/src/anthropic.ts', import.meta.url),
+      ),
       '@evocut/agent': fileURLToPath(new URL('../../packages/agent/src/index.ts', import.meta.url)),
       '@evocut/store': fileURLToPath(new URL('../../packages/store/src/index.ts', import.meta.url)),
     },

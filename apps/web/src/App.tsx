@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { formatTimecode, timelineDuration } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
 import { ExportPanel } from './Export.tsx';
+import { SettingsScreen } from './Settings.tsx';
 import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
@@ -19,6 +20,7 @@ export function App() {
   const session = useSession();
   const [playing, setPlaying] = useState(false);
   const [drag, setDrag] = useState<TimelineDragState | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   const onTime = useCallback((t: number) => session.seek(t, false), [session]);
   const onEnded = useCallback(() => setPlaying(false), []);
@@ -33,6 +35,29 @@ export function App() {
   useEffect(() => {
     if (drag) setPlaying(false);
   }, [drag]);
+
+  if (showSettings) {
+    return (
+      <main className="shell">
+        <header>
+          <button className="ghost" onClick={() => setShowSettings(false)} aria-label="Back">
+            ←
+          </button>
+          <div className="title">
+            <h1>Settings</h1>
+            <p className="meta">{session.settings.apiKey ? 'Key saved on this device' : 'No key yet'}</p>
+          </div>
+        </header>
+        <SettingsScreen
+          settings={session.settings}
+          busy={!session.settingsLoaded}
+          onSave={(next) => void session.saveSettings(next).then(() => setShowSettings(false))}
+          onForgetKey={() => void session.forgetApiKey()}
+          onClose={() => setShowSettings(false)}
+        />
+      </main>
+    );
+  }
 
   if (session.status === 'loading') {
     return (
@@ -52,6 +77,7 @@ export function App() {
         onPick={(file) => void session.importFile(file)}
         onOpen={(id) => void session.openProject(id)}
         onDelete={(id) => void session.deleteProject(id)}
+        onSettings={() => setShowSettings(true)}
       />
     );
   }
@@ -95,7 +121,11 @@ export function App() {
           </button>
           <div className="title">
             <h1>{project.name}</h1>
-            <p className="meta">Refinement review</p>
+            <p className="meta">
+              {session.refinedBy === 'model'
+                ? `Suggested by ${session.settings.model}`
+                : 'Suggested by the built-in heuristics'}
+            </p>
           </div>
         </header>
         <Review
@@ -133,8 +163,8 @@ export function App() {
           </p>
         </div>
         {frozen ? (
-          <button className="primary small" onClick={session.requestRefinement}>
-            Refine
+          <button className="primary small" onClick={session.requestRefinement} disabled={session.refining}>
+            {session.refining ? 'Thinking…' : 'Refine'}
           </button>
         ) : (
           <button className="primary small" onClick={session.finishCoarsePass} disabled={kept.length === 0}>
@@ -142,6 +172,16 @@ export function App() {
           </button>
         )}
       </header>
+
+      {session.refining && (
+        <p className="relink">
+          Asking {session.settings.model} for edits. Only the timeline description and the
+          measurements leave this device — never the footage.{' '}
+          <button className="ghost small" onClick={session.cancelRefinement}>
+            Cancel
+          </button>
+        </p>
+      )}
 
       {session.missingMedia.length > 0 && (
         <RelinkPrompt
@@ -252,6 +292,9 @@ export function App() {
         <button className="ghost" onClick={() => downloadLog(project, session.events)}>
           Log ({session.events.length})
         </button>
+        <button className="ghost" onClick={() => setShowSettings(true)} aria-label="Settings">
+          ⚙
+        </button>
       </footer>
     </main>
   );
@@ -265,9 +308,19 @@ interface StartScreenProps {
   onPick(file: File): void;
   onOpen(id: string): void;
   onDelete(id: string): void;
+  onSettings(): void;
 }
 
-function StartScreen({ busy, error, persistent, recents, onPick, onOpen, onDelete }: StartScreenProps) {
+function StartScreen({
+  busy,
+  error,
+  persistent,
+  recents,
+  onPick,
+  onOpen,
+  onDelete,
+  onSettings,
+}: StartScreenProps) {
   return (
     <main className="shell empty">
       <h1>EvoCut</h1>
@@ -316,6 +369,10 @@ function StartScreen({ busy, error, persistent, recents, onPick, onOpen, onDelet
       )}
 
       {error && <p className="error">{error}</p>}
+
+      <button className="ghost" onClick={onSettings}>
+        Settings
+      </button>
     </main>
   );
 }

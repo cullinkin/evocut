@@ -1,4 +1,4 @@
-import { IdbConnection, IdbDerivedCache, IdbMediaIndex, IdbProjectStore } from './idb.js';
+import { IdbConnection, IdbDerivedCache, IdbMediaIndex, IdbProjectStore, IdbSettingsStore } from './idb.js';
 import { IdbMediaStore } from './idb-media.js';
 import { OpfsMediaStore } from './opfs.js';
 import { createMemoryStores } from './memory.js';
@@ -29,6 +29,7 @@ export {
   IdbProjectStore,
   IdbMediaIndex,
   IdbDerivedCache,
+  IdbSettingsStore,
   CorruptProjectError,
   DB_NAME,
   DB_VERSION,
@@ -62,6 +63,7 @@ export function createStores(): AppStores {
     media: opfs ? new OpfsMediaStore(index) : new IdbMediaStore(connection, index),
     projects: new IdbProjectStore(connection),
     derived: new IdbDerivedCache(connection),
+    settings: new IdbSettingsStore(connection),
     persistent: true,
     backend: opfs ? 'opfs' : 'indexeddb',
   };

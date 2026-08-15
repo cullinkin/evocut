@@ -809,3 +809,79 @@ button.verdict.on {
   font-weight: 500;
   text-decoration: none;
 }
+
+/* --- Settings --- */
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.settings h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.field > span {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* 16px is not a taste decision: iOS zooms the whole page when focusing anything smaller,
+   and with `user-scalable=no` ignored there is no way back out. */
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.field textarea {
+  min-height: 120px;
+  line-height: 1.4;
+  resize: vertical;
+  /* The one place in the app where selecting text is the point. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.field input {
+  /* A key is 100+ characters of noise; letting it wrap is worse than letting it scroll. */
+  text-overflow: ellipsis;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.settings-actions button {
+  flex: 1;
+}
+
+button.ghost.small {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+  align-self: flex-start;
+}

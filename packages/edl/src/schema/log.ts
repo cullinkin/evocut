@@ -54,6 +54,7 @@ export const LOG_EVENT_TYPES = [
   'coarse.commit',
   'llm.request',
   'llm.plan',
+  'llm.error',
   'llm.apply',
   'llm.review',
   // output

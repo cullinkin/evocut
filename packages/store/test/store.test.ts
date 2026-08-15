@@ -21,8 +21,14 @@ import {
   IdbDerivedCache,
   IdbMediaIndex,
   IdbProjectStore,
+  IdbSettingsStore,
 } from '../src/idb.js';
-import { MemoryDerivedCache, MemoryMediaStore, MemoryProjectStore } from '../src/memory.js';
+import {
+  MemoryDerivedCache,
+  MemoryMediaStore,
+  MemoryProjectStore,
+  MemorySettingsStore,
+} from '../src/memory.js';
 import { IdbMediaStore } from '../src/idb-media.js';
 import { bindProjectMedia, orphanedMedia, rebindSource } from '../src/bind.js';
 import { fingerprintFile, mediaPath } from '../src/fingerprint.js';
@@ -518,5 +524,40 @@ describe.each([
     await cache.put('k', { v: 1 });
     await cache.delete('k');
     expect(await cache.get('k')).toBeNull();
+  });
+});
+
+describe.each([
+  ['memory', () => ({ settings: new MemorySettingsStore(), projects: null })],
+  [
+    'indexeddb',
+    () => {
+      const connection = new IdbConnection(new IDBFactory());
+      return { settings: new IdbSettingsStore(connection), projects: new IdbProjectStore(connection) };
+    },
+  ],
+])('%s settings store', (_name, make) => {
+  it('round-trips a value and forgets a deleted one', async () => {
+    const { settings } = make();
+    expect(await settings.get('anthropic')).toBeNull();
+
+    await settings.set('anthropic', { apiKey: 'sk-test', model: 'claude-opus-5' });
+    expect(await settings.get('anthropic')).toEqual({ apiKey: 'sk-test', model: 'claude-opus-5' });
+
+    await settings.delete('anthropic');
+    expect(await settings.get('anthropic')).toBeNull();
+  });
+
+  it('does not collide with the app’s own bookkeeping', async () => {
+    // Settings and `lastOpened` share one object store. A setting named `lastOpened`
+    // must not reopen a project that does not exist, or clear the one that does.
+    const { settings, projects } = make();
+    if (!projects) return;
+
+    await projects.setLastOpened('prj_real');
+    await settings.set('lastOpened', 'not a project id');
+
+    expect(await projects.getLastOpened()).toBe('prj_real');
+    expect(await settings.get('lastOpened')).toBe('not a project id');
   });
 });

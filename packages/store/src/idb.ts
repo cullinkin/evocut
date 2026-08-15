@@ -1,6 +1,13 @@
 import { LogEvent, Project } from '@evocut/edl';
 import type { MediaIndex } from './opfs.js';
-import type { DerivedCache, LoadedProject, MediaRecord, ProjectStore, ProjectSummary } from './types.js';
+import type {
+  DerivedCache,
+  LoadedProject,
+  MediaRecord,
+  ProjectStore,
+  ProjectSummary,
+  SettingsStore,
+} from './types.js';
 
 export const DB_NAME = 'evocut';
 export const DB_VERSION = 3;
@@ -278,4 +285,38 @@ export class IdbDerivedCache implements DerivedCache {
   async delete(key: string): Promise<void> {
     await this.#db.run(DERIVED, 'readwrite', (store) => store.delete(key));
   }
+}
+
+/**
+ * User settings, in the same `meta` store the app's own bookkeeping uses.
+ *
+ * Keys are prefixed rather than given their own object store: settings and bookkeeping
+ * have identical access patterns (one small value, read once at startup), and a second
+ * store would be a schema upgrade in exchange for nothing.
+ */
+export class IdbSettingsStore implements SettingsStore {
+  #db: IdbConnection;
+
+  constructor(connection: IdbConnection) {
+    this.#db = connection;
+  }
+
+  async get<T>(key: string): Promise<T | null> {
+    const row = await this.#db.run<{ key: string; value: T } | undefined>(META, 'readonly', (store) =>
+      store.get(settingKey(key)),
+    );
+    return row?.value ?? null;
+  }
+
+  async set(key: string, value: unknown): Promise<void> {
+    await this.#db.run(META, 'readwrite', (store) => store.put({ key: settingKey(key), value }));
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.#db.run(META, 'readwrite', (store) => store.delete(settingKey(key)));
+  }
+}
+
+function settingKey(key: string): string {
+  return `setting:${key}`;
 }

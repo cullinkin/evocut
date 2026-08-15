@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./anthropic": {
+      "types": "./dist/anthropic.d.ts",
+      "default": "./dist/anthropic.js"
     }
   },
   "scripts": {
@@ -18,6 +22,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.117.1",
     "@evocut/edl": "*",
     "@evocut/signals": "*",
     "zod": "^4.4.3"

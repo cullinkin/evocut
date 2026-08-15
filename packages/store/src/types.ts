@@ -78,10 +78,27 @@ export interface DerivedCache {
   delete(key: string): Promise<void>;
 }
 
+/**
+ * Small values the user set deliberately.
+ *
+ * Distinct from `DerivedCache` in exactly one way that matters: nothing here can be
+ * recomputed. An API key, a model choice, a style brief — losing one costs the user
+ * something, so this is storage, not cache.
+ *
+ * It is also the least secure thing in the app, and the app says so where the key is
+ * entered: a browser's storage is readable by anything that can run script on the page.
+ */
+export interface SettingsStore {
+  get<T>(key: string): Promise<T | null>;
+  set(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
 export interface Stores {
   media: MediaStore;
   projects: ProjectStore;
   derived: DerivedCache;
+  settings: SettingsStore;
 }
 
 /**

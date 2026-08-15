@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   commitOps,
+  digest,
   freezeCoarsePass,
   makeLogger,
   newId,
@@ -14,7 +15,7 @@ import {
   type Project,
   type RefinementPlan,
 } from '@evocut/edl';
-import { planLocalRefinement } from '@evocut/agent';
+import { planLocalRefinement, proposeRefinement } from '@evocut/agent';
 import type { SourceSignals } from '@evocut/signals';
 import {
   isRenderSupported,
@@ -33,6 +34,7 @@ import {
 import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
+import { useSettings, type RefinementSettings } from './settings.ts';
 
 /**
  * Session state: the project, its media, its log, and any refinement awaiting review.
@@ -144,7 +146,17 @@ export interface Session {
   /** Sources still being measured. */
   measuring: string[];
 
+  /** True while a refinement pass is in flight. It is a network call now, not a function. */
+  refining: boolean;
+  /** How the last pass was produced, for the review screen to say so. */
+  refinedBy: 'model' | 'heuristics' | null;
   requestRefinement(): void;
+  cancelRefinement(): void;
+
+  settings: RefinementSettings;
+  settingsLoaded: boolean;
+  saveSettings(next: RefinementSettings): Promise<void>;
+  forgetApiKey(): Promise<void>;
   setVerdict(index: number, accepted: boolean): void;
   setAllVerdicts(accepted: boolean): void;
   applyReview(): void;
@@ -174,6 +186,8 @@ export function useSession(): Session {
   const [history, setHistory] = useState<Project[]>([]);
   const [seekingUnsupported, setSeekingUnsupported] = useState(false);
   const [exportState, setExportState] = useState<ExportState | null>(null);
+  const [refining, setRefining] = useState(false);
+  const [refinedBy, setRefinedBy] = useState<'model' | 'heuristics' | null>(null);
 
   const loggerRef = useRef<ReturnType<typeof makeLogger> | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -181,6 +195,7 @@ export function useSession(): Session {
   const lastScrubLogRef = useRef(0);
   const exportAbortRef = useRef<AbortController | null>(null);
   const exportUrlRef = useRef<string | null>(null);
+  const refineAbortRef = useRef<AbortController | null>(null);
 
   const releaseUrls = useCallback(() => {
     for (const url of urlsRef.current.values()) releaseMediaUrl(url);
@@ -398,7 +413,11 @@ export function useSession(): Session {
    * what makes `by: 'human'` versus `by: 'llm'` a real distinction rather than a label.
    */
   const edit = useCallback(
-    (type: LogEventType, ops: Op[], options: { review?: { verdicts: OpVerdict[] }; by?: 'human' | 'llm' } = {}) => {
+    (
+      type: LogEventType,
+      ops: Op[],
+      options: { review?: { verdicts: OpVerdict[] }; by?: 'human' | 'llm'; model?: string } = {},
+    ) => {
       if (!project) return;
 
       // Computed outside `setProject` on purpose. Logging and saving are side effects,
@@ -407,6 +426,7 @@ export function useSession(): Session {
       const result = commitOps(project, ops, {
         by: options.by ?? 'human',
         ...(options.review ? { review: options.review } : {}),
+        ...(options.model ? { model: options.model } : {}),
       });
       if (result.errors.length > 0 && result.applied.length === 0) {
         setError(result.errors[0]!.message);
@@ -488,6 +508,8 @@ export function useSession(): Session {
     [record],
   );
   const { signals, pending: measuring } = useSourceSignals(stores, project, mediaUrls, onSignals);
+  const settingsState = useSettings(stores);
+  const { settings } = settingsState;
 
   const commitTrim = useCallback(
     (clipId: string, sourceIn: number, sourceOut: number) => {
@@ -564,23 +586,124 @@ export function useSession(): Session {
     scheduleSave(frozen);
   }, [project, record, scheduleSave]);
 
+  /**
+   * Present a plan for review.
+   *
+   * Nothing is pre-accepted. A screen that opens with everything ticked collects consent,
+   * not judgement, and the judgement is the entire point of the screen.
+   */
+  const presentPlan = useCallback(
+    (proposal: RefinementPlan, by: 'model' | 'heuristics', detail: Record<string, unknown>) => {
+      setPlan(proposal);
+      setVerdicts(new Map(proposal.ops.map((_, index) => [index, false])));
+      setRefinedBy(by);
+      record('llm.plan', {
+        payload: {
+          ops: proposal.ops.length,
+          summary: proposal.summary ?? '',
+          by,
+          // Whether the pass could see the footage is the first thing to know when reading
+          // back a session where the suggestions were poor.
+          measuredSources: signals.size,
+          ...detail,
+        },
+      });
+    },
+    [record, signals],
+  );
+
+  /**
+   * Ask for a refinement pass.
+   *
+   * With a key configured this is a network call to a model; without one it falls back to
+   * the local heuristics. The fallback is not a degraded mode to apologise for — it is
+   * what makes the review screen usable, and testable, on a phone with no key and no
+   * signal. Both paths produce the same `RefinementPlan` and land on the same screen.
+   */
   const requestRefinement = useCallback(() => {
-    if (!project) return;
-    const proposal = planLocalRefinement(project, { signals });
-    setPlan(proposal);
-    // Nothing is pre-accepted. A screen that opens with everything ticked collects
-    // consent, not judgement, and the judgement is the entire point of the screen.
-    setVerdicts(new Map(proposal.ops.map((_, index) => [index, false])));
-    record('llm.plan', {
+    if (!project || refining) return;
+
+    if (!settings.apiKey) {
+      presentPlan(planLocalRefinement(project, { signals }), 'heuristics', {});
+      return;
+    }
+
+    const controller = new AbortController();
+    refineAbortRef.current = controller;
+    setRefining(true);
+    setError(null);
+
+    const startedAt = Date.now();
+    record('llm.request', {
       payload: {
-        ops: proposal.ops.length,
-        summary: proposal.summary ?? '',
-        // Whether the pass could see the footage is the first thing to know when reading
-        // back a session where the suggestions were poor.
+        model: settings.model,
+        effort: settings.effort || 'default',
+        clips: project.timeline.tracks[0]?.clips.filter((clip) => clip.enabled).length ?? 0,
         measuredSources: signals.size,
+        // A digest rather than the brief itself. Two passes with the same digest were
+        // steered the same way, which is what a training set needs to group by — and the
+        // brief is free text the user typed about their own life, which is not.
+        brief: settings.brief ? digest(settings.brief).slice(0, 12) : null,
       },
     });
-  }, [project, record, signals]);
+
+    void (async () => {
+      let usage: Record<string, unknown> = {};
+      // The vendor SDK is loaded here rather than imported at the top, so a coarse pass
+      // on a phone never downloads a network client it will not use.
+      let describe = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
+      try {
+        const { createAnthropicComplete, describeApiError } = await import('@evocut/agent/anthropic');
+        describe = describeApiError;
+
+        const complete = createAnthropicComplete(
+          {
+            apiKey: settings.apiKey,
+            model: settings.model,
+            ...(settings.effort ? { effort: settings.effort } : {}),
+            signal: controller.signal,
+          },
+          (reported) => {
+            usage = { ...reported };
+          },
+        );
+
+        const result = await proposeRefinement(project, {
+          complete,
+          signals,
+          ...(settings.brief ? { instruction: settings.brief } : {}),
+        });
+        if (controller.signal.aborted) return;
+
+        presentPlan(result.plan, 'model', {
+          rounds: result.rounds,
+          // Ops the engine refused even after a repair round. Logged rather than
+          // discarded: a model that keeps proposing edits the schema rejects is a prompt
+          // problem, and this is the only place it would show up.
+          rejected: result.rejected.length,
+          rejectedReasons: result.rejected.map((failure) => failure.message).slice(0, 5),
+          elapsedMs: Date.now() - startedAt,
+          ...usage,
+        });
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        const message = describe(cause);
+        setError(message);
+        record('llm.error', {
+          payload: { message, model: settings.model, elapsedMs: Date.now() - startedAt, ...usage },
+        });
+      } finally {
+        if (!controller.signal.aborted) setRefining(false);
+        refineAbortRef.current = null;
+      }
+    })();
+  }, [presentPlan, project, record, refining, settings, signals]);
+
+  const cancelRefinement = useCallback(() => {
+    refineAbortRef.current?.abort();
+    refineAbortRef.current = null;
+    setRefining(false);
+  }, []);
 
   const setVerdict = useCallback((index: number, accepted: boolean) => {
     setVerdicts((previous) => new Map(previous).set(index, accepted));
@@ -604,16 +727,25 @@ export function useSession(): Session {
 
     // The whole proposal goes into the revision, not just the accepted subset: a rejected
     // op leaves no mark on the timeline, so this is the only place it survives.
-    edit('llm.review', accepted, { by: 'llm', review: { verdicts: allVerdicts } });
+    edit('llm.review', accepted, {
+      by: 'llm',
+      review: { verdicts: allVerdicts },
+      // Which model proposed this. Without it the training set pools verdicts from
+      // different models — and "a human rejected this edit" means nothing if you cannot
+      // tell which model proposed it.
+      model: refinedBy === 'model' ? settings.model : 'local-heuristics',
+    });
     setPlan(null);
     setVerdicts(new Map());
-  }, [edit, plan, verdicts]);
+    setRefinedBy(null);
+  }, [edit, plan, refinedBy, settings.model, verdicts]);
 
   const discardReview = useCallback(() => {
-    if (plan) record('llm.review', { payload: { discarded: true, ops: plan.ops.length } });
+    if (plan) record('llm.review', { payload: { discarded: true, ops: plan.ops.length, by: refinedBy } });
     setPlan(null);
     setVerdicts(new Map());
-  }, [plan, record]);
+    setRefinedBy(null);
+  }, [plan, record, refinedBy]);
 
   /**
    * How the renderer reaches the footage.
@@ -796,6 +928,13 @@ export function useSession(): Session {
     discardReview,
     signals,
     measuring,
+    refining,
+    refinedBy,
+    cancelRefinement,
+    settings: settingsState.settings,
+    settingsLoaded: settingsState.loaded,
+    saveSettings: settingsState.save,
+    forgetApiKey: settingsState.forgetKey,
     canExport: isRenderSupported(),
     exportState,
     startExport,

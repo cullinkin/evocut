@@ -13,6 +13,7 @@
       "@evocut/renderer": ["../../packages/renderer/src/index.ts"],
       "@evocut/signals": ["../../packages/signals/src/index.ts"],
       "@evocut/agent": ["../../packages/agent/src/index.ts"],
+      "@evocut/agent/anthropic": ["../../packages/agent/src/anthropic.ts"],
       "@evocut/store": ["../../packages/store/src/index.ts"]
     }
   },

@@ -8,6 +8,7 @@ import type {
   MediaStore,
   ProjectStore,
   ProjectSummary,
+  SettingsStore,
   Stores,
 } from './types.js';
 
@@ -160,10 +161,29 @@ export class MemoryDerivedCache implements DerivedCache {
   }
 }
 
+/** The in-memory double for `SettingsStore`. Same JSON round-trip as the real one. */
+export class MemorySettingsStore implements SettingsStore {
+  #values = new Map<string, string>();
+
+  async get<T>(key: string): Promise<T | null> {
+    const raw = this.#values.get(key);
+    return raw === undefined ? null : (JSON.parse(raw) as T);
+  }
+
+  async set(key: string, value: unknown): Promise<void> {
+    this.#values.set(key, JSON.stringify(value));
+  }
+
+  async delete(key: string): Promise<void> {
+    this.#values.delete(key);
+  }
+}
+
 export function createMemoryStores(): Stores {
   return {
     media: new MemoryMediaStore(),
     projects: new MemoryProjectStore(),
     derived: new MemoryDerivedCache(),
+    settings: new MemorySettingsStore(),
   };
 }

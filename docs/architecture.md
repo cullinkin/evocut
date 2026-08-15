@@ -130,7 +130,7 @@ wrong on top of the judgement it is actually being asked for — and anything fa
 footage the coarse pass cut away is simply not mentioned, so there is nothing to place an
 emphasis on that no longer exists.
 
-### `@evocut/agent` — prompt and loop done, transport not started
+### `@evocut/agent` — working
 
 Prompt construction, response validation against the EDL's own op schema, and the
 apply/repair loop. `refineProject` takes a `complete` function rather than calling a
@@ -145,6 +145,11 @@ the common failure is a stale id and the error names it exactly.
 screen is the piece that turns usage into labelled data, and that screen could not be
 built, tested, or used before a provider was wired up. It satisfies the same `CompleteFn`
 shape a model will, so replacing it is one function.
+
+It is now the fallback rather than the only option — what runs when no key is configured.
+That is not a degraded mode to apologise for: it is what keeps the review screen usable and
+testable on a phone with no key and no signal, and both paths produce the same
+`RefinementPlan` and land on the same screen.
 
 It reads the same signals a model does, and the difference is the argument for that
 package in miniature. Blind, it trims a quarter-second off every join on principle and
@@ -261,17 +266,17 @@ check that the package boundaries are real.
 
 ## What to do next
 
-1. **Wire a real model behind the refinement pass.** The prompt, the tool schema, the
-   repair loop, the signals, and the review screen are all built and exercised;
-   `planLocalRefinement` is the only stand-in left. This needs a decision about where the
-   call happens — calling a provider from the browser would expose the key, so it likely
-   means a small server endpoint.
-2. **A style brief.** The signals say what is in the footage; nothing yet says what the
-   result should feel like. A reference video is inert to a model — the useful form is a
-   written brief, and eventually the person's own accepted and rejected EDLs as examples.
-3. **The training export.** Walk stored projects and logs into
-   `(source features, coarse decisions, refinement verdicts)` records. `droppedRegions()`
-   and `Revision.review` are the two starting points, and both are now populated by real
-   use.
+1. **The training export.** Every piece it needs is now populated by real use: a frozen
+   `coarseSnapshot`, per-op verdicts including rejections, the model that proposed them,
+   the signals that were in scope, and a digest of the brief that steered the pass. What is
+   missing is the walk that turns those into `(source features, coarse decisions,
+   refinement verdicts)` records.
+2. **Few-shot from your own accepted edits.** The brief says what you want in words; your
+   own accepted and rejected EDLs would say it in examples. The verdicts are being recorded
+   for exactly this, and nothing reads them back yet.
+3. **A proxy, if this stops being a personal tool.** The key lives in the browser today,
+   which is the right trade for one person with a revocable key and the wrong one for
+   anything shared. The transport already takes a `baseUrl`; what is missing is the
+   endpoint and a way to stop anyone with its URL spending your credits.
 4. **Storage management.** `orphanedMedia()` exists but nothing calls it; a phone will
    fill up.
