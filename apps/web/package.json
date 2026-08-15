@@ -9,12 +9,13 @@
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
-    "e2e": "node e2e/editor.spec.mjs && node e2e/review.spec.mjs && node e2e/export.spec.mjs"
+    "e2e": "node e2e/editor.spec.mjs && node e2e/review.spec.mjs && node e2e/signals.spec.mjs && node e2e/export.spec.mjs"
   },
   "dependencies": {
     "@evocut/agent": "*",
     "@evocut/edl": "*",
     "@evocut/renderer": "*",
+    "@evocut/signals": "*",
     "@evocut/store": "*",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

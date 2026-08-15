@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { lumaFromRgba } from '@evocut/signals';
 
 /**
  * Filmstrip thumbnails for the timeline.
@@ -19,6 +20,17 @@ export interface Frame {
   /** Presentation time within the source, in microseconds. */
   t: number;
   url: string;
+  /**
+   * The same frame reduced to a tiny greyscale bitmap, for the motion signal.
+   *
+   * Carried here rather than gathered in a pass of its own because the expensive part of
+   * "look at every second of this recording" is the seeking, and this pass is already
+   * doing it. A second loop over the whole take, on a phone, to answer "is this shot
+   * static" would cost minutes for a yes-or-no.
+   */
+  luma: Uint8Array;
+  lumaWidth: number;
+  lumaHeight: number;
 }
 
 export interface Filmstrip {
@@ -43,47 +55,88 @@ const MIN_INTERVAL_US = 1_000_000;
  */
 const FRAME_HEIGHT = 144;
 const SEEK_TIMEOUT_MS = 4000;
+/** Motion is a coarse question; 32x32 answers it and costs a kilobyte a frame. */
+const LUMA_SIZE = 32;
 
-const cache = new Map<string, Filmstrip>();
+interface Extraction {
+  strip: Filmstrip;
+  done: Promise<Filmstrip>;
+  listeners: Set<(strip: Filmstrip) => void>;
+}
+
+const cache = new Map<string, Extraction>();
+
+/**
+ * Extract a source's filmstrip, once.
+ *
+ * Promise-cached rather than hook-local so the signals pass can await the same extraction
+ * the timeline is already running, instead of seeking through the recording a second time.
+ * Progress is pushed to listeners as frames arrive: a timeline with half a filmstrip is
+ * useful, one that blocks until all of it is ready is not.
+ */
+export function loadFilmstrip(
+  sourceId: string,
+  objectUrl: string,
+  durationUs: number,
+  onProgress?: (strip: Filmstrip) => void,
+): Promise<Filmstrip> {
+  let entry = cache.get(sourceId);
+
+  if (!entry) {
+    const collected: Frame[] = [];
+    const created: Extraction = { strip: EMPTY, done: Promise.resolve(EMPTY), listeners: new Set() };
+
+    const publish = (strip: Filmstrip) => {
+      created.strip = strip;
+      for (const listener of created.listeners) listener(strip);
+    };
+
+    created.done = extractFrames(objectUrl, durationUs, (frame, aspect) => {
+      collected.push(frame);
+      publish({ frames: [...collected], ready: false, aspect });
+      return true;
+    })
+      .then((aspect) => {
+        const strip = { frames: collected, ready: true, aspect };
+        publish(strip);
+        return strip;
+      })
+      .catch(() => {
+        // A strip that stops early is still useful; a thrown error would take the editor
+        // down over decorative pixels. Whatever arrived is what there is.
+        const strip = { ...created.strip, ready: true };
+        publish(strip);
+        return strip;
+      });
+
+    entry = created;
+    cache.set(sourceId, entry);
+  }
+
+  if (onProgress) {
+    const listeners = entry.listeners;
+    const listener = onProgress;
+    listeners.add(listener);
+    onProgress(entry.strip);
+    void entry.done.finally(() => listeners.delete(listener));
+  }
+
+  return entry.done;
+}
 
 export function useFilmstrip(sourceId: string | null, objectUrl: string | null, durationUs: number): Filmstrip {
-  const [strip, setStrip] = useState<Filmstrip>(() => (sourceId && cache.get(sourceId)) || EMPTY);
+  const [strip, setStrip] = useState<Filmstrip>(() => (sourceId && cache.get(sourceId)?.strip) || EMPTY);
 
   useEffect(() => {
     if (!sourceId || !objectUrl || durationUs <= 0) return;
 
-    const cached = cache.get(sourceId);
-    if (cached?.ready) {
-      setStrip(cached);
-      return;
-    }
-
-    let cancelled = false;
-    const collected: Frame[] = [];
-
-    void extractFrames(objectUrl, durationUs, (frame, aspect) => {
-      if (cancelled) return false;
-      collected.push(frame);
-      const next = { frames: [...collected], ready: false, aspect };
-      cache.set(sourceId, next);
-      setStrip(next);
-      return true;
-    })
-      .then((aspect) => {
-        if (cancelled) return;
-        const done = { frames: collected, ready: true, aspect };
-        cache.set(sourceId, done);
-        setStrip(done);
-      })
-      .catch(() => {
-        // A strip that stops early is still useful; a thrown error would take the
-        // editor down over decorative pixels.
-        if (cancelled) return;
-        setStrip((previous) => ({ ...previous, ready: true }));
-      });
+    let live = true;
+    void loadFilmstrip(sourceId, objectUrl, durationUs, (next) => {
+      if (live) setStrip(next);
+    });
 
     return () => {
-      cancelled = true;
+      live = false;
     };
   }, [sourceId, objectUrl, durationUs]);
 
@@ -119,6 +172,12 @@ async function extractFrames(
 
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d');
+  // A second, tiny surface for the motion signal. Drawing the same frame twice is far
+  // cheaper than reading back a full-size bitmap and downsampling it here.
+  const small = document.createElement('canvas');
+  small.width = LUMA_SIZE;
+  small.height = LUMA_SIZE;
+  const smallContext = small.getContext('2d', { willReadFrequently: true });
 
   try {
     await once(video, 'loadeddata', SEEK_TIMEOUT_MS);
@@ -132,7 +191,17 @@ async function extractFrames(
       video.currentTime = t / 1_000_000;
       await once(video, 'seeked', SEEK_TIMEOUT_MS);
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      if (!emit({ t, url: canvas.toDataURL('image/jpeg', 0.6) }, aspect)) break;
+      smallContext?.drawImage(video, 0, 0, LUMA_SIZE, LUMA_SIZE);
+      const pixels = smallContext?.getImageData(0, 0, LUMA_SIZE, LUMA_SIZE).data;
+
+      const frame: Frame = {
+        t,
+        url: canvas.toDataURL('image/jpeg', 0.6),
+        luma: pixels ? lumaFromRgba(pixels, LUMA_SIZE, LUMA_SIZE) : new Uint8Array(0),
+        lumaWidth: LUMA_SIZE,
+        lumaHeight: LUMA_SIZE,
+      };
+      if (!emit(frame, aspect)) break;
     }
 
     return aspect;

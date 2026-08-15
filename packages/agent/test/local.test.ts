@@ -10,6 +10,7 @@ import {
   type Project,
   type Source,
 } from '@evocut/edl';
+import { SIGNALS_VERSION, type SourceSignals } from '@evocut/signals';
 import { planLocalRefinement } from '../src/local.js';
 
 function deps(seed = 'l') {
@@ -144,5 +145,166 @@ describe('planLocalRefinement', () => {
     ]));
     expect(plan.ops.length).toBeGreaterThan(0);
     for (const op of plan.ops) expect(op.rationale).toBeTruthy();
+  });
+});
+
+/**
+ * The same planner, given measurements of the footage.
+ *
+ * This is the argument for the signals pass in one place: blind, the planner can only
+ * reason about how long a clip is. With signals it reasons about what is *in* it — and
+ * more importantly, it stops proposing things the footage does not support.
+ */
+function measured(over: Partial<SourceSignals> = {}): Map<string, SourceSignals> {
+  return new Map([
+    [
+      source.id,
+      {
+        version: SIGNALS_VERSION,
+        sourceId: source.id,
+        durationUs: source.duration,
+        computedAt: '2026-01-01T00:00:00.000Z',
+        audio: { hopUs: 50_000, loudness: [], peakDb: -6, medianDb: -22, onsets: [], quiet: [] },
+        motion: { hopUs: S(1), motion: [], still: [] },
+        ...over,
+      } satisfies SourceSignals,
+    ],
+  ]);
+}
+
+describe('planLocalRefinement with signals', () => {
+  it('trims to the edge of the measured silence rather than a fixed guess', () => {
+    const project = projectWith([
+      [0, 10],
+      [20, 30],
+    ]);
+    // 1.4 seconds of dead air at the head of the second clip, which starts at source 20s.
+    const signals = measured({
+      audio: {
+        hopUs: 50_000,
+        loudness: [],
+        peakDb: -6,
+        medianDb: -22,
+        onsets: [],
+        quiet: [{ start: S(20), end: S(21.4) }],
+      },
+    });
+
+    const plan = planLocalRefinement(project, { signals, pushInThresholdUs: Infinity });
+    const trim = plan.ops.find(
+      (op) => op.op === 'trim' && op.clipId === project.timeline.tracks[0]!.clips[1]!.id,
+    );
+    // 21.4s, not the blind 20.25s — the measurement is the point.
+    expect(trim).toMatchObject({ sourceIn: S(21.4) });
+    expect(trim?.rationale).toMatch(/silence/);
+  });
+
+  it('stops guessing at a join once it can tell there is nothing to trim', () => {
+    // Blind, this pass trims a quarter-second off both joins on principle. Measured, it
+    // knows the clips start on sound and leaves them alone.
+    const project = projectWith([
+      [0, 10],
+      [20, 30],
+    ]);
+    const plan = planLocalRefinement(project, { signals: measured(), pushInThresholdUs: Infinity });
+    expect(plan.ops.filter((op) => op.op === 'trim')).toEqual([]);
+  });
+
+  it('times a push-in to arrive on a hit', () => {
+    const project = projectWith([[0, 12]]);
+    const signals = measured({
+      audio: {
+        hopUs: 50_000,
+        loudness: [],
+        peakDb: -3,
+        medianDb: -22,
+        onsets: [{ t: S(4), strength: 0.9 }],
+        quiet: [],
+      },
+    });
+
+    const plan = planLocalRefinement(project, { signals });
+    const effect = plan.ops.find((op) => op.op === 'addEffect');
+    if (effect?.op !== 'addEffect' || effect.effect.type !== 'transform') throw new Error('expected a transform');
+
+    // The zoom ends where the hit lands, not where the clip does.
+    expect(effect.effect.keyframes.at(-1)!.t).toBe(S(4));
+    expect(effect.rationale).toMatch(/lands at 4\.0s/);
+  });
+
+  it('ignores a hit too weak to build a moment around', () => {
+    const project = projectWith([[0, 12]]);
+    const signals = measured({
+      audio: {
+        hopUs: 50_000,
+        loudness: [],
+        peakDb: -3,
+        medianDb: -22,
+        onsets: [{ t: S(4), strength: 0.2 }],
+        quiet: [],
+      },
+      motion: { hopUs: S(1), motion: [], still: [] },
+    });
+
+    const plan = planLocalRefinement(project, { signals });
+    expect(plan.ops).toEqual([]);
+  });
+
+  it('pushes in on a shot measured as static, not merely long', () => {
+    const project = projectWith([[0, 12]]);
+    const still = measured({ motion: { hopUs: S(1), motion: [], still: [{ start: 0, end: S(10) }] } });
+
+    expect(planLocalRefinement(project, { signals: still }).ops.some((op) => op.op === 'addEffect')).toBe(true);
+    // The same twelve seconds, measured as moving: blind it would still get a push-in.
+    expect(planLocalRefinement(project, { signals: measured() }).ops).toEqual([]);
+  });
+
+  it('speeds up a passage that is both quiet and still', () => {
+    const project = projectWith([[0, 12]]);
+    const signals = measured({
+      audio: {
+        hopUs: 50_000,
+        loudness: [],
+        peakDb: -40,
+        medianDb: -22,
+        onsets: [],
+        quiet: [{ start: S(2), end: S(11) }],
+      },
+      motion: { hopUs: S(1), motion: [], still: [{ start: S(1), end: S(11) }] },
+    });
+
+    const plan = planLocalRefinement(project, { signals });
+    // Static and silent for most of its length is the definition of a bit to get through.
+    expect(plan.ops.some((op) => op.op === 'setSpeed')).toBe(true);
+  });
+
+  it('says in the summary that it looked at the footage', () => {
+    const project = projectWith([[0, 12]]);
+    const still = measured({ motion: { hopUs: S(1), motion: [], still: [{ start: 0, end: S(10) }] } });
+    expect(planLocalRefinement(project, { signals: still }).summary).toMatch(/quiet|still|hit/);
+  });
+
+  it('still proposes only ops that apply', () => {
+    const project = projectWith([
+      [0, 10],
+      [20, 30],
+      [40, 52],
+    ]);
+    const signals = measured({
+      audio: {
+        hopUs: 50_000,
+        loudness: [],
+        peakDb: -6,
+        medianDb: -22,
+        onsets: [{ t: S(44), strength: 0.8 }],
+        quiet: [{ start: S(20), end: S(21.4) }, { start: S(28.5), end: S(30) }],
+      },
+      motion: { hopUs: S(1), motion: [], still: [{ start: S(40), end: S(48) }] },
+    });
+
+    const plan = planLocalRefinement(project, { signals });
+    const result = applyOps(project.timeline, plan.ops, { sources: project.sources });
+    expect(result.errors).toEqual([]);
+    expect(result.applied).toHaveLength(plan.ops.length);
   });
 });

@@ -1,15 +1,16 @@
 import { LogEvent, Project } from '@evocut/edl';
 import type { MediaIndex } from './opfs.js';
-import type { LoadedProject, MediaRecord, ProjectStore, ProjectSummary } from './types.js';
+import type { DerivedCache, LoadedProject, MediaRecord, ProjectStore, ProjectSummary } from './types.js';
 
 export const DB_NAME = 'evocut';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 const PROJECTS = 'projects';
 const EVENTS = 'events';
 const MEDIA = 'media';
 const META = 'meta';
 const BLOBS = 'blobs';
+const DERIVED = 'derived';
 
 /**
  * Thrown when a stored project no longer matches the schema.
@@ -65,6 +66,10 @@ export class IdbConnection {
         // Only used by `IdbMediaStore`, the fallback for browsers that cannot write to
         // OPFS. Created unconditionally so switching backends never needs an upgrade.
         if (!db.objectStoreNames.contains(BLOBS)) db.createObjectStore(BLOBS, { keyPath: 'path' });
+        // Analysis derived from media — signals, and whatever else is expensive to
+        // recompute and cheap to throw away. Separate from `meta` because everything in
+        // here is disposable by definition: losing it costs time, never work.
+        if (!db.objectStoreNames.contains(DERIVED)) db.createObjectStore(DERIVED, { keyPath: 'key' });
       };
 
       request.onsuccess = () => resolve(request.result);
@@ -238,5 +243,39 @@ export class IdbMediaIndex implements MediaIndex {
 
   async list(): Promise<MediaRecord[]> {
     return this.#db.run<MediaRecord[]>(MEDIA, 'readonly', (store) => store.getAll());
+  }
+}
+
+/**
+ * Cached analysis of media.
+ *
+ * Signals take seconds to compute on a phone — decoding a few minutes of audio, walking
+ * every sampled frame — and the answer never changes for a given recording. Recomputing
+ * them on every reload would be the single slowest thing the app does, for no reason.
+ *
+ * Keyed by the caller, not by source id: the right key is the media fingerprint plus an
+ * analysis version, so that reimporting the same recording reuses the work and changing
+ * how the analysis works does not silently serve stale numbers.
+ */
+export class IdbDerivedCache implements DerivedCache {
+  #db: IdbConnection;
+
+  constructor(connection: IdbConnection) {
+    this.#db = connection;
+  }
+
+  async get<T>(key: string): Promise<T | null> {
+    const row = await this.#db.run<{ key: string; value: T } | undefined>(DERIVED, 'readonly', (store) =>
+      store.get(key),
+    );
+    return row?.value ?? null;
+  }
+
+  async put(key: string, value: unknown): Promise<void> {
+    await this.#db.run(DERIVED, 'readwrite', (store) => store.put({ key, value }));
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.#db.run(DERIVED, 'readwrite', (store) => store.delete(key));
   }
 }

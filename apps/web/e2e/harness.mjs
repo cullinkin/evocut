@@ -69,8 +69,19 @@ export function makeReport(initial = {}) {
  * A ~12 second test recording, made by the browser itself.
  *
  * Generated with MediaRecorder over a canvas rather than shipped as a fixture: a binary
- * video in the repo would be the largest file in it, and this way the clip has a visible
- * running clock, which makes a screenshot of a mis-seeked preview obvious at a glance.
+ * video in the repo would be the largest file in it, and this way the clip can be built to
+ * contain known answers.
+ *
+ * Three of them:
+ *
+ *  - **A visible running clock**, so a screenshot of a mis-seeked preview is obvious at a
+ *    glance.
+ *  - **A background colour that encodes its own timestamp** (`hsl(t/40, …)`), so sampling
+ *    a pixel out of an exported frame recovers which moment of the source it came from.
+ *    That is what turns "did the export honour the edit?" into a number.
+ *  - **An audio track with a deliberate shape**: tone, two seconds of silence, tone with a
+ *    sharp burst at 7s and 9s. The signals pass should find exactly one quiet stretch and
+ *    two hits, and finding them somewhere else is a failure with a location.
  */
 export async function ensureClip(page) {
   const path = artifact('take1.webm');
@@ -83,7 +94,29 @@ export async function ensureClip(page) {
     canvas.height = 640;
     const g = canvas.getContext('2d');
     const chunks = [];
-    const recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: 'video/webm' });
+
+    const stream = canvas.captureStream(30);
+    const audio = new AudioContext();
+    await audio.resume().catch(() => {});
+    const destination = audio.createMediaStreamDestination();
+    const oscillator = audio.createOscillator();
+    oscillator.frequency.value = 220;
+    const gain = audio.createGain();
+    oscillator.connect(gain).connect(destination);
+
+    // Steps rather than ramps: a hit is a sudden rise, and a fade in would be a fade in.
+    const at = audio.currentTime;
+    gain.gain.setValueAtTime(0.25, at);
+    gain.gain.setValueAtTime(0.0001, at + 4);
+    gain.gain.setValueAtTime(0.25, at + 6);
+    for (const beat of [7, 9]) {
+      gain.gain.setValueAtTime(0.9, at + beat);
+      gain.gain.setValueAtTime(0.25, at + beat + 0.15);
+    }
+    oscillator.start();
+    for (const track of destination.stream.getAudioTracks()) stream.addTrack(track);
+
+    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
     recorder.ondataavailable = (event) => chunks.push(event.data);
     recorder.start();
 
@@ -103,6 +136,8 @@ export async function ensureClip(page) {
     });
 
     recorder.stop();
+    oscillator.stop();
+    void audio.close();
     const blob = await new Promise((r) => (recorder.onstop = () => r(new Blob(chunks, { type: 'video/webm' }))));
     const bytes = new Uint8Array(await blob.arrayBuffer());
     let binary = '';

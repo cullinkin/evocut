@@ -29,6 +29,9 @@ export const LOG_EVENT_TYPES = [
   // because "the video plays but will not seek" is invisible from the EDL alone, and it
   // is the difference between an editor and a video player.
   'media.diagnostics',
+  // What the analysis pass measured, and how long it took. The cost of measuring a
+  // recording is a property of the phone doing it, and cannot be observed anywhere else.
+  'signals.compute',
   // transport — the attention trail
   'playback.play',
   'playback.pause',

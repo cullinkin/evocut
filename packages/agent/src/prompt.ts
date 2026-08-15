@@ -1,4 +1,5 @@
 import { describeProject, refinementToolDefinition, type Project } from '@evocut/edl';
+import { describeSignals, type SourceSignals } from '@evocut/signals';
 
 /**
  * Prompt construction for the refinement pass.
@@ -24,6 +25,19 @@ What you do:
 - Add motion to static shots. A slow push-in or drift over a locked-off talking head keeps
   the frame alive. Keep it under about 1.3x scale unless there is a reason.
 - Balance obvious loudness differences between clips.
+- Give the hits their moment. Where a measured transient marks something landing, hold on
+  it: a brief slowdown into it, or a push-in that arrives on it, rather than a cut across
+  it. One or two of these in a video is emphasis; one on every hit is a music video.
+
+Using the signals:
+- They are measurements, not descriptions. A "hit" is a sudden rise in level — something
+  struck or landed or was said hard. A "quiet" span is genuinely quiet. "Still" means the
+  picture is barely changing.
+- Cite them. If a signal is why you made an edit, say which one in the rationale: "quiet
+  from 4.1s to 5.4s". A rationale that could have been written without looking at the
+  footage is not a rationale.
+- They are incomplete. Nothing here tells you what is being said, or what is in frame. If
+  the signals do not support an edit, do not make it up to fill the gap — leave it out.
 
 What you do not do:
 - Remove a whole clip unless it is plainly redundant with the one next to it — and use
@@ -50,6 +64,13 @@ export interface RefinementRequestOptions {
   /** Include per-clip effect summaries. Useful on a second pass. */
   includeEffects?: boolean;
   /**
+   * What the footage actually sounds and looks like, by source id.
+   *
+   * Optional, and the pass works without it — but a model given only the timeline is
+   * being asked to guess where the interesting moments are, and it will oblige.
+   */
+  signals?: Map<string, SourceSignals>;
+  /**
    * Errors from a previous attempt. Present on a repair round: the model is shown the
    * ops the engine rejected and why, rather than being asked to start over.
    */
@@ -64,6 +85,11 @@ export function buildRefinementPrompt(project: Project, options: RefinementReque
   }
 
   sections.push(describeProject(project, { effects: options.includeEffects ?? false }));
+
+  if (options.signals && options.signals.size > 0) {
+    const measured = describeSignals(project.timeline, options.signals);
+    if (measured) sections.push(measured);
+  }
 
   if (options.previousErrors?.length) {
     sections.push(

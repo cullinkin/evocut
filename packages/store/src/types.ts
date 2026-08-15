@@ -65,9 +65,23 @@ export interface ProjectStore {
   setLastOpened(projectId: string | null): Promise<void>;
 }
 
+/**
+ * Somewhere to keep work that was derived from media rather than done by a person.
+ *
+ * Everything in here is disposable: it can always be recomputed from the source, so a
+ * miss costs time and never costs work. That is what separates it from the project store,
+ * where a lost record is a lost edit.
+ */
+export interface DerivedCache {
+  get<T>(key: string): Promise<T | null>;
+  put(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
 export interface Stores {
   media: MediaStore;
   projects: ProjectStore;
+  derived: DerivedCache;
 }
 
 /**

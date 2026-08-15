@@ -1,4 +1,4 @@
-import { IdbConnection, IdbMediaIndex, IdbProjectStore } from './idb.js';
+import { IdbConnection, IdbDerivedCache, IdbMediaIndex, IdbProjectStore } from './idb.js';
 import { IdbMediaStore } from './idb-media.js';
 import { OpfsMediaStore } from './opfs.js';
 import { createMemoryStores } from './memory.js';
@@ -24,7 +24,15 @@ export * from './bind.js';
 export * from './memory.js';
 export { OpfsMediaStore, type MediaIndex } from './opfs.js';
 export { IdbMediaStore } from './idb-media.js';
-export { IdbConnection, IdbProjectStore, IdbMediaIndex, CorruptProjectError, DB_NAME, DB_VERSION } from './idb.js';
+export {
+  IdbConnection,
+  IdbProjectStore,
+  IdbMediaIndex,
+  IdbDerivedCache,
+  CorruptProjectError,
+  DB_NAME,
+  DB_VERSION,
+} from './idb.js';
 
 /** How media is being stored, for the storage screen and for diagnosing a phone. */
 export type MediaBackend = 'opfs' | 'indexeddb' | 'memory';
@@ -53,6 +61,7 @@ export function createStores(): AppStores {
   return {
     media: opfs ? new OpfsMediaStore(index) : new IdbMediaStore(connection, index),
     projects: new IdbProjectStore(connection),
+    derived: new IdbDerivedCache(connection),
     persistent: true,
     backend: opfs ? 'opfs' : 'indexeddb',
   };

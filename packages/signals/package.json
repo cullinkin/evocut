@@ -1,9 +1,9 @@
 {
-  "name": "@evocut/agent",
+  "name": "@evocut/signals",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The refinement pass: prompt construction, op validation, and repair rounds.",
+  "description": "What the footage sounds and looks like: loudness, onsets, motion — the refinement pass's only perception.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -18,9 +18,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@evocut/edl": "*",
-    "@evocut/signals": "*",
-    "zod": "^4.4.3"
+    "@evocut/edl": "*"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

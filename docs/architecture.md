@@ -101,6 +101,35 @@ animated framing. Round-tripping that through a general-purpose editor's project
 loses exactly the precision the model was asked to supply. Decoding and encoding ourselves
 also keeps the flow in the browser, so a phone never has to upload footage to get a result.
 
+### `@evocut/signals` — working
+
+Three measurements per recording: a loudness envelope, the transients in it, and how much
+the picture moves. All in source time, so they belong to the recording rather than to any
+edit of it and are computed once ever.
+
+**Why it exists.** Until this, the refinement pass received a text description of the
+timeline and nothing about the footage. Asked to put emphasis on the hits, a model in that
+position can only guess — and a guess dressed up as a rationale ("adds energy here") is
+worse than no suggestion at all, because it reads like observation.
+
+**Crude on purpose.** RMS rather than LUFS, energy flux rather than spectral flux, mean
+frame difference rather than optical flow. A phone has to compute these on footage it just
+imported, and a crude number that is true beats a sophisticated one that takes forty
+seconds. The limits are stated in the code: onsets are level transients, so a change of
+tone at a steady volume is invisible, and motion cannot tell a moving camera from a moving
+subject.
+
+**Motion rides on the filmstrip.** The timeline already seeks through every source to build
+thumbnails; that pass now also keeps a 32×32 greyscale copy of each frame. A second seek
+loop over a whole recording, on a phone, would cost minutes to answer a yes-or-no question
+about whether a shot is locked off.
+
+**`summarize.ts` is where the timebase changes.** Measurements are in source time; ops are
+in output time. Converting in one place means the model is never handed arithmetic to get
+wrong on top of the judgement it is actually being asked for — and anything falling in
+footage the coarse pass cut away is simply not mentioned, so there is nothing to place an
+emphasis on that no longer exists.
+
 ### `@evocut/agent` — prompt and loop done, transport not started
 
 Prompt construction, response validation against the EDL's own op schema, and the
@@ -112,12 +141,16 @@ The repair round is the notable part: rejected ops go back with their error mess
 an instruction not to resend the ones that landed. One round is usually enough, because
 the common failure is a stale id and the error names it exactly.
 
-**`planLocalRefinement` is a stand-in, not the product.** It applies fixed heuristics —
-trim a quarter-second off each join, push in on long static clips, speed up the very long
-ones — where the real pass will listen to the audio and watch the footage. It exists
-because the review screen is the piece that turns usage into labelled data, and that screen
-could not be built, tested, or used before a provider was wired up. It satisfies the same
-`CompleteFn` shape a model will, so replacing it is one function.
+**`planLocalRefinement` is a stand-in, not the product.** It exists because the review
+screen is the piece that turns usage into labelled data, and that screen could not be
+built, tested, or used before a provider was wired up. It satisfies the same `CompleteFn`
+shape a model will, so replacing it is one function.
+
+It reads the same signals a model does, and the difference is the argument for that
+package in miniature. Blind, it trims a quarter-second off every join on principle and
+pushes in on anything long. Measured, it trims to the edge of the silence it can actually
+hear, times a push-in to arrive on a hit, and — the part that matters — *stops proposing*
+at a join where it can tell there is nothing to trim.
 
 Its heuristics are deliberately conservative and capped at twelve edits. A pass that
 proposes forty trains people to hit "accept all", and an accept-all is worth nothing as a
@@ -229,15 +262,13 @@ check that the package boundaries are real.
 ## What to do next
 
 1. **Wire a real model behind the refinement pass.** The prompt, the tool schema, the
-   repair loop, and the review screen are all built and exercised; `planLocalRefinement`
-   is the only stand-in left. This needs a decision about where the call happens — calling
-   a provider from the browser would expose the key, so it likely means a small server
-   endpoint.
-2. **The signals pass.** The model currently sees a text description of the timeline and
-   nothing else — no frames, no audio, no transcript. It cannot find "a hit" or an
-   exciting moment because it cannot perceive one. Loudness, onsets, and motion energy per
-   source, cached like the filmstrip and summarised into the prompt, are what turn the
-   refinement pass from plausible guesses into edits that answer to the footage.
+   repair loop, the signals, and the review screen are all built and exercised;
+   `planLocalRefinement` is the only stand-in left. This needs a decision about where the
+   call happens — calling a provider from the browser would expose the key, so it likely
+   means a small server endpoint.
+2. **A style brief.** The signals say what is in the footage; nothing yet says what the
+   result should feel like. A reference video is inert to a model — the useful form is a
+   written brief, and eventually the person's own accepted and rejected EDLs as examples.
 3. **The training export.** Walk stored projects and logs into
    `(source features, coarse decisions, refinement verdicts)` records. `droppedRegions()`
    and `Revision.review` are the two starting points, and both are now populated by real

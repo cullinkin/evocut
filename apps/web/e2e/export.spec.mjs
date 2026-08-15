@@ -59,6 +59,9 @@ set('consoleErrorsDuringRender', errors.slice(0, 5));
 
 const summary = await page.locator('.export .lede').first().innerText();
 set('summary', summary.replace(/\s+/g, ' '));
+// Warnings are the renderer's own account of what it could not do — a silent export, a
+// codec it had to fall back from. Surfacing them here means a degraded run reports itself.
+set('warnings', await page.locator('.export .warning').allInnerTexts());
 
 // --- What came out ----------------------------------------------------------------
 const file = await page.evaluate(async () => {
@@ -73,11 +76,41 @@ const file = await page.evaluate(async () => {
     boxes.push(String.fromCharCode(...bytes.subarray(at + 4, at + 8)));
     at += size;
   }
-  return { size: bytes.length, boxes, url };
+  // Sample entries name the codec of each track. Found by scanning `moov` rather than by
+  // walking the box tree, because `stsd` is not a plain container and this only needs the
+  // names — and scanning from byte zero would pick up `ftyp`'s compatible-brand list,
+  // which mentions avc1 whether or not the file contains any.
+  let moovStart = 0;
+  let moovEnd = bytes.length;
+  for (let at = 0; at + 8 <= bytes.length; ) {
+    const size = view.getUint32(at);
+    if (size < 8) break;
+    if (String.fromCharCode(...bytes.subarray(at + 4, at + 8)) === 'moov') {
+      moovStart = at;
+      moovEnd = at + size;
+      break;
+    }
+    at += size;
+  }
+  const contains = (type) => {
+    const needle = [...type].map((c) => c.charCodeAt(0));
+    for (let at = moovStart; at + 4 <= moovEnd; at += 1) {
+      if (needle.every((code, i) => bytes[at + i] === code)) return true;
+    }
+    return false;
+  };
+  const sampleEntries = ['avc1', 'vp09', 'mp4a', 'Opus'].filter(contains);
+
+  return { size: bytes.length, boxes, sampleEntries, url };
 });
 check('topLevelBoxes', file.boxes, ['ftyp', 'moov', 'mdat']);
 check('fileHasBytes', file.size > 10_000, true);
 set('sizeBytes', file.size);
+// The test clip carries a real audio track, and the raw sound of the footage is the only
+// sound this tool produces — a silent export would be a silent failure.
+set('sampleEntries', file.sampleEntries);
+check('hasAVideoTrack', file.sampleEntries.some((type) => type === 'avc1' || type === 'vp09'), true);
+check('hasAnAudioTrack', file.sampleEntries.some((type) => type === 'mp4a' || type === 'Opus'), true);
 
 // Saved so a failure can be inspected — or played — rather than only described.
 writeFileSync(

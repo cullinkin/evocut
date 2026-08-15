@@ -124,6 +124,12 @@ export function App() {
             {kept.length} {kept.length === 1 ? 'clip' : 'clips'} ·{' '}
             {formatTimecode(total, undefined, { compact: true })}
             {!session.persistent && ' · not saved'}
+            {/*
+              Worth saying out loud: the refinement pass is meaningfully better once the
+              footage has been measured, and a person who taps Refine ten seconds after
+              importing would otherwise have no way to know they got the blind version.
+            */}
+            {session.measuring.length > 0 && ' · listening to the footage'}
           </p>
         </div>
         {frozen ? (

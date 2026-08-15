@@ -18,7 +18,10 @@ await page.locator('text=Choose a video').waitFor();
 await page.setInputFiles('input[type=file]', clip);
 await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
 
-// Two cuts, so the local planner has joins to tighten.
+// Two cuts, placed either side of the silence the test clip carries at 4–6 seconds, so
+// the planner has something measurable to act on at both joins. Since the signals pass
+// landed, the planner declines to trim a join it cannot hear dead air at — which is the
+// behaviour we want and does mean the fixture has to contain some.
 const slider = page.locator('.timeline-scroller');
 const seekTo = async (fraction) => {
   const box = await slider.boundingBox();
@@ -26,15 +29,16 @@ const seekTo = async (fraction) => {
   await page.waitForTimeout(120);
 };
 
-await seekTo(0.34);
+await seekTo(0.42);
 await page.locator('button[aria-label="Cut at playhead"]').click();
-await seekTo(0.67);
+await seekTo(0.75);
 await page.locator('button[aria-label="Cut at playhead"]').click();
 await page.waitForTimeout(300);
 check('clipsAfterCuts', await page.locator('.clip-block').count(), 3);
 
-// Drop one clip, and confirm it dims rather than disappearing.
-await page.locator('.clip-block').first().click();
+// Drop one clip, and confirm it dims rather than disappearing. The last one, so the two
+// that survive still sit either side of the silence.
+await page.locator('.clip-block').last().click();
 await page.locator('button[aria-label="Drop clip"]').click();
 await page.waitForTimeout(400);
 check('droppedShown', await page.locator('.clip-block.dropped').count(), 1);
@@ -57,6 +61,9 @@ await page.locator('.proposal').first().waitFor({ timeout: 10000 });
 
 const proposals = await page.locator('.proposal').count();
 set('proposalCount', proposals);
+// Stated rather than assumed: the keep-one/skip-one flow below needs at least two, and a
+// planner that quietly stopped proposing would otherwise fail as a click timeout.
+check('enoughProposalsToReview', proposals >= 2, true);
 set('firstProposal', await page.locator('.proposal').first().locator('strong').innerText());
 set('firstRationale', await page.locator('.proposal').first().locator('small').innerText());
 

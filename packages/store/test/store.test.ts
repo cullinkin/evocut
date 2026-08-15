@@ -15,8 +15,14 @@ import {
   type Project,
   type Source,
 } from '@evocut/edl';
-import { CorruptProjectError, IdbConnection, IdbMediaIndex, IdbProjectStore } from '../src/idb.js';
-import { MemoryMediaStore, MemoryProjectStore } from '../src/memory.js';
+import {
+  CorruptProjectError,
+  IdbConnection,
+  IdbDerivedCache,
+  IdbMediaIndex,
+  IdbProjectStore,
+} from '../src/idb.js';
+import { MemoryDerivedCache, MemoryMediaStore, MemoryProjectStore } from '../src/memory.js';
 import { IdbMediaStore } from '../src/idb-media.js';
 import { bindProjectMedia, orphanedMedia, rebindSource } from '../src/bind.js';
 import { fingerprintFile, mediaPath } from '../src/fingerprint.js';
@@ -474,5 +480,43 @@ describe('media identity survives storage', () => {
     const blob = await (await fetch(bound.urls.get('src_take1')!)).blob();
     // An untyped blob here is exactly what Safari refuses to play.
     expect(blob.type).toBe('video/quicktime');
+  });
+});
+
+/**
+ * Both caches, one test body.
+ *
+ * The memory double exists so the analysis pipeline is testable outside a browser, which
+ * only works if it behaves like the real store. A double that is more forgiving than the
+ * thing it stands in for hides exactly the bugs it was meant to surface — this project has
+ * already been bitten once by that, when the memory media store handed back the original
+ * File and so never reproduced the MIME failure a phone hit on the first import.
+ */
+describe.each([
+  ['memory', () => new MemoryDerivedCache()],
+  ['indexeddb', () => new IdbDerivedCache(new IdbConnection(new IDBFactory()))],
+])('%s derived cache', (_name, make) => {
+  it('returns null for a key it has never seen', async () => {
+    expect(await make().get('signals:nope')).toBeNull();
+  });
+
+  it('round-trips a value', async () => {
+    const cache = make();
+    await cache.put('signals:abc:1', { onsets: [{ t: 1_000_000, strength: 0.5 }] });
+    expect(await cache.get('signals:abc:1')).toEqual({ onsets: [{ t: 1_000_000, strength: 0.5 }] });
+  });
+
+  it('overwrites rather than accumulating', async () => {
+    const cache = make();
+    await cache.put('k', { v: 1 });
+    await cache.put('k', { v: 2 });
+    expect(await cache.get('k')).toEqual({ v: 2 });
+  });
+
+  it('forgets a deleted key', async () => {
+    const cache = make();
+    await cache.put('k', { v: 1 });
+    await cache.delete('k');
+    expect(await cache.get('k')).toBeNull();
   });
 });

@@ -7,7 +7,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@evocut/edl': fileURLToPath(new URL('../edl/src/index.ts', import.meta.url)),
-      '@evocut/signals': fileURLToPath(new URL('../signals/src/index.ts', import.meta.url)),
     },
   },
 });

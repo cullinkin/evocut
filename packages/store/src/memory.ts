@@ -2,7 +2,14 @@ import type { LogEvent, Project } from '@evocut/edl';
 import { LogEvent as LogEventSchema, Project as ProjectSchema } from '@evocut/edl';
 import { fingerprintFile, mediaPath } from './fingerprint.js';
 import { mimeOf, restoreFile } from './media-file.js';
-import type { MediaRecord, MediaStore, ProjectStore, ProjectSummary, Stores } from './types.js';
+import type {
+  DerivedCache,
+  MediaRecord,
+  MediaStore,
+  ProjectStore,
+  ProjectSummary,
+  Stores,
+} from './types.js';
 
 /**
  * In-memory stores.
@@ -135,6 +142,28 @@ export class MemoryProjectStore implements ProjectStore {
   }
 }
 
+/** The in-memory double for `DerivedCache`. Round-trips through JSON like the real one. */
+export class MemoryDerivedCache implements DerivedCache {
+  #values = new Map<string, string>();
+
+  async get<T>(key: string): Promise<T | null> {
+    const raw = this.#values.get(key);
+    return raw === undefined ? null : (JSON.parse(raw) as T);
+  }
+
+  async put(key: string, value: unknown): Promise<void> {
+    this.#values.set(key, JSON.stringify(value));
+  }
+
+  async delete(key: string): Promise<void> {
+    this.#values.delete(key);
+  }
+}
+
 export function createMemoryStores(): Stores {
-  return { media: new MemoryMediaStore(), projects: new MemoryProjectStore() };
+  return {
+    media: new MemoryMediaStore(),
+    projects: new MemoryProjectStore(),
+    derived: new MemoryDerivedCache(),
+  };
 }

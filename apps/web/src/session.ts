@@ -15,6 +15,7 @@ import {
   type RefinementPlan,
 } from '@evocut/edl';
 import { planLocalRefinement } from '@evocut/agent';
+import type { SourceSignals } from '@evocut/signals';
 import {
   isRenderSupported,
   renderProject,
@@ -31,6 +32,7 @@ import {
 } from '@evocut/store';
 import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
+import { useSourceSignals, type SignalsReport } from './signals.ts';
 
 /**
  * Session state: the project, its media, its log, and any refinement awaiting review.
@@ -133,6 +135,14 @@ export interface Session {
   /** True once the player has reported that this browser cannot seek the media. */
   seekingUnsupported: boolean;
   reportMediaDiagnostics(info: Record<string, unknown>): void;
+
+  /**
+   * What the footage sounds and looks like, by source id. Empty until the analysis pass
+   * finishes, which is fine — the refinement pass works without it, just blind.
+   */
+  signals: Map<string, SourceSignals>;
+  /** Sources still being measured. */
+  measuring: string[];
 
   requestRefinement(): void;
   setVerdict(index: number, accepted: boolean): void;
@@ -466,6 +476,19 @@ export function useSession(): Session {
     [record],
   );
 
+  /**
+   * Measure the footage, in the background, as soon as a project has media.
+   *
+   * Deliberately not deferred to the moment Refine is tapped: a person who has just
+   * finished their coarse pass should not then wait on a progress bar, and the analysis is
+   * cached by content so it usually costs nothing at all on a second open.
+   */
+  const onSignals = useCallback(
+    (report: SignalsReport) => record('signals.compute', { payload: { ...report } }),
+    [record],
+  );
+  const { signals, pending: measuring } = useSourceSignals(stores, project, mediaUrls, onSignals);
+
   const commitTrim = useCallback(
     (clipId: string, sourceIn: number, sourceOut: number) => {
       const clip = project?.timeline.tracks[0]?.clips.find((c) => c.id === clipId);
@@ -543,15 +566,21 @@ export function useSession(): Session {
 
   const requestRefinement = useCallback(() => {
     if (!project) return;
-    const proposal = planLocalRefinement(project);
+    const proposal = planLocalRefinement(project, { signals });
     setPlan(proposal);
     // Nothing is pre-accepted. A screen that opens with everything ticked collects
     // consent, not judgement, and the judgement is the entire point of the screen.
     setVerdicts(new Map(proposal.ops.map((_, index) => [index, false])));
     record('llm.plan', {
-      payload: { ops: proposal.ops.length, summary: proposal.summary ?? '' },
+      payload: {
+        ops: proposal.ops.length,
+        summary: proposal.summary ?? '',
+        // Whether the pass could see the footage is the first thing to know when reading
+        // back a session where the suggestions were poor.
+        measuredSources: signals.size,
+      },
     });
-  }, [project, record]);
+  }, [project, record, signals]);
 
   const setVerdict = useCallback((index: number, accepted: boolean) => {
     setVerdicts((previous) => new Map(previous).set(index, accepted));
@@ -765,6 +794,8 @@ export function useSession(): Session {
     setAllVerdicts,
     applyReview,
     discardReview,
+    signals,
+    measuring,
     canExport: isRenderSupported(),
     exportState,
     startExport,

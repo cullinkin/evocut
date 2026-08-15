@@ -24,7 +24,8 @@ for automating the first pass later.
 | `packages/edl` | **Working.** Schema, time model, op engine, validation, log. 86 tests. |
 | `packages/store` | **Working.** OPFS media (IndexedDB fallback), projects and logs. 38 tests. |
 | `packages/renderer` | **Working.** Sampling core, compositor, audio mixdown, MP4 muxer, WebCodecs export. 42 tests. |
-| `packages/agent` | **Prompt, repair loop, and a local stand-in planner.** No provider wired. |
+| `packages/signals` | **Working.** Loudness, onsets, motion, and the summary the model reads. 28 tests. |
+| `packages/agent` | **Prompt, repair loop, and a signal-aware stand-in planner.** No provider wired. |
 | `apps/web` | **Timeline editor, refinement review, and export all working.** |
 
 Early prototype. The EDL is the piece everything else depends on, so it was built first
@@ -32,7 +33,9 @@ and properly; the rest is scaffolding of varying thickness around it.
 
 The refinement pass currently runs a **local heuristic planner**, not a model — see
 `packages/agent/src/local.ts`. It exists so the review screen can be built and used
-before a provider is wired up; swapping it for a real model is one function.
+before a provider is wired up; swapping it for a real model is one function. It now reads
+the same measurements of the footage a model would, so its suggestions cite what they
+were based on ("ends on measured silence") rather than guessing from clip lengths.
 
 ## Quick start
 
@@ -109,6 +112,7 @@ The browser checks drive an iPhone profile with real touch events — see
 packages/edl/         the edit decision list — schema, ops, validation, log
 packages/store/       local persistence: OPFS media, IndexedDB projects and logs
 packages/renderer/    the output path: sampling, compositing, audio mixdown, MP4 muxing
+packages/signals/     what the footage sounds and looks like: loudness, onsets, motion
 packages/agent/       refinement pass: prompts, op validation, repair rounds
 apps/web/             mobile web app for the coarse pass
 apps/web/e2e/         browser checks: real touch gestures on an iPhone profile
