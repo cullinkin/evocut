@@ -229,10 +229,11 @@ export function TimelineEditor({
 
       draftRef.current = next;
       setDraft(next);
+      // The preview follows the dragged edge; the playhead is left alone. Writing it here
+      // put a constant into the log on every frame and parked the playhead somewhere
+      // playback would not resume from.
       onDragChange({
         kind: 'trim',
-        // Show the frame at the edge being dragged. A trim is a decision about one
-        // frame, and it is not reviewable without seeing it.
         scrubSourceTime: current.edge === 'in' ? next.sourceIn : Math.max(next.sourceIn, next.sourceOut - 40_000),
       });
     },
@@ -279,13 +280,20 @@ export function TimelineEditor({
       event.stopPropagation();
       (event.target as Element).setPointerCapture?.(event.pointerId);
 
-      dragRef.current = kind;
+      // A trim measures from where the finger actually landed, not from where the handle
+      // is drawn. The hit area is 44px around a 12px grip, so pressing near its edge used
+      // to charge the drag ~20px of offset before the finger had moved at all — around a
+      // second of footage at a typical zoom, applied the instant the gesture started.
+      const anchored: DragKind =
+        kind.type === 'trim' ? { ...kind, grabTime: toTime(event.clientX) } : kind;
+
+      dragRef.current = anchored;
       draftRef.current = null;
       pointerXRef.current = event.clientX;
-      setDrag(kind);
+      setDrag(anchored);
       setDraft(null);
 
-      if (kind.type === 'playhead') {
+      if (anchored.type === 'playhead') {
         onDragChange({ kind: 'playhead' });
         applyDrag(event.clientX);
       } else {
@@ -293,11 +301,12 @@ export function TimelineEditor({
         // handle, so acting on pointerdown would nudge the cut before the user moved.
         onDragChange({
           kind: 'trim',
-          scrubSourceTime: kind.edge === 'in' ? kind.originIn : Math.max(kind.originIn, kind.originOut - 40_000),
+          scrubSourceTime:
+            anchored.edge === 'in' ? anchored.originIn : Math.max(anchored.originIn, anchored.originOut - 40_000),
         });
       }
     },
-    [applyDrag, frozen, onDragChange],
+    [applyDrag, frozen, onDragChange, toTime],
   );
 
   const moveDrag = useCallback(
@@ -326,8 +335,14 @@ export function TimelineEditor({
       if (current.type === 'playhead') {
         onSeek(toTime(event.clientX), true);
       } else if (pending) {
-        // One op for the whole gesture.
+        // One op for the whole gesture, then park the playhead on the edge that was just
+        // set — so releasing leaves you looking at the cut you made.
         onTrimCommit(current.clipId, pending.sourceIn, pending.sourceOut);
+        const length = Math.round((pending.sourceOut - pending.sourceIn) / current.speed);
+        onSeek(
+          current.edge === 'in' ? current.originStart : Math.max(current.originStart, current.originStart + length - 40_000),
+          true,
+        );
       }
     },
     [onDragChange, onSeek, onTrimCommit, toTime],

@@ -79,6 +79,32 @@ await page.locator('button[aria-label="Cut at playhead"]').click();
 await page.waitForTimeout(300);
 check('clipsAfterCut', await page.locator('.clip-block').count(), 2);
 
+// --- A drifted element must not freeze the playhead ------------------------------
+// Constructed rather than hoped for: the element is forced to a position before the
+// current clip's in point, which is what a seek that never landed leaves behind.
+// `sourceToTimeline` returns null there, and the loop used to read that as "nothing to
+// report" — the playhead stopped while the video played on underneath.
+{
+  const box = await page.locator('.timeline-scroller').boundingBox();
+  await page.mouse.click(box.x + box.width * 0.8, box.y + 14); // land inside clip 2
+  await page.waitForTimeout(300);
+  const parked = await page.locator('.timeline-clock').innerText();
+
+  await page.evaluate(() => {
+    document.querySelector('.player video').currentTime = 0.2; // before clip 2 starts
+  });
+  await page.waitForTimeout(200);
+  await page.locator('button.play').click();
+  await page.waitForTimeout(1500);
+  const moved = await page.locator('.timeline-clock').innerText();
+  await page.locator('button.play').click();
+  await page.waitForTimeout(200);
+
+  set('clockWhenDrifted', parked);
+  set('clockAfterDriftRecovery', moved);
+  check('driftedElementStillAdvancesPlayhead', moved !== parked, true);
+}
+
 // --- Select -------------------------------------------------------------------
 await page.locator('.clip-block').nth(1).tap();
 await page.waitForTimeout(200);
@@ -192,6 +218,29 @@ const trims = after.revisions.filter((r) => r.ops.some((op) => op.op === 'trim')
 set('trimRevisionCount', trims.length);
 check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
 
+// --- The playhead must advance during playback -----------------------------------
+// It stopped: `sourceToTimeline` returns null when the element plays from outside the
+// current clip's range, and the loop treated that as "nothing to report" and simply left
+// the playhead where it was while the video carried on underneath.
+{
+  await page.locator('button[aria-label="Back to start"]').click();
+  await page.waitForTimeout(200);
+  const readClock = () => page.locator('.timeline-clock').innerText();
+  const before = await readClock();
+
+  await page.locator('button.play').click();
+  await page.waitForTimeout(1500);
+  const during = await readClock();
+  const videoAdvanced = await page.evaluate(() => document.querySelector('.player video').currentTime);
+  await page.locator('button.play').click(); // pause
+  await page.waitForTimeout(200);
+
+  set('clockBeforePlay', before);
+  set('clockDuringPlay', during);
+  check('playheadAdvancesWithPlayback', during !== before, true);
+  check('videoActuallyPlayed', videoAdvanced > 0.3, true);
+}
+
 // --- Dragging the playhead must show the frame it lands on -----------------------
 // It did not: playback kept writing the playhead back from the video's own position
 // every frame, so a drag looked like it did nothing at all.
@@ -202,8 +251,25 @@ check('oneTrimOpPerDrag', trims.every((r) => r.ops.length === 1), true);
   const before = await page.evaluate(() => document.querySelector('.player video').currentTime);
   const gripNow = await centre(page.locator('.playhead-grip'));
   const box = await page.locator('.timeline-scroller').boundingBox();
-  await touchDrag(cdp, page, gripNow, { x: box.x + box.width * 0.85, y: gripNow.y });
+
+  // Mid-drag sample: the picture has to follow the finger, not catch up on release.
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: gripNow.x, y: gripNow.y, id: 1 }],
+  });
+  for (let i = 1; i <= 8; i++) {
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x: gripNow.x + ((box.x + box.width * 0.85 - gripNow.x) * i) / 8, y: gripNow.y, id: 1 }],
+    });
+    await page.waitForTimeout(40);
+  }
+  const midDrag = await page.evaluate(() => document.querySelector('.player video').currentTime);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await page.waitForTimeout(500);
+
+  set('videoTimeMidDrag', Number(midDrag.toFixed(2)));
+  check('previewTracksTheFingerMidDrag', Math.abs(midDrag - before) > 0.3, true);
 
   const after = await page.evaluate(() => ({
     time: document.querySelector('.player video').currentTime,

@@ -128,6 +128,7 @@ export function App() {
           timeline={project.timeline}
           playhead={playhead}
           playing={playing}
+          scrubbing={drag !== null}
           scrubSourceTime={drag?.scrubSourceTime ?? null}
           onTime={onTime}
           onEnded={onEnded}
