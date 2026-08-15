@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
-    "e2e": "node e2e/editor.spec.mjs && node e2e/review.spec.mjs"
+    "e2e": "node e2e/editor.spec.mjs && node e2e/review.spec.mjs && node e2e/export.spec.mjs"
   },
   "dependencies": {
     "@evocut/agent": "*",

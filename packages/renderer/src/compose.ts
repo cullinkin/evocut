@@ -1,0 +1,116 @@
+import type { CropRect, TransformValue } from '@evocut/edl';
+
+/**
+ * Where a decoded frame lands inside the output frame.
+ *
+ * The geometry is separated from the drawing so it can be tested without a canvas, and so
+ * the preview and the export can share it exactly. "The zoom looks different in the export"
+ * is the same class of bug as "the cut is in the wrong place in the export", and it has the
+ * same cure: one implementation, used by both.
+ *
+ * ## The convention
+ *
+ * `scale: 1` means **cover**: the source fills the output frame, cropping whichever axis
+ * is longer. That is what makes `scale` a plain zoom factor the model can reason about —
+ * 1.15 is a gentle push-in at any resolution, in any aspect ratio, on any source. A `fit`
+ * convention would have made `scale: 1` mean "letterboxed", and every framing the LLM
+ * proposed would have depended on the shape of the footage it was proposed for.
+ *
+ * `x` and `y` translate the image as a fraction of the **output** frame, for the same
+ * reason: a pan of 0.25 moves a quarter of the way across the screen whether the export is
+ * 720p or 4K.
+ */
+export interface FrameSize {
+  width: number;
+  height: number;
+}
+
+export interface Placement {
+  /** Region of the source to read, in source pixels. */
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+  /** Where the centre of that region lands, in output pixels. */
+  cx: number;
+  cy: number;
+  /** Size it is drawn at, in output pixels. */
+  dw: number;
+  dh: number;
+  /** Clockwise, in radians. */
+  rotation: number;
+  opacity: number;
+}
+
+export interface Placeable {
+  transform: TransformValue;
+  crop: CropRect;
+  opacity: number;
+}
+
+export function placeLayer(layer: Placeable, source: FrameSize, out: FrameSize): Placement {
+  const sx = layer.crop.left * source.width;
+  const sy = layer.crop.top * source.height;
+  const sw = Math.max(1, (layer.crop.right - layer.crop.left) * source.width);
+  const sh = Math.max(1, (layer.crop.bottom - layer.crop.top) * source.height);
+
+  const cover = Math.max(out.width / sw, out.height / sh);
+  const scale = cover * layer.transform.scale;
+
+  return {
+    sx,
+    sy,
+    sw,
+    sh,
+    cx: out.width / 2 + layer.transform.x * out.width,
+    cy: out.height / 2 + layer.transform.y * out.height,
+    dw: sw * scale,
+    dh: sh * scale,
+    rotation: (layer.transform.rotation * Math.PI) / 180,
+    opacity: layer.opacity,
+  };
+}
+
+/** The 2D drawing surface both a `canvas` and an `OffscreenCanvas` provide. */
+export type Canvas2D = Pick<
+  CanvasRenderingContext2D,
+  'save' | 'restore' | 'translate' | 'rotate' | 'drawImage' | 'fillRect'
+> & {
+  globalAlpha: number;
+  fillStyle: unknown;
+  imageSmoothingQuality?: ImageSmoothingQuality;
+};
+
+/**
+ * Paint one layer.
+ *
+ * Drawing happens around the centre — translate, rotate, then draw from `-dw/2` — because
+ * a zoom that is not centred is a zoom that drifts, and computing a top-left corner for a
+ * rotated, scaled image is the arithmetic this ordering exists to avoid.
+ */
+export function drawLayer(
+  ctx: Canvas2D,
+  image: CanvasImageSource,
+  source: FrameSize,
+  layer: Placeable,
+  out: FrameSize,
+): void {
+  const at = placeLayer(layer, source, out);
+  if (at.opacity <= 0) return;
+
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, at.opacity);
+  ctx.translate(at.cx, at.cy);
+  if (at.rotation !== 0) ctx.rotate(at.rotation);
+  ctx.drawImage(image, at.sx, at.sy, at.sw, at.sh, -at.dw / 2, -at.dh / 2, at.dw, at.dh);
+  ctx.restore();
+}
+
+/** Fill the frame with the timeline's background. Every frame starts here. */
+export function clearFrame(ctx: Canvas2D, out: FrameSize, background: string): void {
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.restore();
+}

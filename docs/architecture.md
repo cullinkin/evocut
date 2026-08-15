@@ -55,11 +55,11 @@ doubles, but because OPFS has no Node equivalent and without them the whole pers
 layer would be exercisable only in a browser. They validate on read exactly as the real
 stores do; a double that is more forgiving than the real thing is worse than none.
 
-### `@evocut/renderer` — sampling core done, pipeline not started
+### `@evocut/renderer` — working
 
 `sampleTimeline(timeline, t)` answers "what is on screen and audible at output time t"
 and returns the decode target, framing, crop, opacity, and gain. It is pure, tested, and
-**used by the preview player as well as the future export loop**.
+**used by the preview player and the export loop alike**.
 
 That sharing is the point. The classic editor bug is two implementations of "what is on
 screen at time t" — one for preview, one for export — that disagree at the edges. Here a
@@ -68,9 +68,33 @@ preview that looks right is evidence the export will be right.
 It is also the completeness check on the EDL: if a frame cannot be described from the EDL
 alone, the schema is missing something.
 
-Still to build: the WebCodecs decode → composite → encode → mux pipeline. The interfaces
-(`Renderer`, `MediaResolver`, `RenderRequest`) are pinned because they are the contract
-the sampling core was designed against.
+**How a frame is made.** The platform decodes and everything after that is ours. A
+`<video>` element plays the source; each presented frame is drawn through `sampleClip`
+onto a canvas; the canvas is encoded by `VideoEncoder` at the timeline's own frame rate;
+`mp4.ts` writes the container. Output timestamps come from a frame counter, not from the
+source, so the result is exactly constant-frame-rate however erratically the phone
+recorded — and a speed change just consumes source frames faster while the output beat
+holds steady.
+
+Decoding through `VideoDecoder` instead would mean writing a demuxer for whatever an
+iPhone produced: HEVC in QuickTime, with edit lists, rotation, and a variable frame rate.
+The phone already contains a decoder that handles all of that. Writing a second one is a
+project; writing the muxer is a file, and the muxer is the part with no platform
+equivalent — WebCodecs encodes but does not package.
+
+The cost is that capture runs at playback speed: a 90-second edit takes about 90 seconds.
+Seeking per frame is exact and far slower, so it is kept as the fallback for browsers
+without `requestVideoFrameCallback`.
+
+**Audio is mixed, not captured.** Sources are decoded to PCM and scheduled against the
+timeline in an `OfflineAudioContext`, so sync does not depend on the capture loop at all.
+There is no music track by design — the sound is what the camera heard, and effects are
+added afterwards elsewhere.
+
+**Codecs.** AVC and AAC first, because the destination is an iPhone's camera roll and that
+is what it takes. VP9 and Opus as the fallback for a browser without the licensed pair —
+which includes the Chromium the export's own end-to-end check runs in, and that is what
+makes the pipeline testable outside a phone at all.
 
 **Why our own renderer.** The refinement pass emits sub-frame trims, speed changes, and
 animated framing. Round-tripping that through a general-purpose editor's project format
@@ -100,7 +124,7 @@ proposes forty trains people to hit "accept all", and an accept-all is worth not
 label. It also checks its own proposals apply cleanly before emitting them, because a
 rejected op wastes a review slot.
 
-### `@evocut/web` — editor and review working, render screen not started
+### `@evocut/web` — working
 
 Vite + React, mobile-first, dark. A direct-manipulation timeline: drag the playhead, cut
 at it, tap a clip to select it, drag either end to trim or to pull footage back out of the
@@ -161,7 +185,11 @@ Missing media is rendered as a state, not an error. The cut points are valid wit
 footage, so a project whose bytes are gone shows a "find this file again" prompt and keeps
 every clip intact when it is re-picked.
 
-Not started: the render screen.
+**The export owns the screen while it runs.** It takes about as long as the video is and
+the tab has to stay in front for it, so a progress bar tucked into the corner of a live
+editor would invite exactly the tab switch that stalls the capture. When it finishes,
+Share comes before Download: on iOS the share sheet has "Save Video" at the top, while a
+download lands in Files, several taps from anywhere useful.
 
 ## Decisions worth knowing about
 
@@ -205,8 +233,11 @@ check that the package boundaries are real.
    is the only stand-in left. This needs a decision about where the call happens — calling
    a provider from the browser would expose the key, so it likely means a small server
    endpoint.
-2. **The render pipeline.** `sampleTimeline` already says what each frame should be; what
-   is missing is decode → composite → encode → mux.
+2. **The signals pass.** The model currently sees a text description of the timeline and
+   nothing else — no frames, no audio, no transcript. It cannot find "a hit" or an
+   exciting moment because it cannot perceive one. Loudness, onsets, and motion energy per
+   source, cached like the filmstrip and summarised into the prompt, are what turn the
+   refinement pass from plausible guesses into edits that answer to the footage.
 3. **The training export.** Walk stored projects and logs into
    `(source features, coarse decisions, refinement verdicts)` records. `droppedRegions()`
    and `Revision.review` are the two starting points, and both are now populated by real

@@ -739,3 +739,73 @@ button.verdict.on {
     display: none;
   }
 }
+
+/* --- Export screen --- */
+
+.export {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.export h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.progress {
+  height: 10px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  /* Slow enough to read as motion rather than a jitter: progress arrives a frame at a
+     time, and an un-eased bar looks like it is stuttering rather than working. */
+  transition: width 200ms linear;
+}
+
+.export-preview {
+  width: 100%;
+  max-height: 40vh;
+  border-radius: 12px;
+  background: #000;
+  object-fit: contain;
+}
+
+.export-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.export-actions button,
+.export-actions .button-link {
+  flex: 1;
+}
+
+/* A download has to be a real anchor — `download` on a button does nothing — so it is
+   styled to sit beside the buttons rather than looking like body text. */
+.button-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+}

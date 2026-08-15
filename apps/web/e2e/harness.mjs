@@ -140,7 +140,7 @@ export async function centre(locator) {
 export async function exportEdl(page, name = 'export.json') {
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.locator('button:has-text("Export EDL")').click(),
+    page.locator('footer button:has-text("EDL")').click(),
   ]);
   const path = artifact(name);
   await download.saveAs(path);

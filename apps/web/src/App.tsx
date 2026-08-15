@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { formatTimecode, timelineDuration } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
+import { ExportPanel } from './Export.tsx';
 import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
@@ -62,6 +63,28 @@ export function App() {
   const frozen = project.stage !== 'coarse';
   const selected = clips.find((c) => c.id === session.selectedClipId) ?? null;
   const mediaUrl = session.mediaUrls.get(clips[0]?.sourceId ?? '') ?? null;
+
+  // The export owns the whole screen while it runs. It takes about as long as the video
+  // is, the tab has to stay in front for it, and a progress bar tucked into a corner of a
+  // live editor invites exactly the tab switch that stalls the capture.
+  if (session.exportState) {
+    return (
+      <main className="shell">
+        <header>
+          <div className="title">
+            <h1>{project.name}</h1>
+            <p className="meta">Export</p>
+          </div>
+        </header>
+        <ExportPanel
+          state={session.exportState}
+          onStart={session.startExport}
+          onCancel={session.cancelExport}
+          onClose={session.dismissExport}
+        />
+      </main>
+    );
+  }
 
   if (plan) {
     return (
@@ -206,15 +229,22 @@ export function App() {
       {session.error && <p className="error">{session.error}</p>}
 
       <footer>
+        <button
+          className="primary small"
+          onClick={session.startExport}
+          disabled={!session.canExport || kept.length === 0}
+        >
+          {session.canExport ? 'Export video' : 'No encoder'}
+        </button>
         {/*
           The log is a first-class output, not a debug aid: it is the record of how the
           coarse pass was made, and the reason it can become a training set later.
         */}
         <button className="ghost" onClick={() => downloadProject(project)}>
-          Export EDL
+          EDL
         </button>
         <button className="ghost" onClick={() => downloadLog(project, session.events)}>
-          Export log ({session.events.length})
+          Log ({session.events.length})
         </button>
       </footer>
     </main>

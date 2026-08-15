@@ -16,6 +16,12 @@ import {
 } from '@evocut/edl';
 import { planLocalRefinement } from '@evocut/agent';
 import {
+  isRenderSupported,
+  renderProject,
+  type MediaResolver,
+  type RenderProgress,
+} from '@evocut/renderer';
+import {
   bindProjectMedia,
   createStores,
   rebindSource,
@@ -58,6 +64,32 @@ const SCRUB_LOG_INTERVAL_MS = 250;
 const HISTORY_LIMIT = 50;
 
 export type SessionStatus = 'loading' | 'empty' | 'ready';
+
+/**
+ * A render in flight, or the file it produced.
+ *
+ * The blob is held alongside its object URL because the two are used for different things:
+ * the URL feeds a preview and a download link, the blob feeds the share sheet, and on iOS
+ * the share sheet is the only route into the camera roll.
+ */
+export interface ExportState {
+  status: 'rendering' | 'done' | 'error';
+  stage: RenderProgress['stage'];
+  progress: number;
+  framesEncoded: number;
+  framesTotal: number;
+  result: {
+    blob: Blob;
+    url: string;
+    filename: string;
+    sizeBytes: number;
+    durationUs: number;
+    width: number;
+    height: number;
+    warnings: string[];
+  } | null;
+  error: string | null;
+}
 
 export interface Session {
   status: SessionStatus;
@@ -107,6 +139,13 @@ export interface Session {
   setAllVerdicts(accepted: boolean): void;
   applyReview(): void;
   discardReview(): void;
+
+  /** False on a browser with no video encoder; the export button says so rather than lying. */
+  canExport: boolean;
+  exportState: ExportState | null;
+  startExport(): void;
+  cancelExport(): void;
+  dismissExport(): void;
 }
 
 export function useSession(): Session {
@@ -124,11 +163,14 @@ export function useSession(): Session {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [history, setHistory] = useState<Project[]>([]);
   const [seekingUnsupported, setSeekingUnsupported] = useState(false);
+  const [exportState, setExportState] = useState<ExportState | null>(null);
 
   const loggerRef = useRef<ReturnType<typeof makeLogger> | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const urlsRef = useRef<Map<string, string>>(new Map());
   const lastScrubLogRef = useRef(0);
+  const exportAbortRef = useRef<AbortController | null>(null);
+  const exportUrlRef = useRef<string | null>(null);
 
   const releaseUrls = useCallback(() => {
     for (const url of urlsRef.current.values()) releaseMediaUrl(url);
@@ -544,6 +586,142 @@ export function useSession(): Session {
     setVerdicts(new Map());
   }, [plan, record]);
 
+  /**
+   * How the renderer reaches the footage.
+   *
+   * Two different things, because the renderer needs the media twice over: a URL for the
+   * `<video>` element that decodes the picture — the same range-served URL the preview
+   * uses, since it is the only kind iOS will seek in — and the raw bytes for
+   * `decodeAudioData`, which cannot work from a URL at all.
+   */
+  const resolver = useMemo<MediaResolver>(
+    () => ({
+      async url(sourceId) {
+        const url = urlsRef.current.get(sourceId);
+        if (!url) throw new Error('That clip’s video is not on this device.');
+        return url;
+      },
+      async bytes(sourceId) {
+        const source = project?.sources.find((candidate) => candidate.id === sourceId);
+        if (source?.locator.kind !== 'opfs') return null;
+        const file = await stores.media.get(source.locator.path);
+        return file ? file.arrayBuffer() : null;
+      },
+    }),
+    [project],
+  );
+
+  const releaseExportUrl = useCallback(() => {
+    if (exportUrlRef.current) URL.revokeObjectURL(exportUrlRef.current);
+    exportUrlRef.current = null;
+  }, []);
+
+  const startExport = useCallback(() => {
+    if (!project) return;
+    exportAbortRef.current?.abort();
+    releaseExportUrl();
+
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    setExportState({
+      status: 'rendering',
+      stage: 'preparing',
+      progress: 0,
+      framesEncoded: 0,
+      framesTotal: 0,
+      result: null,
+      error: null,
+    });
+    record('render.start', {
+      payload: {
+        clips: project.timeline.tracks[0]?.clips.filter((clip) => clip.enabled).length ?? 0,
+        durationUs: timelineDuration(project.timeline),
+        resolution: `${project.timeline.resolution.width}x${project.timeline.resolution.height}`,
+      },
+    });
+
+    const startedAt = Date.now();
+    void (async () => {
+      try {
+        const result = await renderProject({ project, resolver, signal: controller.signal }, (progress) =>
+          setExportState((previous) =>
+            previous?.status === 'rendering' ? { ...previous, ...progress } : previous,
+          ),
+        );
+        if (controller.signal.aborted) return;
+
+        const url = URL.createObjectURL(result.blob);
+        exportUrlRef.current = url;
+        setExportState({
+          status: 'done',
+          stage: 'done',
+          progress: 1,
+          framesEncoded: result.framesEncoded,
+          framesTotal: result.framesEncoded,
+          error: null,
+          result: {
+            blob: result.blob,
+            url,
+            filename: `${slug(project.name)}.mp4`,
+            sizeBytes: result.blob.size,
+            durationUs: result.durationUs,
+            width: result.width,
+            height: result.height,
+            warnings: result.warnings,
+          },
+        });
+        // How long an export actually takes, on a real phone, with real footage, is not
+        // something that can be measured anywhere but here.
+        record('render.complete', {
+          payload: {
+            elapsedMs: Date.now() - startedAt,
+            durationUs: result.durationUs,
+            framesEncoded: result.framesEncoded,
+            sizeBytes: result.blob.size,
+            videoCodec: result.videoCodec,
+            audioCodec: result.audioCodec,
+            resolution: `${result.width}x${result.height}`,
+            warnings: result.warnings,
+          },
+        });
+      } catch (cause) {
+        if (controller.signal.aborted || (cause instanceof Error && cause.name === 'AbortError')) {
+          setExportState(null);
+          return;
+        }
+        setExportState({
+          status: 'error',
+          stage: 'preparing',
+          progress: 0,
+          framesEncoded: 0,
+          framesTotal: 0,
+          result: null,
+          error: describeError(cause),
+        });
+        record('render.error', {
+          payload: { message: describeError(cause), elapsedMs: Date.now() - startedAt },
+        });
+      }
+    })();
+  }, [project, record, releaseExportUrl, resolver]);
+
+  const cancelExport = useCallback(() => {
+    exportAbortRef.current?.abort();
+    exportAbortRef.current = null;
+    setExportState(null);
+  }, []);
+
+  const dismissExport = useCallback(() => {
+    exportAbortRef.current?.abort();
+    exportAbortRef.current = null;
+    // The object URL is deliberately not revoked here. Dismissing usually follows a tap on
+    // Download, and revoking mid-download cancels it on some browsers. It is released when
+    // the next export starts, or when the session ends.
+    setExportState(null);
+  }, []);
+
+  useEffect(() => releaseExportUrl, [releaseExportUrl]);
+
   const duration = useMemo(
     () => (project ? timelineDuration(project.timeline) : 0),
     [project],
@@ -587,6 +765,11 @@ export function useSession(): Session {
     setAllVerdicts,
     applyReview,
     discardReview,
+    canExport: isRenderSupported(),
+    exportState,
+    startExport,
+    cancelExport,
+    dismissExport,
   };
 }
 

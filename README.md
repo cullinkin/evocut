@@ -23,9 +23,9 @@ for automating the first pass later.
 | --- | --- |
 | `packages/edl` | **Working.** Schema, time model, op engine, validation, log. 86 tests. |
 | `packages/store` | **Working.** OPFS media (IndexedDB fallback), projects and logs. 38 tests. |
-| `packages/renderer` | **Sampling core working**, WebCodecs pipeline not started. |
+| `packages/renderer` | **Working.** Sampling core, compositor, audio mixdown, MP4 muxer, WebCodecs export. 42 tests. |
 | `packages/agent` | **Prompt, repair loop, and a local stand-in planner.** No provider wired. |
-| `apps/web` | **Timeline editor and refinement review working.** No render screen. |
+| `apps/web` | **Timeline editor, refinement review, and export all working.** |
 
 Early prototype. The EDL is the piece everything else depends on, so it was built first
 and properly; the rest is scaffolding of varying thickness around it.
@@ -108,7 +108,7 @@ The browser checks drive an iPhone profile with real touch events — see
 ```
 packages/edl/         the edit decision list — schema, ops, validation, log
 packages/store/       local persistence: OPFS media, IndexedDB projects and logs
-packages/renderer/    output pipeline; currently the pure sampling core
+packages/renderer/    the output path: sampling, compositing, audio mixdown, MP4 muxing
 packages/agent/       refinement pass: prompts, op validation, repair rounds
 apps/web/             mobile web app for the coarse pass
 apps/web/e2e/         browser checks: real touch gestures on an iPhone profile

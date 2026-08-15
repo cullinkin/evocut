@@ -52,23 +52,38 @@ export function sampleTimeline(timeline: Timeline, t: number): FrameState {
 
   for (const track of timeline.tracks) {
     for (const clip of track.clips) {
-      if (!clip.enabled) continue;
-      if (t < clip.start || t >= clipEnd(clip)) continue;
-
-      const sourceTime = timelineToSource(clip, t);
-      if (sourceTime === null) continue;
-
-      layers.push({
-        clip,
-        sourceTime,
-        clipOffset: t - clip.start,
-        ...sampleEffects(clip, t - clip.start),
-        gain: track.muted || clip.audio.mute ? 0 : clip.audio.gain * sampleClipVolume(clip, t - clip.start),
-      });
+      const layer = sampleClip(clip, t);
+      if (!layer) continue;
+      layers.push(track.muted ? { ...layer, gain: 0 } : layer);
     }
   }
 
   return { time: t, layers };
+}
+
+/**
+ * One clip's contribution at output time `t`, or null if it is not on screen then.
+ *
+ * Split out from `sampleTimeline` for the export, which knows which clip it has decoded
+ * and must not accidentally draw the neighbour it is about to cut to — at a boundary the
+ * timeline-wide sampler correctly hands back the *next* clip, which is the right answer
+ * for a preview and the wrong one for a render loop walking segment by segment.
+ */
+export function sampleClip(clip: Clip, t: number): FrameLayer | null {
+  if (!clip.enabled) return null;
+  if (t < clip.start || t >= clipEnd(clip)) return null;
+
+  const sourceTime = timelineToSource(clip, t);
+  if (sourceTime === null) return null;
+
+  const offset = t - clip.start;
+  return {
+    clip,
+    sourceTime,
+    clipOffset: offset,
+    ...sampleEffects(clip, offset),
+    gain: clip.audio.mute ? 0 : clip.audio.gain * sampleClipVolume(clip, offset),
+  };
 }
 
 function sampleEffects(
