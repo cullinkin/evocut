@@ -145,6 +145,13 @@ export interface Session {
   signals: Map<string, SourceSignals>;
   /** Sources still being measured. */
   measuring: string[];
+  /**
+   * How far through the current source the measurement is, 0..1.
+   *
+   * Reading half an hour of audio out of a file takes tens of seconds. A spinner with no
+   * number attached, for that long, reads as a hang.
+   */
+  measuringProgress: number;
 
   /** True while a refinement pass is in flight. It is a network call now, not a function. */
   refining: boolean;
@@ -507,7 +514,12 @@ export function useSession(): Session {
     (report: SignalsReport) => record('signals.compute', { payload: { ...report } }),
     [record],
   );
-  const { signals, pending: measuring } = useSourceSignals(stores, project, mediaUrls, onSignals);
+  const { signals, pending: measuring, progress: measuringProgress } = useSourceSignals(
+    stores,
+    project,
+    mediaUrls,
+    onSignals,
+  );
   const settingsState = useSettings(stores);
   const { settings } = settingsState;
 
@@ -752,8 +764,12 @@ export function useSession(): Session {
    *
    * Two different things, because the renderer needs the media twice over: a URL for the
    * `<video>` element that decodes the picture — the same range-served URL the preview
-   * uses, since it is the only kind iOS will seek in — and the raw bytes for
-   * `decodeAudioData`, which cannot work from a URL at all.
+   * uses, since it is the only kind iOS will seek in — and the stored file itself, which
+   * the audio path slices rather than reads.
+   *
+   * The file handle, not its bytes. This used to hand back `file.arrayBuffer()`, which on
+   * a phone recording means asking for five gigabytes in one allocation; it fails, the
+   * failure is caught, and the export comes out silent with nothing to say about why.
    */
   const resolver = useMemo<MediaResolver>(
     () => ({
@@ -762,11 +778,10 @@ export function useSession(): Session {
         if (!url) throw new Error('That clip’s video is not on this device.');
         return url;
       },
-      async bytes(sourceId) {
+      async file(sourceId) {
         const source = project?.sources.find((candidate) => candidate.id === sourceId);
         if (source?.locator.kind !== 'opfs') return null;
-        const file = await stores.media.get(source.locator.path);
-        return file ? file.arrayBuffer() : null;
+        return (await stores.media.get(source.locator.path)) ?? null;
       },
     }),
     [project],
@@ -928,6 +943,7 @@ export function useSession(): Session {
     discardReview,
     signals,
     measuring,
+    measuringProgress,
     refining,
     refinedBy,
     cancelRefinement,

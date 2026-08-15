@@ -24,8 +24,15 @@
  * model has to emit ops in.
  */
 
-/** Bumped when the analysis changes shape, so a cached result is recomputed rather than trusted. */
-export const SIGNALS_VERSION = 1;
+/**
+ * Bumped when the analysis changes shape, so a cached result is recomputed rather than trusted.
+ *
+ * 2: audio is measured through the demuxer rather than `decodeAudioData`, so recordings
+ * that were too large to load now have loudness where they had nothing; and motion is
+ * sampled on its own schedule rather than the filmstrip's, which on a long take is the
+ * difference between a sample every twenty seconds and one every three.
+ */
+export const SIGNALS_VERSION = 2;
 
 /** A transient: something struck, said hard, or landed. In source microseconds. */
 export interface Onset {

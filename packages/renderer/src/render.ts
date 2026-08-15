@@ -7,7 +7,13 @@ import {
   type Timeline,
 } from '@evocut/edl';
 import { clearFrame, drawLayer, type FrameSize } from './compose.js';
-import { AUDIO_SAMPLE_RATE, decodeAudio, mixdown, toPlanar } from './audio.js';
+import { AUDIO_SAMPLE_RATE, decodeAudio, mixdown, planAudio, toPlanar, type ClipAudio } from './audio.js';
+import {
+  MAX_UNINDEXED_AUDIO_BYTES,
+  decodeAudioWindow,
+  isAudioDecodeSupported,
+} from './decode-audio.js';
+import { readAudioTrack } from './demux.js';
 import { Mp4Writer, type Mp4Sample } from './mp4.js';
 import { planDecode, sampleClip, type DecodeSegment } from './sample.js';
 
@@ -48,8 +54,15 @@ import { planDecode, sampleClip, type DecodeSegment } from './sample.js';
 export interface MediaResolver {
   /** A URL a `<video>` element can play *and seek*. */
   url(sourceId: string): Promise<string>;
-  /** Raw bytes for audio decoding. Null when the media is unavailable. */
-  bytes(sourceId: string): Promise<ArrayBuffer | null>;
+  /**
+   * The stored file, for demuxing audio out of. Null when the media is unavailable.
+   *
+   * A `Blob`, deliberately, not its bytes: phone recordings run to gigabytes, and the
+   * whole audio path is built on slicing the parts it needs out of a handle rather than
+   * materialising the file. Asking for an `ArrayBuffer` here is what made a real 5.2 GB
+   * project export silently silent.
+   */
+  file(sourceId: string): Promise<Blob | null>;
 }
 
 export interface RenderRequest {
@@ -453,19 +466,11 @@ async function renderAudio(
     return null;
   }
 
-  const sourceIds = [...new Set(timeline.tracks.flatMap((track) => track.clips.map((clip) => clip.sourceId)))];
-  const buffers = new Map<string, AudioBuffer>();
-  for (const sourceId of sourceIds) {
-    throwIfAborted(request.signal);
-    const bytes = await request.resolver.bytes(sourceId).catch(() => null);
-    if (!bytes) continue;
-    const decoded = await decodeAudio(bytes, AUDIO_SAMPLE_RATE);
-    if (decoded) buffers.set(sourceId, decoded);
-  }
-  if (buffers.size === 0) return null;
+  const clips = await decodeClipAudio(timeline, request, warnings);
+  if (clips.size === 0) return null;
 
-  const mix = await mixdown(timeline, buffers, { sampleRate: AUDIO_SAMPLE_RATE }).catch(() => null);
-  buffers.clear();
+  const mix = await mixdown(timeline, clips, { sampleRate: AUDIO_SAMPLE_RATE }).catch(() => null);
+  clips.clear();
   if (!mix) return null;
 
   const codec = await pickAudioCodec(mix.sampleRate, mix.numberOfChannels);
@@ -537,6 +542,68 @@ async function renderAudio(
     channels: mix.numberOfChannels,
     samples,
   };
+}
+
+/**
+ * Decode exactly the audio the edit uses, clip by clip.
+ *
+ * Where the container can be demuxed this reads only the frames each surviving clip
+ * covers — nine minutes of a twenty-seven-minute recording costs nine minutes of memory,
+ * not twenty-seven. Where it cannot (WebM, fragmented MP4) it falls back to decoding the
+ * whole file, which is correct but only survivable for small ones.
+ */
+async function decodeClipAudio(
+  timeline: Timeline,
+  request: RenderRequest,
+  warnings: string[],
+): Promise<Map<string, ClipAudio>> {
+  const decoded = new Map<string, ClipAudio>();
+  const bySource = new Map<string, ReturnType<typeof planAudio>>();
+  for (const segment of planAudio(timeline)) {
+    const list = bySource.get(segment.sourceId) ?? [];
+    list.push(segment);
+    bySource.set(segment.sourceId, list);
+  }
+
+  for (const [sourceId, segments] of bySource) {
+    throwIfAborted(request.signal);
+    const file = await request.resolver.file(sourceId).catch(() => null);
+    if (!file) continue;
+
+    const track = isAudioDecodeSupported() ? await readAudioTrack(file).catch(() => null) : null;
+    if (track) {
+      let any = false;
+      for (const segment of segments) {
+        throwIfAborted(request.signal);
+        const fromUs = secondsToMicros(segment.offset);
+        const toUs = fromUs + secondsToMicros(segment.duration);
+        const buffer = await decodeAudioWindow(file, track, fromUs, toUs, {
+          ...(request.signal ? { signal: request.signal } : {}),
+        }).catch(() => null);
+        if (buffer) {
+          decoded.set(segment.clipId, { buffer, startUs: fromUs });
+          any = true;
+        }
+      }
+      // A track this browser can index but not decode — an ALAC or AC-3 recording — falls
+      // through to the whole-file path, which may still know how to play it.
+      if (any) continue;
+    }
+
+    if (file.size > MAX_UNINDEXED_AUDIO_BYTES) {
+      warnings.push(
+        'The sound in this recording could not be read: the file is too large to decode without an index, ' +
+          'and its container is one EvoCut cannot index. The export has picture only.',
+      );
+      continue;
+    }
+
+    const whole = await decodeAudio(await file.arrayBuffer(), AUDIO_SAMPLE_RATE);
+    if (!whole) continue;
+    for (const segment of segments) decoded.set(segment.clipId, { buffer: whole, startUs: 0 });
+  }
+
+  return decoded;
 }
 
 async function pickVideoCodec(out: FrameSize): Promise<string | null> {

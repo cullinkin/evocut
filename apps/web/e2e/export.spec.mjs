@@ -231,6 +231,90 @@ check('probesDecoded', drift.length, 3);
 
 await page.screenshot({ path: artifact('export-done.png') });
 
+/**
+ * Read the exported file back in, and listen to it.
+ *
+ * The demuxer cannot be reached from the generated test clip: that is a WebM, and WebM has
+ * no `moov` to index, so the signals pass falls back to decoding it whole. Which means the
+ * code path that every phone recording actually takes — locate the audio in the container,
+ * slice out the frames, run them through `AudioDecoder` — has no browser coverage at all
+ * unless something produces an MP4 first. Something just did.
+ *
+ * So the muxer's output becomes the demuxer's input, and the claim under test is end to
+ * end and arithmetical: the burst that was at 7 seconds of the original recording, having
+ * been cut, mixed, encoded, muxed, demuxed and decoded, is still where it should be.
+ *
+ * A fresh context, because the import screen only exists for a session with no project.
+ */
+const second = await browser.newContext({ acceptDownloads: true });
+const reimport = await second.newPage();
+const reimportErrors = [];
+reimport.on('pageerror', (error) => reimportErrors.push(String(error)));
+
+await reimport.goto(APP_URL);
+await reimport.locator('text=Choose a video').waitFor();
+await reimport.setInputFiles('input[type=file]', artifact('export.mp4'));
+await reimport.locator('.clip-block').first().waitFor({ timeout: 30_000 });
+await reimport.waitForFunction(
+  () => !document.querySelector('.meta')?.textContent?.includes('listening to the footage'),
+  null,
+  { timeout: 120_000 },
+);
+
+const [logFile] = await Promise.all([
+  reimport.waitForEvent('download'),
+  reimport.locator('footer button:has-text("Log")').click(),
+]);
+await logFile.saveAs(artifact('reimport-log.jsonl'));
+const measured = readFileSync(artifact('reimport-log.jsonl'), 'utf8')
+  .split('\n')
+  .filter(Boolean)
+  .map((line) => JSON.parse(line))
+  .filter((event) => event.type === 'signals.compute')
+  .at(-1)?.payload;
+
+set('reimportMeasurement', measured);
+check('heardTheExportedFile', measured?.hasAudio, true);
+// Not the fallback. `decoded whole` here would mean the demuxer declined and Web Audio
+// picked up the slack, which is exactly the outcome this section exists to rule out.
+check('readItThroughTheDemuxer', /^opus |^mp4a/.test(measured?.audioNote ?? ''), true);
+
+// The measurement ran only once, on open — not once per edit. This session makes no edits
+// at all, so more than one row would mean the pass is re-triggering on its own state.
+const computeRows = readFileSync(artifact('reimport-log.jsonl'), 'utf8')
+  .split('\n')
+  .filter(Boolean)
+  .map((line) => JSON.parse(line))
+  .filter((event) => event.type === 'signals.compute').length;
+check('measuredOncePerSource', computeRows, 1);
+
+const reimported = await exportEdl(reimport, 'reimport.json');
+const signals = await reimport.evaluate(async () => {
+  const open = indexedDB.open('evocut');
+  const db = await new Promise((resolve) => (open.onsuccess = () => resolve(open.result)));
+  const store = db.transaction('derived').objectStore('derived');
+  const all = await new Promise((resolve) => {
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result);
+  });
+  return all.find((entry) => entry?.value?.audio)?.value ?? null;
+});
+
+// Where the two bursts were in the original recording, less the head the cut removed.
+const expectedHits = [7, 9].map((at) => at - sourceInMs / 1000);
+const heard = (signals?.audio?.onsets ?? []).map((onset) => onset.t / 1_000_000);
+set('expectedHits', expectedHits.map((at) => Number(at.toFixed(2))));
+set('hitsHeardInTheReimport', heard.map((at) => Number(at.toFixed(2))));
+check(
+  'everyHitSurvivedTheRoundTrip',
+  expectedHits.every((at) => heard.some((found) => Math.abs(found - at) < 0.5)),
+  true,
+);
+check('durationOfTheReimport', Math.round(reimported.sources[0].duration / 100_000), Math.round(timelineUs / 100_000));
+
+await reimport.screenshot({ path: artifact('reimport.png') });
+errors.push(...reimportErrors);
+
 const code = finish(errors.filter((e) => !e.includes('favicon')));
 await browser.close();
 process.exit(code);

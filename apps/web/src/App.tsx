@@ -159,7 +159,10 @@ export function App() {
               footage has been measured, and a person who taps Refine ten seconds after
               importing would otherwise have no way to know they got the blind version.
             */}
-            {session.measuring.length > 0 && ' · listening to the footage'}
+            {session.measuring.length > 0 &&
+              ` · listening to the footage${
+                session.measuringProgress > 0 ? ` ${Math.round(session.measuringProgress * 100)}%` : ''
+              }`}
           </p>
         </div>
         {frozen ? (

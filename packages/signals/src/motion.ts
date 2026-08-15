@@ -16,11 +16,17 @@ import type { MotionSignals } from './types.js';
  *
  * ## Where the frames come from
  *
- * The app's filmstrip extractor already seeks through every source to build thumbnails for
- * the timeline. Motion is computed from that same pass, at whatever spacing it used —
- * about one frame a second. Sampling more finely would mean a second seek loop over the
- * whole recording, and on a phone that is minutes of work for a number that is used to
- * answer a yes-or-no question.
+ * The app's filmstrip extractor seeks through every source anyway, so motion rides along
+ * with that pass. It does **not** ride on the thumbnail spacing, though, and the
+ * difference matters: thumbnails are budgeted for what fits under a thumb, which on a
+ * 27-minute recording is one every twenty seconds. Two frames twenty seconds apart are
+ * unrelated pictures, and differencing them measures nothing. The extractor therefore
+ * samples luma on its own, finer schedule, and what arrives here is spaced by the length
+ * of the recording rather than by the width of the screen.
+ *
+ * The spacing is still coarse in absolute terms — a few seconds on a long take — which is
+ * the right resolution for "is this shot locked off" and the wrong one for anything about
+ * a single gesture. Nothing downstream asks it for the latter.
  */
 
 /** A frame reduced to luma, small. 32×32 is enough to tell movement from stillness. */

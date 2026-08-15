@@ -1,12 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Project, Source } from '@evocut/edl';
-import { decodeAudio } from '@evocut/renderer';
+import {
+  MAX_UNINDEXED_AUDIO_BYTES,
+  decodeAudio,
+  decodeAudioEnvelope,
+  describeAudioTrack,
+  isAudioDecodeSupported,
+  readAudioTrack,
+} from '@evocut/renderer';
 import {
   SIGNALS_VERSION,
   analyzeAudio,
   analyzeMotion,
   toMono,
-  type LumaFrame,
   type SourceSignals,
 } from '@evocut/signals';
 import type { AppStores } from '@evocut/store';
@@ -20,18 +26,28 @@ import { loadFilmstrip } from './filmstrip.ts';
  * were someone talking, a pause, or an impact. Asked for emphasis on the hits, it could
  * only invent them.
  *
- * ## What it costs, and when
+ * ## How the audio is read
  *
- * Two passes, both already half-paid for. Audio comes from decoding the source once with
- * the same decoder the export uses. Motion comes from the filmstrip extraction the
- * timeline is running anyway — this waits on that pass rather than seeking through the
- * recording a second time, which is the difference between a few seconds and a few minutes
- * on a phone.
+ * Through `@evocut/renderer`'s demuxer, not `decodeAudioData`. The first version of this
+ * file called `file.arrayBuffer()` and handed the result to the Web Audio decoder, which
+ * works on a test clip and fails on everything a phone records: a 27-minute 4K take is
+ * 5.2 GB, the allocation does not succeed, and — because the failure was caught and turned
+ * into "this source has no audio" — the whole pass reported silence for a recording full
+ * of sound. The refinement pass was then asked to find the hits in footage it could not
+ * hear, and correctly declined to invent any.
+ *
+ * So now the audio track is located from the container's index and decoded a slice at a
+ * time, at a magnitude-preserving 2 kHz, which is 13 MB for half an hour. Where a
+ * container cannot be indexed the old whole-file path is still there for small files, and
+ * where neither works the reason is recorded rather than discarded.
+ *
+ * ## What it costs, and when
  *
  * It runs when a project opens rather than when Refine is tapped, because a person who has
  * just finished their coarse pass should not then watch a progress bar. It is deliberately
  * unhurried and entirely optional: every failure path here ends in "no signals for that
- * source", and the refinement pass works exactly as it did before, blind.
+ * source", with a note saying why, and the refinement pass works exactly as it did before,
+ * blind.
  *
  * ## Cached by content, not by project
  *
@@ -43,6 +59,8 @@ export interface SignalsState {
   signals: Map<string, SourceSignals>;
   /** Sources still being measured. Empty means everything that can be known is known. */
   pending: string[];
+  /** 0..1 through the source currently being measured. */
+  progress: number;
 }
 
 export interface SignalsReport {
@@ -53,6 +71,17 @@ export interface SignalsReport {
   quiet: number;
   still: number;
   hasAudio: boolean;
+  /** How many motion samples the analysis had to work with. */
+  motionSamples: number;
+  /**
+   * What was found in the audio, or why nothing was.
+   *
+   * The single most useful row in the log when the suggestions come back thin. Without it
+   * `hasAudio: false` is indistinguishable between "this take is silent", "this browser
+   * cannot decode AAC", and "the file was too big to open" — and those want three
+   * different fixes.
+   */
+  audioNote: string;
 }
 
 const memory = new Map<string, SourceSignals>();
@@ -65,55 +94,102 @@ export function useSourceSignals(
 ): SignalsState {
   const [signals, setSignals] = useState<Map<string, SourceSignals>>(new Map());
   const [pending, setPending] = useState<string[]>([]);
+  const [progress, setProgress] = useState(0);
   const reportRef = useRef(onComputed);
   reportRef.current = onComputed;
 
-  useEffect(() => {
-    if (!project) return;
-    const sources = project.sources.filter((source) => mediaUrls.has(source.id));
-    if (sources.length === 0) return;
+  const sources = useMemo(
+    () => (project?.sources ?? []).filter((source) => mediaUrls.has(source.id)),
+    [project?.sources, mediaUrls],
+  );
 
+  /**
+   * What this pass actually depends on: which recordings, and where their bytes are.
+   *
+   * The effect used to depend on `project`, which changes on every edit — so on a session
+   * with 160 cuts it re-ran 160 times, each one re-reading the whole recording. Signals
+   * belong to the *source*, not to the edit; nothing a trim does can change what the
+   * footage sounds like. This key says exactly that, and stays identical across every cut.
+   */
+  const identity = useMemo(
+    () => sources.map((source) => `${source.id}:${source.contentHash ?? ''}:${mediaUrls.get(source.id)}`).join('|'),
+    [sources, mediaUrls],
+  );
+
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
+  const urlsRef = useRef(mediaUrls);
+  urlsRef.current = mediaUrls;
+
+  useEffect(() => {
+    const measuring = sourcesRef.current;
+    if (measuring.length === 0) return;
+
+    const controller = new AbortController();
     let live = true;
-    setPending(sources.filter((source) => !memory.has(cacheKey(source))).map((source) => source.id));
+    setPending(measuring.filter((source) => !memory.has(cacheKey(source))).map((source) => source.id));
 
     void (async () => {
-      for (const source of sources) {
+      for (const source of measuring) {
         if (!live) return;
-        const url = mediaUrls.get(source.id);
+        const url = urlsRef.current.get(source.id);
         if (!url) continue;
 
         const started = Date.now();
+        setProgress(0);
         const cached = await read(stores, source);
-        const computed = cached ?? (await measure(stores, source, url));
+        const computed = cached
+          ? { signals: cached, audioNote: 'cached' }
+          : await measure(stores, source, url, controller.signal, (fraction) => {
+              if (live) setProgress(fraction);
+            });
         if (!live) return;
 
         setPending((previous) => previous.filter((id) => id !== source.id));
-        if (!computed) continue;
+        if (!computed.signals) {
+          // Still reported. A source that could not be measured at all is the single most
+          // important thing to know when reading back a session, and it is exactly the
+          // case the old code logged nothing for.
+          reportRef.current?.({
+            sourceId: source.id,
+            fromCache: false,
+            elapsedMs: Date.now() - started,
+            onsets: 0,
+            quiet: 0,
+            still: 0,
+            hasAudio: false,
+            motionSamples: 0,
+            audioNote: computed.audioNote,
+          });
+          continue;
+        }
 
-        memory.set(cacheKey(source), computed);
-        setSignals((previous) => new Map(previous).set(source.id, computed));
+        memory.set(cacheKey(source), computed.signals);
+        setSignals((previous) => new Map(previous).set(source.id, computed.signals!));
 
-        if (!cached) await write(stores, source, computed);
+        if (!cached) await write(stores, source, computed.signals);
         reportRef.current?.({
           sourceId: source.id,
           fromCache: Boolean(cached),
           elapsedMs: Date.now() - started,
-          onsets: computed.audio?.onsets.length ?? 0,
-          quiet: computed.audio?.quiet.length ?? 0,
-          still: computed.motion?.still.length ?? 0,
-          hasAudio: computed.audio !== null,
+          onsets: computed.signals.audio?.onsets.length ?? 0,
+          quiet: computed.signals.audio?.quiet.length ?? 0,
+          still: computed.signals.motion?.still.length ?? 0,
+          hasAudio: computed.signals.audio !== null,
+          motionSamples: computed.signals.motion?.motion.length ?? 0,
+          audioNote: computed.audioNote,
         });
       }
+      if (live) setProgress(1);
     })();
 
     return () => {
       live = false;
+      controller.abort();
     };
-    // `mediaUrls` is a fresh Map per bind, not per render, so this runs on open and on
-    // relink — which is exactly when the media it measures can have changed.
-  }, [project, mediaUrls, stores]);
+  }, [identity, stores]);
 
-  return { signals, pending };
+  return { signals, pending, progress };
 }
 
 function cacheKey(source: Source): string {
@@ -139,49 +215,93 @@ async function write(stores: AppStores, source: Source, signals: SourceSignals):
   await stores.derived.put(cacheKey(source), signals).catch(() => {});
 }
 
-async function measure(stores: AppStores, source: Source, url: string): Promise<SourceSignals | null> {
+interface Measurement {
+  signals: SourceSignals | null;
+  audioNote: string;
+}
+
+async function measure(
+  stores: AppStores,
+  source: Source,
+  url: string,
+  signal: AbortSignal,
+  onProgress: (fraction: number) => void,
+): Promise<Measurement> {
   const [audio, motion] = await Promise.all([
-    measureAudio(stores, source),
+    measureAudio(stores, source, signal, onProgress),
     measureMotion(source, url),
   ]);
 
-  if (!audio && !motion) return null;
+  if (!audio.signals && !motion) return { signals: null, audioNote: audio.note };
   return {
-    version: SIGNALS_VERSION,
-    sourceId: source.id,
-    ...(source.contentHash ? { contentHash: source.contentHash } : {}),
-    durationUs: source.duration,
-    audio,
-    motion,
-    computedAt: new Date().toISOString(),
+    signals: {
+      version: SIGNALS_VERSION,
+      sourceId: source.id,
+      ...(source.contentHash ? { contentHash: source.contentHash } : {}),
+      durationUs: source.duration,
+      audio: audio.signals,
+      motion,
+      computedAt: new Date().toISOString(),
+    },
+    audioNote: audio.note,
   };
 }
 
-async function measureAudio(stores: AppStores, source: Source): Promise<SourceSignals['audio']> {
-  if (source.locator.kind !== 'opfs') return null;
+interface AudioMeasurement {
+  signals: SourceSignals['audio'];
+  note: string;
+}
+
+async function measureAudio(
+  stores: AppStores,
+  source: Source,
+  signal: AbortSignal,
+  onProgress: (fraction: number) => void,
+): Promise<AudioMeasurement> {
+  if (source.locator.kind !== 'opfs') return { signals: null, note: 'media is not stored on this device' };
+
   try {
     const file = await stores.media.get(source.locator.path);
-    if (!file) return null;
+    if (!file) return { signals: null, note: 'media is missing from storage' };
+
+    const track = isAudioDecodeSupported() ? await readAudioTrack(file) : null;
+    if (track) {
+      const envelope = await decodeAudioEnvelope(file, track, { signal, onProgress });
+      if (!envelope) return { signals: null, note: `indexed ${track.codec}, but this browser would not decode it` };
+      return {
+        signals: analyzeAudio(envelope.samples, envelope.sampleRate),
+        note: describeAudioTrack(track),
+      };
+    }
+
+    // Not a container this can index. The whole-file decoder is still correct, and still
+    // the only option for WebM — it just cannot be pointed at a recording of any size.
+    if (file.size > MAX_UNINDEXED_AUDIO_BYTES) {
+      return {
+        signals: null,
+        note: `container has no readable index and the file is ${Math.round(file.size / 1_048_576)}MB — too large to decode whole`,
+      };
+    }
 
     const buffer = await decodeAudio(await file.arrayBuffer());
-    if (!buffer) return null;
+    if (!buffer) return { signals: null, note: 'this browser could not decode the audio' };
 
     const channels = Array.from({ length: buffer.numberOfChannels }, (_, i) => buffer.getChannelData(i));
-    return analyzeAudio(toMono(channels), buffer.sampleRate);
-  } catch {
-    // A recording with no audio track, or a codec this browser will play but not hand
-    // back as samples. Both are ordinary; neither is worth an error on screen.
-    return null;
+    return {
+      signals: analyzeAudio(toMono(channels), buffer.sampleRate),
+      note: `decoded whole, ${buffer.numberOfChannels}ch ${buffer.sampleRate}Hz`,
+    };
+  } catch (cause) {
+    // Named, not swallowed. The version of this that returned a bare null is what made a
+    // 5.2 GB recording look like a silent one for a whole session.
+    return { signals: null, note: cause instanceof Error ? cause.message : String(cause) };
   }
 }
 
 async function measureMotion(source: Source, url: string): Promise<SourceSignals['motion']> {
   try {
     const strip = await loadFilmstrip(source.id, url, source.duration);
-    const frames: LumaFrame[] = strip.frames
-      .filter((frame) => frame.luma.length > 0)
-      .map((frame) => ({ t: frame.t, width: frame.lumaWidth, height: frame.lumaHeight, luma: frame.luma }));
-    return analyzeMotion(frames);
+    return analyzeMotion(strip.luma.filter((sample) => sample.luma.length > 0));
   } catch {
     return null;
   }

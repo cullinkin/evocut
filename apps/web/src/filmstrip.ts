@@ -20,31 +20,49 @@ export interface Frame {
   /** Presentation time within the source, in microseconds. */
   t: number;
   url: string;
-  /**
-   * The same frame reduced to a tiny greyscale bitmap, for the motion signal.
-   *
-   * Carried here rather than gathered in a pass of its own because the expensive part of
-   * "look at every second of this recording" is the seeking, and this pass is already
-   * doing it. A second loop over the whole take, on a phone, to answer "is this shot
-   * static" would cost minutes for a yes-or-no.
-   */
+}
+
+/** A frame reduced to a tiny greyscale bitmap, for the motion signal. */
+export interface LumaSample {
+  t: number;
+  width: number;
+  height: number;
   luma: Uint8Array;
-  lumaWidth: number;
-  lumaHeight: number;
 }
 
 export interface Filmstrip {
   frames: Frame[];
+  /** Ordered by time. Sampled far more finely than the thumbnails; see below. */
+  luma: LumaSample[];
+  /** The thumbnails are complete. */
   ready: boolean;
+  /** The motion sampling is complete too — it runs on after the strip is usable. */
+  motionReady: boolean;
   /** Aspect ratio of the extracted frames, for laying out the strip. */
   aspect: number;
 }
 
-const EMPTY: Filmstrip = { frames: [], ready: false, aspect: 9 / 16 };
+const EMPTY: Filmstrip = { frames: [], luma: [], ready: false, motionReady: false, aspect: 9 / 16 };
 
-/** Cap on frames per source: enough to read a 10-minute take, cheap enough for a phone. */
+/** Cap on thumbnails per source: enough to read a take at a glance, cheap on a phone. */
 const MAX_FRAMES = 80;
 const MIN_INTERVAL_US = 1_000_000;
+
+/**
+ * Motion is sampled on its own schedule, and far more finely than the strip.
+ *
+ * These used to be one number, and that quietly broke the motion signal on anything long.
+ * Eighty frames across a 27-minute recording is one sample every twenty seconds, and at
+ * that spacing "this shot is static" is not a measurement — two frames twenty seconds
+ * apart are unrelated pictures. The signals pass duly reported four still regions for the
+ * whole take and the refinement pass had nothing to work with.
+ *
+ * Thumbnails are a display budget: eighty is what fits under a thumb. Motion is a
+ * measurement budget: it wants the shortest interval a phone can afford to seek to, which
+ * is what makes 600 samples at no less than half a second a different number from 80.
+ */
+const MAX_LUMA_SAMPLES = 600;
+const MIN_LUMA_INTERVAL_US = 500_000;
 /**
  * Frames are captured well above their display size.
  *
@@ -73,6 +91,11 @@ const cache = new Map<string, Extraction>();
  * the timeline is already running, instead of seeking through the recording a second time.
  * Progress is pushed to listeners as frames arrive: a timeline with half a filmstrip is
  * useful, one that blocks until all of it is ready is not.
+ *
+ * Two passes over one open `<video>`. The first takes the thumbnails, and the strip is
+ * announced ready at the end of it, because that is the pass someone is waiting on. The
+ * second fills in the motion samples between them — seven times as many seeks, all of them
+ * after the editor is already usable, and nothing on screen depends on them finishing.
  */
 export function loadFilmstrip(
   sourceId: string,
@@ -83,28 +106,48 @@ export function loadFilmstrip(
   let entry = cache.get(sourceId);
 
   if (!entry) {
-    const collected: Frame[] = [];
+    const frames: Frame[] = [];
+    const luma: LumaSample[] = [];
     const created: Extraction = { strip: EMPTY, done: Promise.resolve(EMPTY), listeners: new Set() };
 
     const publish = (strip: Filmstrip) => {
       created.strip = strip;
       for (const listener of created.listeners) listener(strip);
     };
+    const snapshot = (aspect: number, ready: boolean, motionReady: boolean): Filmstrip => ({
+      frames: [...frames],
+      // Sorted on the way out rather than on the way in: the second pass fills the gaps
+      // the first one left, so the arrival order is not time order, and `analyzeMotion`
+      // differences consecutive entries.
+      luma: [...luma].sort((a, b) => a.t - b.t),
+      ready,
+      motionReady,
+      aspect,
+    });
 
-    created.done = extractFrames(objectUrl, durationUs, (frame, aspect) => {
-      collected.push(frame);
-      publish({ frames: [...collected], ready: false, aspect });
-      return true;
+    created.done = extractFrames(objectUrl, durationUs, {
+      onFrame(frame, sample, aspect) {
+        frames.push(frame);
+        luma.push(sample);
+        publish(snapshot(aspect, false, false));
+      },
+      onThumbnailsDone(aspect) {
+        publish(snapshot(aspect, true, false));
+      },
+      onLuma(sample, aspect) {
+        luma.push(sample);
+        publish(snapshot(aspect, true, false));
+      },
     })
       .then((aspect) => {
-        const strip = { frames: collected, ready: true, aspect };
+        const strip = snapshot(aspect, true, true);
         publish(strip);
         return strip;
       })
       .catch(() => {
         // A strip that stops early is still useful; a thrown error would take the editor
         // down over decorative pixels. Whatever arrived is what there is.
-        const strip = { ...created.strip, ready: true };
+        const strip = { ...created.strip, ready: true, motionReady: true };
         publish(strip);
         return strip;
       });
@@ -154,12 +197,38 @@ export function frameAt(strip: Filmstrip, sourceTimeUs: number): Frame | null {
   return best;
 }
 
+interface ExtractHandlers {
+  onFrame(frame: Frame, sample: LumaSample, aspect: number): void;
+  onThumbnailsDone(aspect: number): void;
+  onLuma(sample: LumaSample, aspect: number): void;
+}
+
+/** The times to seek to, split into the pass that is watched and the pass that is not. */
+export function planExtraction(durationUs: number): { thumbnails: number[]; luma: number[] } {
+  const thumbnailInterval = Math.max(MIN_INTERVAL_US, Math.ceil(durationUs / MAX_FRAMES));
+  const lumaInterval = Math.min(
+    thumbnailInterval,
+    Math.max(MIN_LUMA_INTERVAL_US, Math.ceil(durationUs / MAX_LUMA_SAMPLES)),
+  );
+
+  const thumbnails: number[] = [];
+  for (let t = 0; t < durationUs; t += thumbnailInterval) thumbnails.push(t);
+
+  // Only the times the first pass will not already have visited. Seeking twice to the
+  // same frame would cost as much as the seek that produced it.
+  const taken = new Set(thumbnails);
+  const luma: number[] = [];
+  for (let t = 0; t < durationUs; t += lumaInterval) if (!taken.has(t)) luma.push(t);
+
+  return { thumbnails, luma };
+}
+
 async function extractFrames(
   objectUrl: string,
   durationUs: number,
-  emit: (frame: Frame, aspect: number) => boolean,
+  handlers: ExtractHandlers,
 ): Promise<number> {
-  const interval = Math.max(MIN_INTERVAL_US, Math.ceil(durationUs / MAX_FRAMES));
+  const plan = planExtraction(durationUs);
   const video = document.createElement('video');
   video.src = objectUrl;
   video.muted = true;
@@ -187,21 +256,35 @@ async function extractFrames(
     canvas.height = FRAME_HEIGHT;
     canvas.width = Math.max(1, Math.round(FRAME_HEIGHT * aspect));
 
-    for (let t = 0; t < durationUs; t += interval) {
+    const sampleLuma = (t: number): LumaSample => {
+      smallContext?.drawImage(video, 0, 0, LUMA_SIZE, LUMA_SIZE);
+      const pixels = smallContext?.getImageData(0, 0, LUMA_SIZE, LUMA_SIZE).data;
+      return {
+        t,
+        width: LUMA_SIZE,
+        height: LUMA_SIZE,
+        luma: pixels ? lumaFromRgba(pixels, LUMA_SIZE, LUMA_SIZE) : new Uint8Array(0),
+      };
+    };
+
+    for (const t of plan.thumbnails) {
       video.currentTime = t / 1_000_000;
       await once(video, 'seeked', SEEK_TIMEOUT_MS);
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      smallContext?.drawImage(video, 0, 0, LUMA_SIZE, LUMA_SIZE);
-      const pixels = smallContext?.getImageData(0, 0, LUMA_SIZE, LUMA_SIZE).data;
+      handlers.onFrame({ t, url: canvas.toDataURL('image/jpeg', 0.6) }, sampleLuma(t), aspect);
+    }
+    handlers.onThumbnailsDone(aspect);
 
-      const frame: Frame = {
-        t,
-        url: canvas.toDataURL('image/jpeg', 0.6),
-        luma: pixels ? lumaFromRgba(pixels, LUMA_SIZE, LUMA_SIZE) : new Uint8Array(0),
-        lumaWidth: LUMA_SIZE,
-        lumaHeight: LUMA_SIZE,
-      };
-      if (!emit(frame, aspect)) break;
+    // From here on nothing on screen is waiting. A seek that fails takes the motion
+    // sample with it and leaves the strip, and the editor, exactly as they were.
+    for (const t of plan.luma) {
+      video.currentTime = t / 1_000_000;
+      try {
+        await once(video, 'seeked', SEEK_TIMEOUT_MS);
+      } catch {
+        continue;
+      }
+      handlers.onLuma(sampleLuma(t), aspect);
     }
 
     return aspect;

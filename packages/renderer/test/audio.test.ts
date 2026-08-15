@@ -8,7 +8,7 @@ import {
   secondsToMicros as S,
   type Timeline,
 } from '@evocut/edl';
-import { mixdown, planAudio, type OfflineAudio } from '../src/audio.js';
+import { mixdown, planAudio, type ClipAudio, type OfflineAudio } from '../src/audio.js';
 
 function deps() {
   return { newId: makeIdFactory('a') };
@@ -161,14 +161,23 @@ function fakeContext() {
   return { context, scheduled, automation, gains, buffer };
 }
 
-describe('mixdown', () => {
-  const decoded = new Map<string, AudioBuffer>([
-    ['src_a', { length: 48_000 * 30, numberOfChannels: 2, sampleRate: 48_000 } as AudioBuffer],
-  ]);
+/**
+ * Decoded audio for every clip in a timeline, as one shared whole-source buffer.
+ *
+ * The shape the fallback path produces: one buffer covering the take, `startUs: 0`, keyed
+ * per clip. The demuxed path keys the same map with per-clip windows instead, which is
+ * what the `startUs` test below covers.
+ */
+function wholeSource(tl: Timeline, startUs = 0): Map<string, ClipAudio> {
+  const buffer = { length: 48_000 * 30, numberOfChannels: 2, sampleRate: 48_000 } as AudioBuffer;
+  return new Map(tl.tracks[0]!.clips.map((clip) => [clip.id, { buffer, startUs }]));
+}
 
+describe('mixdown', () => {
   it('schedules one buffer source per audible clip', async () => {
     const fake = fakeContext();
-    const result = await mixdown(timeline(), decoded, { createContext: () => fake.context });
+    const tl = timeline();
+    const result = await mixdown(tl, wholeSource(tl), { createContext: () => fake.context });
 
     expect(result).toBe(fake.buffer);
     expect(fake.scheduled).toEqual([
@@ -202,7 +211,7 @@ describe('mixdown', () => {
     ).timeline;
 
     const fake = fakeContext();
-    await mixdown(faded, decoded, { createContext: () => fake.context });
+    await mixdown(faded, wholeSource(faded), { createContext: () => fake.context });
 
     expect(fake.gains).toEqual([0.5, 1]);
     // The fade rides on top of the clip gain rather than replacing it, so full volume
@@ -219,10 +228,21 @@ describe('mixdown', () => {
     expect(fake.scheduled).toEqual([]);
   });
 
+  it('reads from the start of a window that does not begin at the source head', async () => {
+    const fake = fakeContext();
+    const tl = timeline();
+    // Each clip's audio was decoded starting two seconds in, so the clip that reads the
+    // source from 2s must now read this buffer from 0. Getting this wrong is a whole-clip
+    // sync error, and it is silent in every other test because `startUs` is usually zero.
+    await mixdown(tl, wholeSource(tl, S(2)), { createContext: () => fake.context });
+    expect(fake.scheduled.map((s) => s.offset)).toEqual([0, 16]);
+  });
+
   it('sizes the context to the whole timeline', async () => {
     let asked: { channels: number; frames: number; rate: number } | null = null;
     const fake = fakeContext();
-    await mixdown(timeline(), decoded, {
+    const tl = timeline();
+    await mixdown(tl, wholeSource(tl), {
       createContext: (channels, frames, rate) => {
         asked = { channels, frames, rate };
         return fake.context;

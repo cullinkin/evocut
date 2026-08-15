@@ -100,6 +100,36 @@ const events = readFileSync(logPath, 'utf8')
 
 const computed = events.filter((event) => event.type === 'signals.compute');
 check('loggedTheMeasurement', computed.length, 1);
+
+/**
+ * Editing does not re-measure.
+ *
+ * This is the check that was missing. The pass is keyed on the source and cached by
+ * content, so in principle it runs once per recording ever — but it lived in an effect
+ * that depended on the whole project, and a project changes on every cut. On a real
+ * session of 160 edits it ran 160 times, re-reading a 5.2 GB file each time, and nothing
+ * anywhere said so. Signals belong to the footage; nothing a trim does can change what the
+ * footage sounds like, and this asserts that in the one place it can be observed.
+ */
+const ruler = await page.locator('.ruler').boundingBox();
+for (const fraction of [0.2, 0.35, 0.5, 0.65, 0.8]) {
+  await page.mouse.click(ruler.x + ruler.width * fraction, ruler.y + ruler.height / 2);
+  await page.locator('button[aria-label="Cut at playhead"]').click();
+  await page.waitForTimeout(120);
+}
+check('cutsMade', (await page.locator('.clip-block').count()) >= 5, true);
+
+const [afterEdits] = await Promise.all([
+  page.waitForEvent('download'),
+  page.locator('footer button:has-text("Log")').click(),
+]);
+await afterEdits.saveAs(artifact('signals-log-after-edits.jsonl'));
+const recomputes = readFileSync(artifact('signals-log-after-edits.jsonl'), 'utf8')
+  .split('\n')
+  .filter(Boolean)
+  .map((line) => JSON.parse(line))
+  .filter((event) => event.type === 'signals.compute').length;
+check('editingDoesNotReMeasure', recomputes, 1);
 set('measurementCost', computed[0]?.payload ?? null);
 check('firstPassWasNotACacheHit', computed[0]?.payload?.fromCache, false);
 

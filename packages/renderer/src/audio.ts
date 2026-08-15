@@ -143,33 +143,52 @@ export interface MixdownOptions {
 const DEFAULT_SAMPLE_RATE = 48_000;
 
 /**
+ * Decoded audio for one clip.
+ *
+ * Keyed per clip rather than per source, and carrying where in the source it starts, so a
+ * nine-minute edit of a half-hour recording decodes nine minutes. The alternative — one
+ * buffer per source — meant holding the *whole* take in memory whatever survived the cut,
+ * which on phone footage is hundreds of megabytes for audio nobody kept.
+ *
+ * `startUs` is what makes that possible: it says where sample zero of this buffer sits in
+ * the source, so a window decoded from 12:04 still lines up with a clip that reads from
+ * 12:04. A whole-source buffer is simply one with `startUs: 0`, which is what the fallback
+ * path for containers we cannot demux still produces.
+ */
+export interface ClipAudio {
+  buffer: AudioBuffer;
+  /** Source time of the buffer's first sample, in microseconds. */
+  startUs: number;
+}
+
+/**
  * Render the timeline's audio to a single buffer.
  *
- * Returns null when there is nothing to render — every clip muted, or no source decoded.
+ * Returns null when there is nothing to render — every clip muted, or nothing decoded.
  * That is a normal outcome (a silent take, a project whose audio the browser could not
  * decode), not a failure, and the export continues without an audio track.
  */
 export async function mixdown(
   timeline: Timeline,
-  buffers: Map<string, AudioBuffer>,
+  clips: Map<string, ClipAudio>,
   options: MixdownOptions = {},
 ): Promise<AudioBuffer | null> {
-  const segments = planAudio(timeline).filter((segment) => buffers.has(segment.sourceId));
+  const segments = planAudio(timeline).filter((segment) => clips.has(segment.clipId));
   if (segments.length === 0) return null;
 
   const sampleRate = options.sampleRate ?? DEFAULT_SAMPLE_RATE;
   const channels =
     options.channels ??
-    Math.min(2, Math.max(1, ...[...buffers.values()].map((buffer) => buffer.numberOfChannels)));
+    Math.min(2, Math.max(1, ...[...clips.values()].map((clip) => clip.buffer.numberOfChannels)));
   const seconds = microsToSeconds(timelineDuration(timeline));
   const frames = Math.max(1, Math.ceil(seconds * sampleRate));
 
   const context = (options.createContext ?? defaultContext)(channels, frames, sampleRate);
 
   for (const segment of segments) {
-    const buffer = buffers.get(segment.sourceId)!;
+    const decoded = clips.get(segment.clipId)!;
     const source = context.createBufferSource();
-    source.buffer = buffer;
+    source.buffer = decoded.buffer;
     source.playbackRate.value = segment.rate;
 
     const gain = context.createGain();
@@ -185,7 +204,11 @@ export async function mixdown(
     gain.connect(context.destination);
     // Reading past the end of a decoded buffer is silence, not an error, so a clip whose
     // source decoded slightly short simply fades out rather than failing the export.
-    source.start(segment.at, segment.offset, segment.duration);
+    source.start(
+      segment.at,
+      Math.max(0, segment.offset - microsToSeconds(decoded.startUs)),
+      segment.duration,
+    );
   }
 
   return context.startRendering();
