@@ -46,6 +46,20 @@ export interface PlayerProps {
 const SEEK_TOLERANCE_US = 60_000;
 /** How often the loop may correct an element that has drifted outside its clip. */
 const RESYNC_INTERVAL_MS = 250;
+/**
+ * Floor on how often a *scrub* may re-aim the element.
+ *
+ * A scroll gesture with momentum emits events for as long as it coasts, and each one used
+ * to issue a seek. On the twelve-second test clip that is free; on a 5 GB 4K recording it
+ * is a queue of seeks that never drains, and an element that never completes one shows
+ * nothing at all — the black picture reported from a real project, which looked for all
+ * the world like the preview had stopped following the edit.
+ *
+ * Six a second is faster than anyone can read a frame and slow enough that each one
+ * finishes. The seek at the *end* of a gesture is exempt: it is exact, it is the one that
+ * decides what you are looking at, and there is only ever one of it.
+ */
+const SCRUB_SEEK_INTERVAL_MS = 160;
 
 export function Player({
   objectUrl,
@@ -80,8 +94,19 @@ export function Player({
   onDiagnosticsRef.current = onDiagnostics;
   const reportedForRef = useRef<string | null>(null);
 
+  const lastScrubSeekRef = useRef(0);
+
   const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {
     if (Math.abs(secondsToMicros(video.currentTime) - sourceUs) <= SEEK_TOLERANCE_US) return;
+
+    if (approximate) {
+      // Rate-limited, and dropped rather than queued: the next scroll event is a fraction
+      // of a second away and carries a better answer, so a skipped one costs nothing.
+      const now = Date.now();
+      if (now - lastScrubSeekRef.current < SCRUB_SEEK_INTERVAL_MS) return;
+      lastScrubSeekRef.current = now;
+    }
+
     const seconds = Math.max(0, microsToSeconds(sourceUs));
     if (approximate && typeof video.fastSeek === 'function') video.fastSeek(seconds);
     else video.currentTime = seconds;

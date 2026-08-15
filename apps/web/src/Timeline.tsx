@@ -137,6 +137,11 @@ export function TimelineEditor({
   const [draft, setDraft] = useState<TrimDraft | null>(null);
   const dragRef = useRef<DragKind | null>(null);
   const draftRef = useRef<TrimDraft | null>(null);
+  /** True from the first scroll event of a gesture until 140ms after the last one. */
+  const scrubbingRef = useRef(false);
+  const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The last time we announced, so a sub-pixel scroll does not re-render the editor. */
+  const lastScrubRef = useRef<number | null>(null);
   /** Half the viewport: the padding that lets time zero sit under a centred playhead. */
   const [halfWidth, setHalfWidth] = useState(0);
   /**
@@ -156,6 +161,9 @@ export function TimelineEditor({
 
   const clips = timeline.tracks[0]?.clips ?? [];
   const committedTotal = timelineDuration(timeline);
+  // Read inside callbacks that must not re-create themselves on every playhead change.
+  const playheadRef = useRef(playhead);
+  playheadRef.current = playhead;
 
   const toX = useCallback((us: number) => (us / 1_000_000) * pxPerSecond + halfWidth, [halfWidth, pxPerSecond]);
 
@@ -212,7 +220,17 @@ export function TimelineEditor({
     const scroller = scrollerRef.current;
     if (!scroller || committedTotal <= 0) return;
     const usable = Math.max(120, scroller.clientWidth - 32);
-    setPxPerSecond(clamp(usable / (committedTotal / 1_000_000), MIN_PPS, MAX_PPS));
+    const next = clamp(usable / (committedTotal / 1_000_000), MIN_PPS, MAX_PPS);
+    setPxPerSecond(next);
+    // `scrollLeft` survives a scale change in pixels, which means it changes in *seconds*.
+    // Re-anchoring keeps the playhead on the frame it was on instead of sliding it by the
+    // ratio of the two zooms — and, without this, the scroll that follows reads as a
+    // gesture nobody made.
+    requestAnimationFrame(() => {
+      const target = Math.max(0, Math.round((playheadRef.current / 1_000_000) * next));
+      expectedRef.current = target;
+      scroller.scrollLeft = target;
+    });
   }, [committedTotal]);
 
   const fittedRef = useRef(false);
@@ -244,10 +262,27 @@ export function TimelineEditor({
     [pxPerSecond],
   );
 
-  // The playhead moving from anywhere else — playback, a tap on a clip, a seek to zero —
-  // brings the lane with it. A trim drag is exempt: it is already showing the edge.
+  /**
+   * The playhead moving from anywhere else brings the lane with it.
+   *
+   * Two exemptions, and the second one is a bug fix with a story. Scrolling seeks, seeking
+   * moves the playhead, and this effect scrolls the lane to the playhead — a ring that is
+   * only safe while the two halves cannot both be live.
+   *
+   * With momentum they can. The finger has let go, the lane is still travelling, and this
+   * effect fires on a playhead value computed three frames ago and hauls the lane back
+   * there — cancelling the coast, emitting another scroll, and asking the player to seek a
+   * multi-gigabyte file again on the way. On a desktop wheel, where a scroll is one
+   * instantaneous jump, it is invisible. On a phone it means the timeline barely moves
+   * from where you started and the preview never finishes a seek, which is what "no matter
+   * where I drag it plays from the beginning, and the picture is black" actually was.
+   *
+   * So while the user owns the scroller, the scroller is theirs. `scrubbingRef` is read at
+   * run time rather than being a dependency because the effect is already re-running on
+   * every playhead change — which, during a scrub, is exactly the run that must do nothing.
+   */
   useEffect(() => {
-    if (drag) return;
+    if (drag || scrubbingRef.current) return;
     scrollToTime(playhead);
   }, [drag, playhead, scrollToTime]);
 
@@ -258,8 +293,6 @@ export function TimelineEditor({
    * scrub rather than sixty seeks — and a settle timer fires the final one, because a
    * touch scroll with momentum has no event that means "stopped".
    */
-  const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scrubbingRef = useRef(false);
   const onScroll = useCallback(() => {
     const scroller = scrollerRef.current;
     if (!scroller || suppressRef.current || dragRef.current) return;
@@ -281,10 +314,21 @@ export function TimelineEditor({
     }
 
     const us = Math.max(0, Math.min(committedTotal, Math.round((scroller.scrollLeft / pxPerSecond) * 1_000_000)));
-    onSeek(us, false);
+    // A long edit zoomed to fit is a quarter-second per pixel, so a coasting scroll emits
+    // plenty of events that describe the same instant. Re-rendering a fifty-clip editor
+    // for those costs frames and buys nothing.
+    if (us !== lastScrubRef.current) {
+      lastScrubRef.current = us;
+      onSeek(us, false);
+    }
+
     if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
     scrubTimerRef.current = setTimeout(() => {
       scrubbingRef.current = false;
+      lastScrubRef.current = null;
+      // The exact seek, and the end of the gesture. Ordered so the player sees the final
+      // position *and* the end of scrubbing in one commit, which is what turns the last
+      // approximate seek into an exact one.
       onSeek(us, true);
       onDragChange(null);
     }, 140);
