@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeAudio, detectOnsets, findRuns, rmsEnvelope, toMono } from '../src/audio.js';
+import { analyzeAudio, detectOnsets, findRuns, rmsEnvelope, toMono, strongest } from '../src/audio.js';
 import { SILENCE_DB } from '../src/types.js';
 
 const RATE = 8000;
@@ -127,5 +127,43 @@ describe('toMono', () => {
   it('passes a mono buffer straight through', () => {
     const single = new Float32Array([0.25]);
     expect(toMono([single])).toBe(single);
+  });
+});
+
+describe('strongest', () => {
+  const at = (t: number, strength: number) => ({ t: t * 1_000_000, strength });
+
+  it('leaves a modest list alone', () => {
+    const found = [at(1, 0.2), at(2, 0.9), at(3, 0.4)];
+    expect(strongest(found, 5, 12)).toEqual(found);
+  });
+
+  /**
+   * The measurement that prompted this: 3,505 transients over a 27-minute recording — one
+   * every half second, which is every syllable of continuous speech rather than anything a
+   * person would call a hit. Peak-picking is doing its job; "hit" is the word that was
+   * wrong, and notability is inherently rate-limited.
+   */
+  it('thins a flood to a rate, keeping the sharpest', () => {
+    const flood = Array.from({ length: 600 }, (_, i) => at(i, (i % 10) / 10));
+    const kept = strongest(flood, 10, 12);
+
+    expect(kept).toHaveLength(120);
+    expect(Math.min(...kept.map((onset) => onset.strength))).toBeGreaterThan(0.5);
+    // Still in time order: the caller reads these as a timeline, not as a ranking.
+    expect(kept.map((onset) => onset.t)).toEqual([...kept.map((onset) => onset.t)].sort((a, b) => a - b));
+  });
+
+  it('scales with length rather than truncating the tail of a long take', () => {
+    const flood = Array.from({ length: 600 }, (_, i) => at(i, (i % 10) / 10));
+    // Thinning must not become "the first N": the last minute deserves the same treatment
+    // as the first, which a count-based cap silently denies it.
+    const kept = strongest(flood, 10, 12);
+    expect(kept.at(-1)!.t).toBeGreaterThan(590_000_000 * 0.9);
+  });
+
+  it('never leaves a short take with nothing', () => {
+    const few = Array.from({ length: 9 }, (_, i) => at(i, (i + 1) / 10));
+    expect(strongest(few, 0.1, 12).length).toBe(4);
   });
 });

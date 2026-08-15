@@ -72,7 +72,23 @@ const MIN_LUMA_INTERVAL_US = 500_000;
  * video. 144 gives ~81px for 9:16 and reads as an actual picture.
  */
 const FRAME_HEIGHT = 144;
-const SEEK_TIMEOUT_MS = 4000;
+/**
+ * How long to wait for one seek before giving up on that frame.
+ *
+ * Generous, because the alternative is what happened on a real 5.2 GB recording: this was
+ * four seconds, the audio demuxer was reading the same file over the same range server at
+ * the same time, seeks took longer than that, and the *first* timeout aborted the entire
+ * pass — so the motion signal came back empty for a whole session and nothing said why.
+ * A slow seek should cost one sample, not the recording.
+ */
+const SEEK_TIMEOUT_MS = 15_000;
+/**
+ * Opening a file is not seeking within it, and on a multi-gigabyte recording it is much
+ * slower — especially with the audio pass competing for the same disk.
+ */
+const OPEN_TIMEOUT_MS = 60_000;
+/** Consecutive failures that mean the media is gone rather than merely slow. */
+const MAX_CONSECUTIVE_FAILURES = 4;
 /** Motion is a coarse question; 32x32 answers it and costs a kilobyte a frame. */
 const LUMA_SIZE = 32;
 
@@ -249,7 +265,7 @@ async function extractFrames(
   const smallContext = small.getContext('2d', { willReadFrequently: true });
 
   try {
-    await once(video, 'loadeddata', SEEK_TIMEOUT_MS);
+    await once(video, 'loadeddata', OPEN_TIMEOUT_MS);
     if (!context || !video.videoWidth) return 9 / 16;
 
     const aspect = video.videoWidth / video.videoHeight;
@@ -267,24 +283,34 @@ async function extractFrames(
       };
     };
 
-    for (const t of plan.thumbnails) {
+    // A failed seek costs its own frame and nothing else. Aborting the pass on the first
+    // one is what emptied the motion signal on a large recording, and a strip with a gap
+    // in it is worth far more than no strip at all.
+    let consecutive = 0;
+    const seek = async (t: number): Promise<boolean> => {
       video.currentTime = t / 1_000_000;
-      await once(video, 'seeked', SEEK_TIMEOUT_MS);
+      try {
+        await once(video, 'seeked', SEEK_TIMEOUT_MS);
+        consecutive = 0;
+        return true;
+      } catch {
+        consecutive += 1;
+        return false;
+      }
+    };
+
+    for (const t of plan.thumbnails) {
+      if (consecutive >= MAX_CONSECUTIVE_FAILURES) break;
+      if (!(await seek(t))) continue;
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       handlers.onFrame({ t, url: canvas.toDataURL('image/jpeg', 0.6) }, sampleLuma(t), aspect);
     }
     handlers.onThumbnailsDone(aspect);
 
-    // From here on nothing on screen is waiting. A seek that fails takes the motion
-    // sample with it and leaves the strip, and the editor, exactly as they were.
+    // From here on nothing on screen is waiting.
     for (const t of plan.luma) {
-      video.currentTime = t / 1_000_000;
-      try {
-        await once(video, 'seeked', SEEK_TIMEOUT_MS);
-      } catch {
-        continue;
-      }
-      handlers.onLuma(sampleLuma(t), aspect);
+      if (consecutive >= MAX_CONSECUTIVE_FAILURES) break;
+      if (await seek(t)) handlers.onLuma(sampleLuma(t), aspect);
     }
 
     return aspect;

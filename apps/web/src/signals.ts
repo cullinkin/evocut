@@ -74,6 +74,17 @@ export interface SignalsReport {
   /** How many motion samples the analysis had to work with. */
   motionSamples: number;
   /**
+   * What the filmstrip pass managed, or why it managed nothing.
+   *
+   * Added after a session where motion came back empty and the row said only
+   * `motionSamples: 0` — true, useless, and indistinguishable between "the media would not
+   * open", "the seeks were too slow" and "this recording is one still frame".
+   */
+  motionNote: string;
+  /** The levels the quiet and hit thresholds are measured against. */
+  peakDb: number | null;
+  medianDb: number | null;
+  /**
    * What was found in the audio, or why nothing was.
    *
    * The single most useful row in the log when the suggestions come back thin. Without it
@@ -138,8 +149,8 @@ export function useSourceSignals(
         const started = Date.now();
         setProgress(0);
         const cached = await read(stores, source);
-        const computed = cached
-          ? { signals: cached, audioNote: 'cached' }
+        const computed: Measurement = cached
+          ? { signals: cached, audioNote: 'cached', motionNote: 'cached' }
           : await measure(stores, source, url, controller.signal, (fraction) => {
               if (live) setProgress(fraction);
             });
@@ -159,6 +170,9 @@ export function useSourceSignals(
             still: 0,
             hasAudio: false,
             motionSamples: 0,
+            motionNote: computed.motionNote,
+            peakDb: null,
+            medianDb: null,
             audioNote: computed.audioNote,
           });
           continue;
@@ -177,6 +191,12 @@ export function useSourceSignals(
           still: computed.signals.motion?.still.length ?? 0,
           hasAudio: computed.signals.audio !== null,
           motionSamples: computed.signals.motion?.motion.length ?? 0,
+          motionNote: computed.motionNote,
+          // The two numbers every threshold downstream is relative to. Without them a row
+          // reporting no quiet spans could mean silence was never found or that the
+          // recording genuinely has no floor, and those want different fixes.
+          peakDb: round(computed.signals.audio?.peakDb),
+          medianDb: round(computed.signals.audio?.medianDb),
           audioNote: computed.audioNote,
         });
       }
@@ -215,9 +235,14 @@ async function write(stores: AppStores, source: Source, signals: SourceSignals):
   await stores.derived.put(cacheKey(source), signals).catch(() => {});
 }
 
+function round(value: number | undefined): number | null {
+  return typeof value === 'number' ? Number(value.toFixed(1)) : null;
+}
+
 interface Measurement {
   signals: SourceSignals | null;
   audioNote: string;
+  motionNote: string;
 }
 
 async function measure(
@@ -232,7 +257,9 @@ async function measure(
     measureMotion(source, url),
   ]);
 
-  if (!audio.signals && !motion) return { signals: null, audioNote: audio.note };
+  if (!audio.signals && !motion.signals) {
+    return { signals: null, audioNote: audio.note, motionNote: motion.note };
+  }
   return {
     signals: {
       version: SIGNALS_VERSION,
@@ -240,10 +267,11 @@ async function measure(
       ...(source.contentHash ? { contentHash: source.contentHash } : {}),
       durationUs: source.duration,
       audio: audio.signals,
-      motion,
+      motion: motion.signals,
       computedAt: new Date().toISOString(),
     },
     audioNote: audio.note,
+    motionNote: motion.note,
   };
 }
 
@@ -298,11 +326,25 @@ async function measureAudio(
   }
 }
 
-async function measureMotion(source: Source, url: string): Promise<SourceSignals['motion']> {
+async function measureMotion(
+  source: Source,
+  url: string,
+): Promise<{ signals: SourceSignals['motion']; note: string }> {
   try {
     const strip = await loadFilmstrip(source.id, url, source.duration);
-    return analyzeMotion(strip.luma.filter((sample) => sample.luma.length > 0));
-  } catch {
-    return null;
+    const usable = strip.luma.filter((sample) => sample.luma.length > 0);
+    if (usable.length < 2) {
+      return {
+        signals: null,
+        note: `filmstrip returned ${strip.frames.length} frames and ${usable.length} usable samples`,
+      };
+    }
+    const spacing = (usable.at(-1)!.t - usable[0]!.t) / Math.max(1, usable.length - 1) / 1_000_000;
+    return {
+      signals: analyzeMotion(usable),
+      note: `${usable.length} samples, one every ${spacing.toFixed(1)}s`,
+    };
+  } catch (cause) {
+    return { signals: null, note: cause instanceof Error ? cause.message : String(cause) };
   }
 }

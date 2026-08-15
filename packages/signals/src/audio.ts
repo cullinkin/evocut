@@ -29,6 +29,16 @@ export interface AudioAnalysisOptions {
   minQuietMs?: number;
   /** Two transients closer than this are one transient. */
   minOnsetGapMs?: number;
+  /**
+   * Ceiling on how many transients a minute of recording may contribute.
+   *
+   * Peak-picking against a rolling median finds every syllable in continuous speech, which
+   * on a real 27-minute take came to 3,505 "hits" — one every half second, and nothing a
+   * person would call emphasis. The measurement is not wrong; the word is. A hit is a
+   * notable event, and notability is inherently rate-limited, so the strongest survive and
+   * the rest are counted rather than listed.
+   */
+  maxOnsetsPerMinute?: number;
 }
 
 const DEFAULTS = {
@@ -36,6 +46,7 @@ const DEFAULTS = {
   quietBelowDb: -18,
   minQuietMs: 600,
   minOnsetGapMs: 150,
+  maxOnsetsPerMinute: 12,
 } satisfies Required<AudioAnalysisOptions>;
 
 export function analyzeAudio(
@@ -56,7 +67,11 @@ export function analyzeAudio(
     loudness,
     peakDb,
     medianDb,
-    onsets: detectOnsets(loudness, hopUs, settings.minOnsetGapMs),
+    onsets: strongest(
+      detectOnsets(loudness, hopUs, settings.minOnsetGapMs),
+      (loudness.length * hopUs) / 60_000_000,
+      settings.maxOnsetsPerMinute,
+    ),
     // Measured against this recording's own median rather than an absolute level. A take
     // shot at arm's length in a quiet room and one shouted into the wind have nothing in
     // common on an absolute scale, and both have obvious pauses.
@@ -126,6 +141,22 @@ export function detectOnsets(loudness: number[], hopUs: number, minGapMs: number
   }
 
   return found;
+}
+
+/**
+ * Thin a list of transients to a rate, keeping the sharpest and restoring time order.
+ *
+ * Rate rather than a fixed count, because the same recording cut in half should yield the
+ * same events; and sharpest rather than first, because the alternative is a list that
+ * stops partway through the video.
+ */
+export function strongest(onsets: Onset[], minutes: number, perMinute: number): Onset[] {
+  const keep = Math.max(4, Math.round(Math.max(minutes, 1 / 60) * perMinute));
+  if (onsets.length <= keep) return onsets;
+  return [...onsets]
+    .sort((a, b) => b.strength - a.strength)
+    .slice(0, keep)
+    .sort((a, b) => a.t - b.t);
 }
 
 function maxOf(values: number[], fallback: number): number {
