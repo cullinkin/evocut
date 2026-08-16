@@ -65,7 +65,7 @@ export function SuggestionSheet({
   return (
     <div className="sheet" role="dialog" aria-label="Suggested edit">
       <div className="sheet-head">
-        <button className="ghost small" onClick={onClose} aria-label="Close">
+        <button className="close" onClick={onClose} aria-label="Close">
           ✕
         </button>
         <span className="sheet-count">

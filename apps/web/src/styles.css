@@ -906,6 +906,44 @@ button.ghost.small {
   align-self: center;
 }
 
+/* --- Buttons that look like buttons ---------------------------------------------------
+   The sheet actions were `ghost` — text on the sheet's own background with no fill, which
+   on a phone reads as a caption rather than as something to press. They are plain buttons
+   now, which already carry a fill; Auto is `primary` because it is the one that does the
+   work.
+
+   The close control is the same on every sheet now: a round target big enough for a
+   thumb, on its own fill, so it does not read as decoration in the corner. */
+button.close {
+  flex: 0 0 auto;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 0;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+}
+
+button.close:active {
+  background: var(--accent);
+  color: #0b0b0f;
+}
+
+button.primary.small {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .sliders {
   display: flex;
   flex-direction: column;

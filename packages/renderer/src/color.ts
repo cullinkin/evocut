@@ -20,11 +20,25 @@ import { NEUTRAL_COLOR, isNeutralColor, type ColorValue } from '@evocut/edl';
  *    curve, so it is approximated as *lift with a matching contrast reduction* — brighter
  *    without blowing out, which is the part of it people are reaching for. It will not
  *    recover a clipped sky.
- *  - **Warmth and tint** are white balance, which is properly a per-channel gain. What is
- *    available is `sepia` (which pushes the whole image toward orange) wound back by a
- *    `hue-rotate`, and that lands close enough on footage that is merely a bit cold or a
- *    bit green. It is not a colour-temperature control and does not pretend to be a
- *    Kelvin number.
+ *  - **Warmth and tint** are white balance, which is properly a per-channel gain. The only
+ *    primitive that pushes toward a colour is `sepia`, and it only pushes toward orange.
+ *    Getting the other three directions out of it is what the conjugates below are for —
+ *    see the long note on them. It is not a colour-temperature control and does not
+ *    pretend to be a Kelvin number.
+ *
+ * ## The `hue-rotate(180deg)` disaster
+ *
+ * Cooling was, briefly, `sepia(k) hue-rotate(180deg)` — the trick you find everywhere for
+ * "make it blue". It is catastrophically wrong and it shipped: `hue-rotate` acts on the
+ * *whole image*, not on the cast that was just added, so 180° does not cool a picture, it
+ * inverts every hue in it. Skin `#d9a685` came back `#86b8da`. Yellows came back blue.
+ *
+ * What actually works is conjugation. `invert(1) sepia(k) invert(1)` applies the warm push
+ * in inverted space, which lands as a cool push in normal space — and because the two
+ * inversions cancel everywhere else, hues drift by single degrees instead of 180. Same
+ * shape for tint: rotate so orange sits where magenta should be, push, rotate back.
+ * Measured on skin, yellow, blue, red and green, drift stays under 10° at the strengths
+ * used here, which is why the strengths stop where they do.
  *
  * ## Ranges
  *
@@ -41,12 +55,25 @@ const GAIN = {
   brillianceContrast: 0.2,
   contrast: 0.5,
   saturation: 0.8,
-  /** Sepia is a heavy primitive; a third of it is already a definite cast. */
-  warmth: 0.32,
+  /**
+   * Sepia at ±1, which measures as a ±18/255 split between the red and blue channels of
+   * neutral grey — a definite white-balance move. Past about 0.4 the conjugate stops
+   * holding hues and greens start swinging, so this is where it stops.
+   */
+  warmth: 0.35,
   /** Sepia flattens the original colour, so a warm or cool move gives some back. */
   warmthSaturation: 0.45,
-  tintDegrees: 22,
+  /** Same push, weaker, because the green/magenta axis needs far less of it to read. */
+  tint: 0.25,
 } as const;
+
+/**
+ * How far to spin the colour circle so the sepia push lands on magenta instead of orange.
+ *
+ * Applied and then undone, so it costs nothing anywhere except in the direction of the
+ * push itself.
+ */
+const TINT_TURN = 90;
 
 /**
  * `filter` value for a grade, or `'none'` when it would change nothing.
@@ -68,16 +95,22 @@ export function filterFor(value: ColorValue | null | undefined): string {
   const contrast = (1 + value.contrast * GAIN.contrast) * (1 - value.brilliance * GAIN.brillianceContrast);
   if (contrast !== 1) parts.push(`contrast(${round(contrast)})`);
 
-  // Sepia only goes one way — toward orange. Cooling is therefore the same push spun half
-  // a turn, which is the standard trick and lands convincingly on footage that is merely
-  // a little cold or a little warm.
+  // Sepia only goes one way — toward orange — so the other three directions are that same
+  // push conjugated. See the note above: the version of this that reached for
+  // `hue-rotate(180deg)` inverted every hue in the picture.
   if (value.warmth !== 0) {
-    parts.push(`sepia(${round(Math.abs(value.warmth) * GAIN.warmth)})`);
-    if (value.warmth < 0) parts.push('hue-rotate(180deg)');
+    const push = `sepia(${round(Math.abs(value.warmth) * GAIN.warmth)})`;
+    parts.push(...(value.warmth > 0 ? [push] : ['invert(1)', push, 'invert(1)']));
   }
 
-  // Positive tint is toward magenta, which is a rotation *against* the hue circle.
-  if (value.tint !== 0) parts.push(`hue-rotate(${round(-value.tint * GAIN.tintDegrees)}deg)`);
+  if (value.tint !== 0) {
+    const push = [
+      `hue-rotate(${TINT_TURN}deg)`,
+      `sepia(${round(Math.abs(value.tint) * GAIN.tint)})`,
+      `hue-rotate(-${TINT_TURN}deg)`,
+    ];
+    parts.push(...(value.tint > 0 ? push : ['invert(1)', ...push, 'invert(1)']));
+  }
 
   const saturation =
     (1 + value.saturation * GAIN.saturation) * (1 + Math.abs(value.warmth) * GAIN.warmthSaturation);

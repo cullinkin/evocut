@@ -76,7 +76,7 @@ export function Review({
   return (
     <section className="sheet review" role="dialog" aria-label="All suggestions">
       <div className="sheet-head">
-        <button className="ghost small" onClick={onClose} aria-label="Close">
+        <button className="close" onClick={onClose} aria-label="Close">
           ✕
         </button>
         <span className="sheet-count">

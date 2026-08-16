@@ -130,13 +130,13 @@ export function AdjustSheet({
   return (
     <div className="sheet adjust" role="dialog" aria-label="Adjust">
       <div className="sheet-head">
-        <button className="ghost small" onClick={onClose} aria-label="Close">
+        <button className="close" onClick={onClose} aria-label="Close">
           ✕
         </button>
         <span className="sheet-count">
           Adjust{clipNumber === null ? '' : ` · clip ${clipNumber} of ${clipCount}`}
         </span>
-        <button className="ghost small auto" onClick={auto}>
+        <button className="primary small auto" onClick={auto}>
           Auto
         </button>
       </div>
@@ -164,11 +164,10 @@ export function AdjustSheet({
       {note && <p className="meta">{note}</p>}
 
       <div className="sheet-actions">
-        <button className="ghost" onClick={() => onChange({ ...NEUTRAL_COLOR })} disabled={!touched}>
+        <button onClick={() => onChange({ ...NEUTRAL_COLOR })} disabled={!touched}>
           Reset
         </button>
         <button
-          className="ghost"
           onClick={() => onApplyToAll(touched ? value : null)}
           disabled={clipCount < 2}
         >
