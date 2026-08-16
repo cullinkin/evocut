@@ -18,6 +18,12 @@ import { formatTimecode } from '@evocut/edl';
  *
  * Nobody wants 1.7×. They want the shot two seconds shorter. Both are on screen, and the
  * resulting length is the larger of the two.
+ *
+ * ## No undo here
+ *
+ * The other panels carry undo and redo over their drafts, because a grade is six values and
+ * a move is a list. This is one number with a visible Reset and a row of exact marks, and
+ * an undo for it would be a button that does what the 1× mark already does.
  */
 export interface SpeedProps {
   clipNumber: number | null;
@@ -59,7 +65,7 @@ export function positionOf(speed: number): number {
 /** The speeds worth a labelled tick, in the order they sit on the track. */
 const MARKS = [0.25, 0.5, 1, 2, 5, 10, 20];
 
-export function SpeedSheet({
+export function SpeedPanel({
   clipNumber,
   sourceDurationUs,
   value,
@@ -70,24 +76,22 @@ export function SpeedSheet({
   const outputUs = Math.round(sourceDurationUs / Math.max(MIN_SPEED, value));
 
   return (
-    <div className="sheet speed" role="dialog" aria-label="Speed">
-      <div className="sheet-head">
+    <section className="panel speed" aria-label="Speed">
+      <div className="panel-top">
+        <span className="speed-readout">
+          <strong>{value}×</strong>
+        </span>
+        <span className="panel-title">
+          {clipNumber === null ? 'Speed' : `Clip ${clipNumber}`}
+          <em>
+            {formatTimecode(sourceDurationUs, undefined, { compact: true })} →{' '}
+            {formatTimecode(outputUs, undefined, { compact: true })}
+          </em>
+        </span>
         <button className="close" onClick={onClose} aria-label="Close">
           ✕
         </button>
-        <span className="sheet-count">Speed{clipNumber === null ? '' : ` · clip ${clipNumber}`}</span>
-        <button className="primary small auto" onClick={() => onChange(1)} disabled={value === 1}>
-          Normal
-        </button>
       </div>
-
-      <p className="speed-readout">
-        <strong>{value}×</strong>
-        <em>
-          {formatTimecode(sourceDurationUs, undefined, { compact: true })} →{' '}
-          {formatTimecode(outputUs, undefined, { compact: true })}
-        </em>
-      </p>
 
       <label className="slider wide">
         <input
@@ -113,20 +117,14 @@ export function SpeedSheet({
         ))}
       </div>
 
-      <p className="meta">
-        The audio speeds up with the picture. Past about 2× that stops sounding like a fast
-        version of the take and starts sounding like a different one, so the sound is usually
-        worth muting on the clip once you go far.
-      </p>
-
-      <div className="sheet-actions">
-        <button onClick={() => onChange(1)} disabled={value === 1}>
+      <div className="panel-actions">
+        <button className="ghost" onClick={() => onChange(1)} disabled={value === 1}>
           Reset
         </button>
-        <button className="primary" onClick={() => onCommit(value)}>
-          Done
+        <button className="primary confirm" onClick={() => onCommit(value)} aria-label="Done">
+          ✓
         </button>
       </div>
-    </div>
+    </section>
   );
 }

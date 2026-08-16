@@ -42,11 +42,23 @@ check('anUntouchedClipHasNoFilter', before === '' || before === 'none', true);
 
 // --- The sliders reach the picture -----------------------------------------------------
 await openClipTool(page, 'Adjust');
-await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
+await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
 
-const slider = (name) => page.locator(`.sheet.adjust input[aria-label^="${name}"]`);
-await slider('Saturation').fill('60');
-await slider('Contrast').fill('40');
+/*
+  The panel takes the toolbar's place rather than covering the timeline, and shows one
+  control at a time behind a tab strip — six sliders stacked is a sheet, and a sheet is
+  what this stopped being.
+*/
+check('theTimelineStaysUsableWhileGrading', await page.locator('.timeline-scroller').isVisible(), true);
+check('andThePreviewKeepsItsHeight', await page.locator('.player video.live').isVisible(), true);
+check('oneSliderAtATime', await page.locator('.panel.adjust input[type=range]').count(), 1);
+
+const tab = (name) => page.locator(`.panel.adjust .tab:has-text("${name}")`);
+const slider = () => page.locator('.panel.adjust input[type=range]');
+await tab('Saturation').click();
+await slider().fill('60');
+await tab('Contrast').click();
+await slider().fill('40');
 await page.waitForTimeout(200);
 
 const live = await filter();
@@ -55,7 +67,7 @@ check('theSliderShowsOnThePicture', /saturate\(/.test(live) && /contrast\(/.test
 await page.screenshot({ path: artifact('adjust-sheet.png') });
 
 // The draft is not the edit: nothing should be in the EDL until Done.
-await page.locator('.sheet-actions .primary').click();
+await page.locator('.panel.adjust button[aria-label="Done"]').click();
 await page.waitForTimeout(400);
 
 const graded = await exportEdl(page, 'adjust-one.json');
@@ -72,11 +84,25 @@ check('andItIsASetColorOp', graded.revisions.at(-1).ops[0].op, 'setColor');
 
 // --- Apply to all ----------------------------------------------------------------------
 await openClipTool(page, 'Adjust');
-await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
+await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
 // It reopens on the grade the clip already has, rather than on zero.
-check('theSheetReopensOnWhatIsThere', await slider('Saturation').inputValue(), '60');
-await slider('Exposure').fill('-25');
-await page.locator('.sheet-actions button:has-text("Apply to all")').click();
+await tab('Saturation').click();
+check('theSheetReopensOnWhatIsThere', await slider().inputValue(), '60');
+await tab('Exposure').click();
+await slider().fill('-25');
+
+// Undo and redo walk the panel's own draft — six controls is enough that a nudge too far
+// should cost one tap rather than a reset and a redo of everything.
+await page.locator('.panel.adjust button[aria-label="Undo adjustment"]').click();
+await page.waitForTimeout(150);
+const undone = await slider().inputValue();
+await page.locator('.panel.adjust button[aria-label="Redo adjustment"]').click();
+await page.waitForTimeout(150);
+set('undoRedo', { undone, redone: await slider().inputValue() });
+check('undoTookTheNudgeBack', undone !== '-25', true);
+check('andRedoPutItBack', await slider().inputValue(), '-25');
+
+await page.locator('.panel.adjust button:has-text("Apply to all")').click();
 await page.waitForTimeout(500);
 
 const all = await exportEdl(page, 'adjust-all.json');
@@ -100,15 +126,22 @@ check('appliedAsASingleRevision', all.revisions.at(-1).ops.length, 3);
  * or failing silently has nothing.
  */
 await openClipTool(page, 'Adjust');
-await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
-await page.locator('.sheet-actions button:has-text("Reset")').click();
-await page.locator('.sheet.adjust button:has-text("Auto")').click();
+await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
+await page.locator('.panel.adjust button:has-text("Reset")').click();
+await page.locator('.panel.adjust button:has-text("Auto")').click();
 await page.waitForTimeout(300);
 
-const autoValues = await page.evaluate(() =>
-  [...document.querySelectorAll('.sheet.adjust input[type=range]')].map((input) => Number(input.value)),
-);
-const autoNote = await page.locator('.sheet.adjust .meta').first().innerText();
+// One slider is on screen, so the proposal is read off every tab in turn.
+const everySlider = async () => {
+  const out = [];
+  for (const control of ['Exposure', 'Brilliance', 'Contrast', 'Saturation', 'Warmth', 'Tint']) {
+    await tab(control).click();
+    out.push(Number(await slider().inputValue()));
+  }
+  return out;
+};
+const autoValues = await everySlider();
+const autoNote = await page.locator('.panel-title em').innerText();
 set('autoValues', autoValues);
 set('autoNote', autoNote);
 check('autoProposedSomething', autoValues.some((amount) => amount !== 0), true);
@@ -116,14 +149,12 @@ check('autoStayedWithinTheSliders', autoValues.every((amount) => Math.abs(amount
 check('autoSaidWhatItDid', /Adjusted from the frame|already looks about right/.test(autoNote), true);
 // Idempotent, because it reads the undecorated frame rather than the one it just graded —
 // otherwise tapping it twice would compound and the third tap would be unusable.
-await page.locator('.sheet.adjust button:has-text("Auto")').click();
+await page.locator('.panel.adjust button:has-text("Auto")').click();
 await page.waitForTimeout(300);
-const twice = await page.evaluate(() =>
-  [...document.querySelectorAll('.sheet.adjust input[type=range]')].map((input) => Number(input.value)),
-);
+const twice = await everySlider();
 set('autoTwice', twice);
 check('autoDoesNotCompoundOnItself', twice, autoValues);
-await page.locator('.sheet-head button[aria-label="Close"]').click();
+await page.locator('.panel.adjust button[aria-label="Close"]').click();
 await page.waitForTimeout(300);
 // Cancelled, so nothing it proposed should have reached the EDL.
 const cancelled = await exportEdl(page, 'adjust-cancelled.json');
@@ -151,9 +182,9 @@ check('andIsPaintedOnTheRestoredPreview', /brightness\(/.test(restored), true);
 
 // --- Reset -----------------------------------------------------------------------------
 await openClipTool(page, 'Adjust');
-await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
-await page.locator('.sheet-actions button:has-text("Reset")').click();
-await page.locator('.sheet-actions .primary').click();
+await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
+await page.locator('.panel.adjust button:has-text("Reset")').click();
+await page.locator('.panel.adjust button[aria-label="Done"]').click();
 await page.waitForTimeout(400);
 
 const cleared = await exportEdl(page, 'adjust-reset.json');

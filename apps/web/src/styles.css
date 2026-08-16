@@ -896,14 +896,8 @@ button.ghost.small {
    this sheet is capped low enough that the preview above it stays on screen while a
    slider moves. Everything here is sized for a thumb on the move rather than a cursor. */
 
-.sheet.adjust {
-  max-height: 56vh;
-  gap: 8px;
-}
-
-.sheet.adjust .auto {
-  margin-left: auto;
-  align-self: center;
+.panel .auto {
+  flex: 0 0 auto;
 }
 
 /* --- Buttons that look like buttons ---------------------------------------------------
@@ -960,8 +954,16 @@ button.primary.small {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+  gap: 10px;
   font-size: 13px;
   color: var(--muted);
+}
+
+.slider-name small {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .slider-name em {
@@ -1424,21 +1426,12 @@ fieldset.duration legend {
    phone cannot reliably land on exactly 2x. */
 
 .speed-readout {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin: 0;
+  flex: 0 0 auto;
+  min-width: 60px;
 }
 
 .speed-readout strong {
-  font-size: 30px;
-  font-variant-numeric: tabular-nums;
-}
-
-.speed-readout em {
-  font-style: normal;
-  color: var(--muted);
-  font-size: 13px;
+  font-size: 22px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1540,10 +1533,19 @@ button.key-toggle.on {
 .tabs {
   display: flex;
   gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* A horizontal strip inside a fixed-viewport editor: let it pan, and only it. */
+  touch-action: pan-x;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 
 button.tab {
-  flex: 1;
+  flex: 1 0 auto;
+  white-space: nowrap;
   min-height: 36px;
   padding: 0 8px;
   border: 0;

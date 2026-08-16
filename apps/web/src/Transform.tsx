@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { formatTimecode, sampleTransform, type Easing, type TransformValue } from '@evocut/edl';
+import { PanelHistory, PanelTabs, useDraftHistory } from './panel.tsx';
 import { usePlayhead } from './playhead.ts';
 
 /**
@@ -128,59 +129,25 @@ export function TransformPanel({
   const playhead = usePlayhead();
   const atUs = Math.max(0, Math.min(durationUs, playhead - clipStartUs));
 
-  /*
-    Local undo, over the draft.
-
-    Two stacks and a flag, because every `onChange` from a slider would otherwise push a
-    history entry per pixel of travel. `stepping` marks the changes this panel made on
-    purpose — an undo, a redo — so they replace the present rather than being recorded as
-    new states to undo back to.
-  */
-  const past = useRef<Keyframe[][]>([]);
-  const future = useRef<Keyframe[][]>([]);
-  const [depth, setDepth] = useState({ back: 0, forward: 0 });
-  const remember = useCallback(
-    (before: Keyframe[]) => {
-      past.current = [...past.current.slice(-40), before];
-      future.current = [];
-      setDepth({ back: past.current.length, forward: 0 });
-    },
-    [],
-  );
+  const history = useDraftHistory(keyframes, onChange);
 
   const current = useMemo(() => valueAt(keyframes, atUs), [keyframes, atUs]);
   const here = useMemo(() => keyframeAt(keyframes, atUs), [keyframes, atUs]);
 
   const set = useCallback(
     (key: keyof TransformValue, amount: number) => {
-      remember(keyframes);
+      history.remember(keyframes);
       onChange(writeAt(keyframes, atUs, { ...current, [key]: amount }));
     },
-    [atUs, current, keyframes, onChange, remember],
+    [atUs, current, history, keyframes, onChange],
   );
 
   const toggleKeyframe = useCallback(() => {
-    remember(keyframes);
+    history.remember(keyframes);
     onChange(
       here ? keyframes.filter((keyframe) => keyframe !== here) : writeAt(keyframes, atUs, current),
     );
-  }, [atUs, current, here, keyframes, onChange, remember]);
-
-  const undo = useCallback(() => {
-    const previous = past.current.pop();
-    if (!previous) return;
-    future.current = [...future.current, keyframes];
-    setDepth({ back: past.current.length, forward: future.current.length });
-    onChange(previous);
-  }, [keyframes, onChange]);
-
-  const redo = useCallback(() => {
-    const next = future.current.pop();
-    if (!next) return;
-    past.current = [...past.current, keyframes];
-    setDepth({ back: past.current.length, forward: future.current.length });
-    onChange(next);
-  }, [keyframes, onChange]);
+  }, [atUs, current, here, history, keyframes, onChange]);
 
   const active = TABS.find((entry) => entry.id === tab) ?? TABS[0]!;
 
@@ -202,30 +169,13 @@ export function TransformPanel({
             {keyframes.length > 0 && ` · ${keyframes.length} key${keyframes.length === 1 ? '' : 's'}`}
           </em>
         </span>
-        <button className="icon" onClick={undo} disabled={depth.back === 0} aria-label="Undo framing">
-          ⤺
-        </button>
-        <button className="icon" onClick={redo} disabled={depth.forward === 0} aria-label="Redo framing">
-          ⤻
-        </button>
+        <PanelHistory {...history} what="framing" />
         <button className="close" onClick={onClose} aria-label="Close">
           ✕
         </button>
       </div>
 
-      <div className="tabs" role="tablist">
-        {TABS.map((entry) => (
-          <button
-            key={entry.id}
-            role="tab"
-            aria-selected={entry.id === tab}
-            className={entry.id === tab ? 'tab on' : 'tab'}
-            onClick={() => setTab(entry.id)}
-          >
-            {entry.label}
-          </button>
-        ))}
-      </div>
+      <PanelTabs tabs={TABS.map((entry) => ({ id: entry.id, label: entry.label }))} active={tab} onPick={setTab} />
 
       <div className="sliders">
         {active.controls.map((control) => (
@@ -254,7 +204,7 @@ export function TransformPanel({
         <button
           className="ghost"
           onClick={() => {
-            remember(keyframes);
+            history.remember(keyframes);
             onChange([]);
           }}
           disabled={keyframes.length === 0}

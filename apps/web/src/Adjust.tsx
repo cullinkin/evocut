@@ -1,16 +1,18 @@
 import { useCallback, useRef, useState } from 'react';
 import { NEUTRAL_COLOR, isNeutralColor, type ColorValue } from '@evocut/edl';
 import { autoColor, measureFrame } from '@evocut/renderer';
+import { PanelHistory, PanelTabs, useDraftHistory } from './panel.tsx';
 
 /**
  * Colour and tone, for one clip or for all of them.
  *
- * ## The sheet is short on purpose
+ * ## One control at a time
  *
- * A colour control you cannot see the result of is a set of numbers. This sheet is capped
- * at just over half the screen so the preview above it stays visible, and every change
- * shows there immediately — the draft is held here and handed to the player, which paints
- * it with the same `filter` string the export will use. Nothing reaches the EDL until Done.
+ * This was six sliders in a bottom sheet, which covered the timeline and took most of the
+ * screen — so you were grading a picture you could barely see, with no way to move to the
+ * next shot without closing it. It is a panel now: it takes the toolbar's place under the
+ * timeline, the preview keeps its full height, and the six controls live behind a tab strip
+ * so only one slider is ever on screen. Scrub to another clip and the panel follows.
  *
  * ## Auto
  *
@@ -61,7 +63,7 @@ const CONTROLS: Control[] = [
 /** Width the frame is measured at. Enough pixels for a histogram, few enough to be free. */
 const SAMPLE_WIDTH = 128;
 
-export function AdjustSheet({
+export function AdjustPanel({
   clipNumber,
   clipCount,
   value,
@@ -71,8 +73,10 @@ export function AdjustSheet({
   onApplyToAll,
   onClose,
 }: AdjustProps) {
+  const [tab, setTab] = useState<keyof ColorValue>('exposure');
   const [note, setNote] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const history = useDraftHistory(value, onChange);
 
   /*
     Controlled, with the draft living one level up.
@@ -85,9 +89,10 @@ export function AdjustSheet({
   const set = useCallback(
     (key: keyof ColorValue, amount: number) => {
       setNote(null);
+      history.remember(value);
       onChange({ ...value, [key]: amount });
     },
-    [onChange, value],
+    [history, onChange, value],
   );
 
   const auto = useCallback(() => {
@@ -112,76 +117,92 @@ export function AdjustSheet({
       ctx.drawImage(video, 0, 0, SAMPLE_WIDTH, height);
       const pixels = ctx.getImageData(0, 0, SAMPLE_WIDTH, height).data;
       const proposed = autoColor(measureFrame(pixels));
+      history.remember(value);
       onChange(proposed);
       setNote(
         isNeutralColor(proposed)
-          ? 'This frame already looks about right — nothing to change.'
-          : 'Adjusted from the frame on screen. Nudge anything that went too far.',
+          ? 'This frame already looks about right.'
+          : 'Adjusted from the frame on screen.',
       );
     } catch {
       // A tainted canvas: the media came from somewhere this page may not read pixels
       // from. Nothing is broken, the sliders still work, and saying so beats a dead button.
       setNote('This video will not let its pixels be read, so Auto is unavailable here.');
     }
-  }, [onChange, videoFor]);
+  }, [history, onChange, value, videoFor]);
 
   const touched = !isNeutralColor(value);
+  const control = CONTROLS.find((entry) => entry.key === tab) ?? CONTROLS[0]!;
 
   return (
-    <div className="sheet adjust" role="dialog" aria-label="Adjust">
-      <div className="sheet-head">
-        <button className="close" onClick={onClose} aria-label="Close">
-          ✕
-        </button>
-        <span className="sheet-count">
-          Adjust{clipNumber === null ? '' : ` · clip ${clipNumber} of ${clipCount}`}
-        </span>
+    <section className="panel adjust" aria-label="Adjust">
+      <div className="panel-top">
         <button className="primary small auto" onClick={auto}>
           Auto
         </button>
+        <span className="panel-title">
+          {clipNumber === null ? 'Adjust' : `Clip ${clipNumber}`}
+          <em>{note ?? (touched ? 'Adjusted' : 'Not adjusted')}</em>
+        </span>
+        <PanelHistory {...history} what="adjustment" />
+        <button className="close" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
       </div>
+
+      <PanelTabs
+        tabs={CONTROLS.map((entry) => ({ id: entry.key, label: entry.label }))}
+        active={tab}
+        onPick={setTab}
+      />
 
       <div className="sliders">
-        {CONTROLS.map((control) => (
-          <label key={control.key} className="slider">
-            <span className="slider-name">
-              {control.label}
-              <em>{format(value[control.key])}</em>
-            </span>
-            <input
-              type="range"
-              min={-100}
-              max={100}
-              step={1}
-              value={Math.round(value[control.key] * 100)}
-              onChange={(event) => set(control.key, Number(event.target.value) / 100)}
-              aria-label={`${control.label}, ${control.low} to ${control.high}`}
-            />
-          </label>
-        ))}
+        <label className="slider">
+          <span className="slider-name">
+            <small>
+              {control.low} · {control.high}
+            </small>
+            <em>{format(value[control.key])}</em>
+          </span>
+          <input
+            type="range"
+            min={-100}
+            max={100}
+            step={1}
+            value={Math.round(value[control.key] * 100)}
+            onChange={(event) => set(control.key, Number(event.target.value) / 100)}
+            aria-label={`${control.label}, ${control.low} to ${control.high}`}
+          />
+        </label>
       </div>
 
-      {note && <p className="meta">{note}</p>}
-
-      <div className="sheet-actions">
-        <button onClick={() => onChange({ ...NEUTRAL_COLOR })} disabled={!touched}>
+      <div className="panel-actions">
+        <button
+          className="ghost"
+          onClick={() => {
+            history.remember(value);
+            onChange({ ...NEUTRAL_COLOR });
+          }}
+          disabled={!touched}
+        >
           Reset
         </button>
         <button
+          className="ghost"
           onClick={() => onApplyToAll(touched ? value : null)}
           disabled={clipCount < 2}
         >
           Apply to all
         </button>
-        <button className="primary" onClick={() => onCommit(touched ? value : null)}>
-          Done
+        <button
+          className="primary confirm"
+          onClick={() => onCommit(touched ? value : null)}
+          aria-label="Done"
+        >
+          ✓
         </button>
       </div>
-      <p className="meta">
-        “Apply to all” puts this exact adjustment on every clip in the timeline, so footage
-        shot over an hour in one room ends up matching.
-      </p>
-    </div>
+    </section>
   );
 }
 

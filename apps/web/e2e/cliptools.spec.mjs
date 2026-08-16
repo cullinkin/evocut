@@ -136,10 +136,11 @@ check('andItIsASetTransform', framed.revisions.at(-1).ops[0].op, 'setTransform')
 // --- Speed: the fine half is actually fine ---------------------------------------------
 await page.locator('.clip-block').nth(2).click();
 await openTool('Speed');
-await page.locator('.sheet.speed').waitFor({ timeout: 5000 });
+await page.locator('.panel.speed').waitFor({ timeout: 5000 });
+check('theTimelineStaysUsableWhileRetiming', await page.locator('.timeline-scroller').isVisible(), true);
 
-const speedSlider = page.locator('.sheet.speed input[type=range]');
-const readout = () => page.locator('.speed-readout strong').innerText();
+const speedSlider = page.locator('.panel.speed input[type=range]');
+const readout = () => page.locator('.panel.speed .speed-readout strong').innerText();
 
 await speedSlider.fill('400'); // Middle of the fine half.
 const mid = await readout();
@@ -157,10 +158,10 @@ check('theSliderStillReachesTwenty', asNumber(await readout()), 20);
 await page.locator('.speed-marks .tick:has-text("2×")').click();
 check('aTickSetsItExactly', asNumber(await readout()), 2);
 // And the length it produces is on screen, which is the number anyone actually wants.
-set('speedReadout', await page.locator('.speed-readout em').innerText());
-check('itSaysWhatTheClipBecomes', /→/.test(await page.locator('.speed-readout em').innerText()), true);
+set('speedReadout', await page.locator('.panel.speed .panel-title em').innerText());
+check('itSaysWhatTheClipBecomes', /→/.test(await page.locator('.panel.speed .panel-title em').innerText()), true);
 
-await page.locator('.sheet.speed .sheet-actions .primary').click();
+await page.locator('.panel.speed button[aria-label="Done"]').click();
 await page.waitForTimeout(400);
 
 const retimed = await exportEdl(page, 'tools-speed.json');
@@ -172,9 +173,10 @@ check('andOnlyOnThatClip', retimed.timeline.tracks[0].clips[0].speed, 1);
 // Clip 2 carries the move, so grading it too makes "did the copy bring them" one question.
 await page.locator('.clip-block').nth(1).click();
 await openTool('Adjust');
-await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
-await page.locator('.sheet.adjust input[aria-label^="Saturation"]').fill('45');
-await page.locator('.sheet.adjust .sheet-actions .primary').click();
+await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
+await page.locator('.panel.adjust .tab:has-text("Saturation")').click();
+await page.locator('.panel.adjust input[type=range]').fill('45');
+await page.locator('.panel.adjust button[aria-label="Done"]').click();
 await page.waitForTimeout(400);
 
 await page.locator('.clip-block').nth(1).click();

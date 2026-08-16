@@ -9,8 +9,8 @@ import {
   type ColorValue,
 } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
-import { AdjustSheet } from './Adjust.tsx';
-import { SpeedSheet } from './Speed.tsx';
+import { AdjustPanel } from './Adjust.tsx';
+import { SpeedPanel } from './Speed.tsx';
 import { TransformPanel, type Keyframe } from './Transform.tsx';
 import { BriefSheet } from './Brief.tsx';
 import { ExportPanel } from './Export.tsx';
@@ -203,6 +203,7 @@ export function App() {
 
   const framingClip = framing ? clips.find((clip) => clip.id === framing.clipId) ?? null : null;
   const retimingClip = retiming ? clips.find((clip) => clip.id === retiming.clipId) ?? null : null;
+  const adjustingClip = adjusting ? clips.find((clip) => clip.id === adjusting.clipId) ?? null : null;
   const framingDuration = framingClip
     ? Math.round((framingClip.sourceOut - framingClip.sourceIn) / framingClip.speed)
     : 0;
@@ -335,9 +336,9 @@ export function App() {
       />
 
       {/*
-        While framing, the panel *replaces* the toolbar rather than covering the timeline.
-        That is the whole design: the preview keeps its height, the timeline stays where it
-        always is and stays live, and keys drop at the playhead you scrub to with it.
+        A clip tool *replaces* the toolbar rather than covering the timeline. That is the
+        whole design: the preview keeps its height, the timeline stays where it always is
+        and stays live, and every tool is used against the edit rather than on top of it.
       */}
       {framing && framingClip ? (
         <TransformPanel
@@ -351,6 +352,38 @@ export function App() {
             setFraming(null);
           }}
           onClose={() => setFraming(null)}
+        />
+      ) : adjusting && adjustingClip ? (
+        <AdjustPanel
+          clipNumber={clips.indexOf(adjustingClip) + 1 || null}
+          clipCount={clips.length}
+          value={adjusting.value}
+          // Read straight off the DOM rather than threaded through a ref: Auto needs the
+          // element that is *on screen*, and which of the player's two that is changes at
+          // every cut. The class is the same thing the player uses to decide.
+          videoFor={() => document.querySelector<HTMLVideoElement>('.player video.live')}
+          onChange={(value) => setAdjusting((current) => (current ? { ...current, value } : current))}
+          onCommit={(value) => {
+            session.setClipColor(adjusting.clipId, value);
+            setAdjusting(null);
+          }}
+          onApplyToAll={(value) => {
+            session.applyColorToAll(value);
+            setAdjusting(null);
+          }}
+          onClose={() => setAdjusting(null)}
+        />
+      ) : retiming && retimingClip ? (
+        <SpeedPanel
+          clipNumber={clips.indexOf(retimingClip) + 1 || null}
+          sourceDurationUs={retimingClip.sourceOut - retimingClip.sourceIn}
+          value={retiming.speed}
+          onChange={(speed) => setRetiming((current) => (current ? { ...current, speed } : current))}
+          onCommit={(speed) => {
+            session.setClipSpeed(retiming.clipId, speed);
+            setRetiming(null);
+          }}
+          onClose={() => setRetiming(null)}
         />
       ) : (
       <nav className="toolbar" aria-label="Editing tools">
@@ -483,41 +516,7 @@ export function App() {
         </div>
       )}
 
-      {retiming && retimingClip && (
-        <SpeedSheet
-          clipNumber={clips.indexOf(retimingClip) + 1 || null}
-          sourceDurationUs={retimingClip.sourceOut - retimingClip.sourceIn}
-          value={retiming.speed}
-          onChange={(speed) => setRetiming((current) => (current ? { ...current, speed } : current))}
-          onCommit={(speed) => {
-            session.setClipSpeed(retiming.clipId, speed);
-            setRetiming(null);
-          }}
-          onClose={() => setRetiming(null)}
-        />
-      )}
 
-      {adjusting && (
-        <AdjustSheet
-          clipNumber={clips.findIndex((clip) => clip.id === adjusting.clipId) + 1 || null}
-          clipCount={clips.length}
-          value={adjusting.value}
-          // Read straight off the DOM rather than threaded through a ref: Auto needs the
-          // element that is *on screen*, and which of the player's two that is changes at
-          // every cut. The class is the same thing the player uses to decide.
-          videoFor={() => document.querySelector<HTMLVideoElement>('.player video.live')}
-          onChange={(value) => setAdjusting((current) => (current ? { ...current, value } : current))}
-          onCommit={(value) => {
-            session.setClipColor(adjusting.clipId, value);
-            setAdjusting(null);
-          }}
-          onApplyToAll={(value) => {
-            session.applyColorToAll(value);
-            setAdjusting(null);
-          }}
-          onClose={() => setAdjusting(null)}
-        />
-      )}
 
       {showBrief && (
         <BriefSheet
