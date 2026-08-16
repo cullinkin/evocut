@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
-    "e2e": "node e2e/editor.spec.mjs && node e2e/preview.spec.mjs && node e2e/adjust.spec.mjs && node e2e/scroll.spec.mjs && node e2e/cliptools.spec.mjs && node e2e/review.spec.mjs && node e2e/signals.spec.mjs && node e2e/refine.spec.mjs && node e2e/export.spec.mjs"
+    "test": "vitest run",
+    "e2e": "node e2e/editor.spec.mjs && node e2e/preview.spec.mjs && node e2e/adjust.spec.mjs && node e2e/scroll.spec.mjs && node e2e/scrub.spec.mjs && node e2e/cliptools.spec.mjs && node e2e/review.spec.mjs && node e2e/signals.spec.mjs && node e2e/refine.spec.mjs && node e2e/export.spec.mjs"
   },
   "dependencies": {
     "@evocut/agent": "*",
@@ -26,6 +27,7 @@
     "@vitejs/plugin-react": "^6.0.5",
     "playwright": "^1.62.1",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1"
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
   }
 }

@@ -1667,3 +1667,16 @@ button.primary.small.auto.on {
   border-radius: 2px;
   transform: rotate(45deg);
 }
+
+/* The scrub proxy: an already-decoded filmstrip frame, shown over the element while a
+   gesture is live. A seek on a 4K master costs most of a second, so even a perfectly paced
+   scrub is a slideshow; this moves with the thumb and the element catches up behind it. */
+.scrub-proxy {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 2;
+  pointer-events: none;
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   microsToSeconds,
   secondsToMicros,
@@ -10,7 +10,14 @@ import {
   type TransformValue,
 } from '@evocut/edl';
 import { filterFor, paintedSize, previewTransform, sampleTimeline, type FrameLayer } from '@evocut/renderer';
+import { frameAt, useFilmstrips } from './filmstrip.ts';
 import { usePlayhead } from './playhead.ts';
+import {
+  newScrubPace,
+  noteSeekIssued,
+  noteSeekLanded as pacedSeekLanded,
+  shouldSeekNow,
+} from './scrub.ts';
 
 /**
  * Preview player.
@@ -64,6 +71,20 @@ import { usePlayhead } from './playhead.ts';
  * The stage is the frame the export will produce. The source covers it — the renderer's
  * `scale: 1` means cover, so anything else would make the preview and the file disagree at
  * every zoom — and slides behind it, cropped, the way `drawLayer` crops against the canvas.
+ *
+ * ## The proxy carries the gesture
+ *
+ * A seek on a multi-gigabyte 4K file costs most of a second no matter how it is paced, so
+ * even a perfectly paced scrub shows about one frame per second — which is a slideshow, not
+ * a scrub. What moves at sixty frames a second is the filmstrip: those frames are already
+ * decoded, already in memory, and already indexed by source time because the timeline draws
+ * them.
+ *
+ * So during a gesture the picture is a filmstrip frame, swapped on every scroll, and the
+ * element seeks behind it at whatever rate it can sustain. When the gesture settles the
+ * proxy goes away and the real frame is underneath. It is low resolution and it is the
+ * right trade: a coarse picture that tracks your thumb tells you where you are, and a sharp
+ * picture that arrives a second later does not.
  *
  * ## The loop corrects itself
  *
@@ -127,20 +148,16 @@ const HANDOFF_TOLERANCE_US = 60_000;
  * nothing to hand over: the element is already playing the frames the next clip wants.
  */
 const CONTIGUOUS_US = 20_000;
-/**
- * Floor on how often a *scrub* may re-aim the element.
- *
- * A scroll gesture with momentum emits events for as long as it coasts, and each one used
- * to issue a seek. On the twelve-second test clip that is free; on a 5 GB 4K recording it
- * is a queue of seeks that never drains, and an element that never completes one shows
- * nothing at all — the black picture reported from a real project, which looked for all
- * the world like the preview had stopped following the edit.
- *
- * Six a second is faster than anyone can read a frame and slow enough that each one
- * finishes. The seek at the *end* of a gesture is exempt: it is exact, it is the one that
- * decides what you are looking at, and there is only ever one of it.
- */
-const SCRUB_SEEK_INTERVAL_MS = 160;
+/** How long a source runs, from the furthest any clip reaches into it. */
+function sourceDurationOf(timeline: Timeline, sourceId: string): number {
+  let furthest = 0;
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips) {
+      if (clip.sourceId === sourceId) furthest = Math.max(furthest, clip.sourceOut);
+    }
+  }
+  return furthest;
+}
 
 /** What an empty draft looks like: no framing at all. */
 const IDENTITY_FRAMING: TransformValue = { scale: 1, x: 0, y: 0, rotation: 0 };
@@ -214,6 +231,41 @@ export function Player({
   // the point of the store is that only the handful of components that need that rate pay
   // for it. This is one of them.
   const playhead = usePlayhead();
+
+  /*
+    The already-decoded frames, for the proxy.
+
+    The same extraction the timeline's filmstrip uses — promise-cached per source, so this
+    costs one subscription and no extra seeking.
+  */
+  const sources = useMemo(
+    () =>
+      timeline.tracks
+        .flatMap((track) => track.clips)
+        .map((clip) => clip.sourceId)
+        .filter((id, index, all) => all.indexOf(id) === index)
+        .map((id) => ({ id, url: objectUrl, durationUs: sourceDurationOf(timeline, id) })),
+    [objectUrl, timeline],
+  );
+  const strips = useFilmstrips(sources);
+
+  /**
+   * The proxy frame for wherever the playhead is, or null when it is not needed.
+   *
+   * Only while scrubbing: the rest of the time the element itself is showing the right
+   * thing at full resolution, and covering it with a thumbnail would be a downgrade.
+   */
+  const proxy = useMemo(() => {
+    if (!scrubbing) return null;
+    const layer = sampleTimeline(timeline, playhead).layers[0];
+    if (!layer) return null;
+    const strip = strips.get(layer.clip.sourceId);
+    if (!strip) return null;
+    // A trim drag overrides the playhead — the preview is showing a source time that has
+    // no place on the timeline yet — so the proxy has to follow the same override, or the
+    // handle would drag against a still frame of wherever the playhead happens to be.
+    return frameAt(strip, scrubSourceTime ?? layer.sourceTime);
+  }, [playhead, scrubbing, scrubSourceTime, strips, timeline]);
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
   const scrubRef = useRef<number | null>(scrubSourceTime);
@@ -236,7 +288,8 @@ export function Player({
   onDiagnosticsRef.current = onDiagnostics;
   const reportedForRef = useRef<string | null>(null);
 
-  const lastScrubSeekRef = useRef(0);
+  /** Scrub seek pacing: one in flight, no faster than the last one took. See `scrub.ts`. */
+  const paceRef = useRef(newScrubPace());
 
   /**
    * Put the grade and the framing on an element.
@@ -272,17 +325,31 @@ export function Player({
   const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {
     if (Math.abs(secondsToMicros(video.currentTime) - sourceUs) <= SEEK_TOLERANCE_US) return;
 
+    /*
+      An approximate seek is a *scrub* seek — one of a stream of them, none of which is the
+      one that decides what you end up looking at. Those are paced; the exact seek at the end
+      of a gesture, and every seek playback makes, go straight through. The rule and the
+      reasoning behind it are in `scrub.ts`, where they are testable.
+    */
     if (approximate) {
-      // Rate-limited, and dropped rather than queued: the next scroll event is a fraction
-      // of a second away and carries a better answer, so a skipped one costs nothing.
       const now = Date.now();
-      if (now - lastScrubSeekRef.current < SCRUB_SEEK_INTERVAL_MS) return;
-      lastScrubSeekRef.current = now;
+      if (!shouldSeekNow(paceRef.current, now, video.seeking)) return;
+      paceRef.current = noteSeekIssued(paceRef.current, now);
     }
 
     const seconds = Math.max(0, microsToSeconds(sourceUs));
     if (approximate && typeof video.fastSeek === 'function') video.fastSeek(seconds);
     else video.currentTime = seconds;
+  }, []);
+
+  /**
+   * Learn what a seek costs on this file, and pace the next one by it.
+   *
+   * Measured rather than configured, because the answer is four orders of magnitude apart
+   * between a phone clip and a 4K master and there is no constant that suits both.
+   */
+  const noteSeekLanded = useCallback(() => {
+    paceRef.current = pacedSeekLanded(paceRef.current, Date.now());
   }, []);
 
   /**
@@ -505,8 +572,22 @@ export function Player({
             sync();
             reportDiagnostics();
           }}
+          onSeeked={noteSeekLanded}
         />
-        <video ref={bRef} className={live === 1 ? 'live' : 'spare'} src={objectUrl} playsInline preload="auto" />
+        <video
+          ref={bRef}
+          className={live === 1 ? 'live' : 'spare'}
+          src={objectUrl}
+          playsInline
+          preload="auto"
+          onSeeked={noteSeekLanded}
+        />
+        {/*
+          Over the top, only while a gesture is live. `key`-less and `src`-swapped so the
+          browser reuses one element and one decoded bitmap rather than mounting a new
+          image sixty times a second.
+        */}
+        {proxy && <img className="scrub-proxy" src={proxy.url} alt="" draggable={false} />}
       </div>
     </div>
   );
