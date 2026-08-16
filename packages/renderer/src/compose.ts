@@ -74,6 +74,46 @@ export function placeLayer(layer: Placeable, source: FrameSize, out: FrameSize):
   };
 }
 
+/**
+ * The same framing, as a CSS transform for the preview element.
+ *
+ * The preview had no framing at all: a push-in the refinement pass proposed was invisible
+ * until the export, which makes "accept this suggestion" a decision taken blind. This is
+ * the counterpart of `filterFor` for geometry — one function, so the picture on screen and
+ * the picture in the file cannot drift.
+ *
+ * `painted` is the size of the *picture inside the element*, not the element's own box. A
+ * `<video>` with `object-fit: contain` letterboxes, so the element is usually taller or
+ * wider than the frame it is showing, and `x` is a fraction of the frame. Translating by a
+ * percentage of the element would pan by the wrong amount on any screen whose shape does
+ * not happen to match the footage.
+ *
+ * Order matters and matches `drawLayer`: translate to where the centre goes, rotate about
+ * it, then scale — which is what "translate, rotate, scale" reads as in CSS, since CSS
+ * applies its list left to right about a common origin.
+ */
+export function previewTransform(transform: TransformValue, painted: FrameSize): string {
+  const x = Math.round(transform.x * painted.width * 100) / 100;
+  const y = Math.round(transform.y * painted.height * 100) / 100;
+  const parts: string[] = [];
+  if (x !== 0 || y !== 0) parts.push(`translate(${x}px, ${y}px)`);
+  if (transform.rotation !== 0) parts.push(`rotate(${transform.rotation}deg)`);
+  if (transform.scale !== 1) parts.push(`scale(${Math.round(transform.scale * 1000) / 1000})`);
+  return parts.length > 0 ? parts.join(' ') : 'none';
+}
+
+/**
+ * The size of the picture inside a `contain`-fitted element.
+ *
+ * Zero intrinsic size means the media has not loaded yet; the caller gets the box back so
+ * nothing divides by zero on the way to showing nothing.
+ */
+export function paintedSize(box: FrameSize, intrinsic: FrameSize): FrameSize {
+  if (intrinsic.width <= 0 || intrinsic.height <= 0 || box.width <= 0 || box.height <= 0) return box;
+  const scale = Math.min(box.width / intrinsic.width, box.height / intrinsic.height);
+  return { width: intrinsic.width * scale, height: intrinsic.height * scale };
+}
+
 /** The 2D drawing surface both a `canvas` and an `OffscreenCanvas` provide. */
 export type Canvas2D = Pick<
   CanvasRenderingContext2D,

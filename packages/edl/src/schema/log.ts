@@ -52,6 +52,12 @@ export const LOG_EVENT_TYPES = [
   // make it look right" is a different question from "what did they keep", and a training
   // set that cannot tell them apart learns neither.
   'clip.color',
+  // Framing, speed and copies. Separate rows because "how did they shape this shot" and
+  // "what did they keep" are different questions, and a training set that cannot tell
+  // them apart learns neither.
+  'clip.transform',
+  'clip.speed',
+  'clip.duplicate',
   'edit.undo',
   'edit.redo',
   // handoff and refinement

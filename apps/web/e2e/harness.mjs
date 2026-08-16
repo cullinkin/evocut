@@ -241,6 +241,19 @@ export async function exportLog(page, name = 'log.jsonl') {
   return { path, text, events: text.split('\n').filter(Boolean).map((line) => JSON.parse(line)) };
 }
 
+/**
+ * Open one of the per-clip tools.
+ *
+ * They live behind a single toolbar slot rather than as four more buttons in the row: a
+ * nine-button toolbar on a phone is a toolbar you mis-tap, and none of these is reached
+ * mid-gesture. Going through the menu here means a spec fails if that path breaks.
+ */
+export async function openClipTool(page, name) {
+  await page.locator('button[aria-label="Clip tools"]').click();
+  await page.locator('.sheet.clip-menu').waitFor({ timeout: 5000 });
+  await page.locator(`.sheet.clip-menu .row-link:has-text("${name}")`).click();
+}
+
 /** Settings → Metadata, leaving the screen open. */
 export async function openMetadata(page) {
   await page.locator('footer button[aria-label="Settings"]').click();

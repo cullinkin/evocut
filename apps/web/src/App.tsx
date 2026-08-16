@@ -10,6 +10,8 @@ import {
 } from '@evocut/edl';
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
 import { AdjustSheet } from './Adjust.tsx';
+import { SpeedSheet } from './Speed.tsx';
+import { TransformSheet, valueAt, type Keyframe } from './Transform.tsx';
 import { BriefSheet } from './Brief.tsx';
 import { ExportPanel } from './Export.tsx';
 import { SettingsScreen } from './Settings.tsx';
@@ -37,6 +39,12 @@ export function App() {
   const [showList, setShowList] = useState(false);
   /** The clip whose grade is being adjusted, and the uncommitted value. */
   const [adjusting, setAdjusting] = useState<{ clipId: string; value: ColorValue } | null>(null);
+  /** The clip whose framing is being built, and the uncommitted keyframe list. */
+  const [framing, setFraming] = useState<{ clipId: string; keys: Keyframe[] } | null>(null);
+  /** The clip whose speed is being set, and the uncommitted value. */
+  const [retiming, setRetiming] = useState<{ clipId: string; speed: number } | null>(null);
+  /** The clip tools, one level in so the toolbar stays reachable by a thumb. */
+  const [showClipMenu, setShowClipMenu] = useState(false);
   /** Index of the suggestion whose sheet is open, or null. */
   const [openSuggestion, setOpenSuggestion] = useState<number | null>(null);
 
@@ -192,6 +200,15 @@ export function App() {
     null;
   const mediaUrl = session.mediaUrls.get(clips[0]?.sourceId ?? '') ?? null;
 
+  const framingClip = framing ? clips.find((clip) => clip.id === framing.clipId) ?? null : null;
+  const retimingClip = retiming ? clips.find((clip) => clip.id === retiming.clipId) ?? null : null;
+  const framingDuration = framingClip
+    ? Math.round((framingClip.sourceOut - framingClip.sourceIn) / framingClip.speed)
+    : 0;
+  // Where the playhead sits *inside* the clip being framed. Keyframe times are clip-relative
+  // — a shot's move is a property of the shot, not of where it happens to sit in the edit.
+  const withinClip = framingClip ? Math.max(0, Math.min(framingDuration, playhead - framingClip.start)) : 0;
+
   // The export owns the whole screen while it runs. It takes about as long as the video
   // is, the tab has to stay in front for it, and a progress bar tucked into a corner of a
   // live editor invites exactly the tab switch that stalls the capture.
@@ -280,6 +297,9 @@ export function App() {
           scrubbing={drag !== null}
           scrubSourceTime={drag?.scrubSourceTime ?? null}
           previewColor={adjusting}
+          previewTransform={
+            framing ? { clipId: framing.clipId, value: valueAt(framing.keys, withinClip) } : null
+          }
           onTime={onTime}
           onEnded={onEnded}
           onDiagnostics={session.reportMediaDiagnostics}
@@ -350,18 +370,128 @@ export function App() {
           <small>Delete</small>
         </button>
         {/*
-          Not disabled by `frozen`. Colour is not part of the coarse pass and the moment
-          you most want it is after the refinement has settled what the video actually is.
+          One slot for four tools. Adjust, Transform, Speed and Duplicate are all
+          per-clip and none of them is reached mid-gesture, so they belong one level in —
+          a nine-button row on a phone is a row you mis-tap.
+
+          Not disabled by `frozen`: none of these is part of the coarse pass, and the
+          moment you most want them is after the refinement has settled what the video is.
         */}
-        <button
-          onClick={() => adjustTarget && setAdjusting({ clipId: adjustTarget.id, value: colorOf(adjustTarget) })}
-          disabled={!adjustTarget}
-          aria-label="Adjust colour"
-        >
-          <span aria-hidden="true">◐</span>
-          <small>Adjust</small>
+        <button onClick={() => setShowClipMenu(true)} disabled={!adjustTarget} aria-label="Clip tools">
+          <span aria-hidden="true">⋯</span>
+          <small>Clip</small>
         </button>
       </nav>
+
+      {showClipMenu && adjustTarget && (
+        <div className="sheet clip-menu" role="dialog" aria-label="Clip tools">
+          <div className="sheet-head">
+            <button className="close" onClick={() => setShowClipMenu(false)} aria-label="Close">
+              ✕
+            </button>
+            <span className="sheet-count">
+              Clip {clips.indexOf(adjustTarget) + 1} of {clips.length}
+            </span>
+          </div>
+
+          <button
+            className="row-link"
+            onClick={() => {
+              setShowClipMenu(false);
+              setAdjusting({ clipId: adjustTarget.id, value: colorOf(adjustTarget) });
+            }}
+          >
+            <span>
+              <strong>Adjust</strong>
+              <small>Exposure, contrast, colour. Auto reads the frame on screen.</small>
+            </span>
+            <span aria-hidden="true">›</span>
+          </button>
+
+          <button
+            className="row-link"
+            onClick={() => {
+              setShowClipMenu(false);
+              setFraming({ clipId: adjustTarget.id, keys: keyframesOf(adjustTarget) });
+            }}
+          >
+            <span>
+              <strong>Transform</strong>
+              <small>Zoom, pan and rotation — keyframed, so the frame can move.</small>
+            </span>
+            <span aria-hidden="true">›</span>
+          </button>
+
+          <button
+            className="row-link"
+            onClick={() => {
+              setShowClipMenu(false);
+              setRetiming({ clipId: adjustTarget.id, speed: adjustTarget.speed });
+            }}
+          >
+            <span>
+              <strong>Speed</strong>
+              <small>0.1× to 20×, currently {adjustTarget.speed}×.</small>
+            </span>
+            <span aria-hidden="true">›</span>
+          </button>
+
+          <h2>Duplicate</h2>
+          <div className="sheet-actions">
+            <button
+              onClick={() => {
+                session.duplicateClip(adjustTarget.id, 'after');
+                setShowClipMenu(false);
+              }}
+            >
+              After this clip
+            </button>
+            <button
+              className="primary"
+              onClick={() => {
+                session.duplicateClip(adjustTarget.id, 'start');
+                setShowClipMenu(false);
+              }}
+            >
+              To the start
+            </button>
+          </div>
+          <p className="meta">
+            A copy carries this clip’s grade, speed and framing. “To the start” is the
+            teaser: the finished shot, appearing once up front and again where it belongs.
+          </p>
+        </div>
+      )}
+
+      {framing && framingClip && (
+        <TransformSheet
+          clipNumber={clips.indexOf(framingClip) + 1 || null}
+          durationUs={framingDuration}
+          atUs={withinClip}
+          keyframes={framing.keys}
+          onSeekWithin={(us) => session.seek(framingClip.start + us)}
+          onChange={(keys) => setFraming((current) => (current ? { ...current, keys } : current))}
+          onCommit={(keys) => {
+            session.setClipTransform(framing.clipId, keys);
+            setFraming(null);
+          }}
+          onClose={() => setFraming(null)}
+        />
+      )}
+
+      {retiming && retimingClip && (
+        <SpeedSheet
+          clipNumber={clips.indexOf(retimingClip) + 1 || null}
+          sourceDurationUs={retimingClip.sourceOut - retimingClip.sourceIn}
+          value={retiming.speed}
+          onChange={(speed) => setRetiming((current) => (current ? { ...current, speed } : current))}
+          onCommit={(speed) => {
+            session.setClipSpeed(retiming.clipId, speed);
+            setRetiming(null);
+          }}
+          onClose={() => setRetiming(null)}
+        />
+      )}
 
       {adjusting && (
         <AdjustSheet
@@ -485,6 +615,16 @@ export function App() {
       </footer>
     </main>
   );
+}
+
+/** A clip's framing keyframes, or an empty list. */
+function keyframesOf(clip: Clip): Keyframe[] {
+  for (const effect of clip.effects) {
+    if (effect.type === 'transform' && effect.enabled) {
+      return effect.keyframes.map((keyframe) => ({ ...keyframe, value: { ...keyframe.value } }));
+    }
+  }
+  return [];
 }
 
 /** A clip's grade, or a neutral one — the sheet always opens on a full set of controls. */

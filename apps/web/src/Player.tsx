@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { microsToSeconds, secondsToMicros, sourceToTimeline, type ColorValue, type Timeline } from '@evocut/edl';
-import { filterFor, sampleTimeline } from '@evocut/renderer';
+import {
+  microsToSeconds,
+  secondsToMicros,
+  sourceToTimeline,
+  type ColorValue,
+  type Timeline,
+  type TransformValue,
+} from '@evocut/edl';
+import { filterFor, paintedSize, previewTransform, sampleTimeline, type FrameLayer } from '@evocut/renderer';
 
 /**
  * Preview player.
@@ -72,6 +79,8 @@ export interface PlayerProps {
    * change that is not going to be made.
    */
   previewColor?: { clipId: string; value: ColorValue } | null;
+  /** The same, for framing, while the Transform sheet is open. */
+  previewTransform?: { clipId: string; value: TransformValue } | null;
   onTime(outputTime: number): void;
   onEnded(): void;
   /** Reports what the element can do with this media, once metadata has loaded. */
@@ -119,6 +128,7 @@ export function Player({
   scrubbing = false,
   scrubSourceTime = null,
   previewColor = null,
+  previewTransform: transformDraft = null,
   onTime,
   onEnded,
   onDiagnostics,
@@ -149,6 +159,8 @@ export function Player({
   scrubbingRef.current = scrubbing;
   const previewColorRef = useRef(previewColor);
   previewColorRef.current = previewColor;
+  const transformDraftRef = useRef(transformDraft);
+  transformDraftRef.current = transformDraft;
 
   // Held in refs so the playback effect does not depend on them. The session hook returns
   // a fresh object every render, so a callback in the dependency list tore the loop down
@@ -162,6 +174,32 @@ export function Player({
   const reportedForRef = useRef<string | null>(null);
 
   const lastScrubSeekRef = useRef(0);
+
+  /**
+   * Put the grade and the framing on an element.
+   *
+   * Both come from the renderer's own functions, so what is on screen is produced by the
+   * same code as what will be in the file. The drafts are consulted here because that is
+   * the one place they can be applied to whichever element happens to be live.
+   */
+  const dress = useCallback((video: HTMLVideoElement, layer: FrameLayer) => {
+    const colour = previewColorRef.current;
+    video.style.filter = filterFor(
+      colour && colour.clipId === layer.clip.id ? colour.value : layer.color,
+    );
+
+    const framing = transformDraftRef.current;
+    const transform =
+      framing && framing.clipId === layer.clip.id ? framing.value : layer.transform;
+    const box = video.getBoundingClientRect();
+    video.style.transform = previewTransform(
+      transform,
+      paintedSize(
+        { width: box.width, height: box.height },
+        { width: video.videoWidth, height: video.videoHeight },
+      ),
+    );
+  }, []);
 
   const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {
     if (Math.abs(secondsToMicros(video.currentTime) - sourceUs) <= SEEK_TOLERANCE_US) return;
@@ -202,12 +240,11 @@ export function Player({
     video.playbackRate = layer.clip.speed;
     // The same string the export sets on its canvas — one function, two surfaces, so the
     // graded preview is evidence about the graded file rather than a second opinion.
-    const draft = previewColorRef.current;
-    video.style.filter = filterFor(draft && draft.clipId === layer.clip.id ? draft.value : layer.color);
+    dress(video, layer);
     seekTo(video, layer.sourceTime, scrubbingRef.current);
-  }, [liveVideo, seekTo, timeline]);
+  }, [dress, liveVideo, seekTo, timeline]);
 
-  useEffect(sync, [sync, playhead, scrubSourceTime, scrubbing, previewColor]);
+  useEffect(sync, [sync, playhead, scrubSourceTime, scrubbing, previewColor, transformDraft]);
 
   /**
    * Park the spare on the first frame of whatever plays at `outputUs`.
@@ -229,12 +266,12 @@ export function Player({
       }
       preppedRef.current = next.sourceTime;
       spare.playbackRate = next.clip.speed;
-      // Graded before it is shown. The handoff is a swap of two live elements, so a spare
+      // Dressed before it is shown. The handoff is a swap of two live elements, so a spare
       // still wearing the outgoing clip's look would flash it for a frame at every cut.
-      spare.style.filter = filterFor(next.color);
+      dress(spare, next);
       spare.currentTime = Math.max(0, microsToSeconds(next.sourceTime));
     },
-    [spareVideo, timeline],
+    [dress, spareVideo, timeline],
   );
 
   // A changed timeline invalidates whatever the spare was holding: accepting a suggestion
@@ -347,6 +384,11 @@ export function Player({
         return;
       }
 
+      // A keyframed push-in moves every frame, so the live element is re-dressed as it
+      // plays rather than only when the clip changes. Setting an unchanged style string is
+      // free; not setting it means the preview shows the framing the shot started on.
+      dress(current, layer);
+
       // Pay for the next cut's seek now, while there is time to spare.
       prepare(endOutput);
 
@@ -370,7 +412,7 @@ export function Player({
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     };
-  }, [liveVideo, playing, prepare, scrubbing, spareVideo, timeline]);
+  }, [dress, liveVideo, playing, prepare, scrubbing, spareVideo, timeline]);
 
   return (
     <div className="player">

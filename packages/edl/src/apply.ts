@@ -58,6 +58,13 @@ export function applyOps(timeline: Timeline, ops: Op[], ctx: ApplyContext = {}):
   return { timeline: working, applied, errors };
 }
 
+/** Sorted by time, one per instant, last write wins. */
+function dedupeKeyframes<T extends { t: number }>(keyframes: T[]): T[] {
+  const byTime = new Map<number, T>();
+  for (const keyframe of keyframes) byTime.set(keyframe.t, keyframe);
+  return [...byTime.values()].sort((a, b) => a.t - b.t);
+}
+
 /** Apply a single op. Throws `OpFailure` on any invalid edit; `applyOps` collects those. */
 function applyOne(timeline: Timeline, op: Op, ctx: Required<Pick<ApplyContext, 'newId'>> & ApplyContext): Timeline {
   switch (op.op) {
@@ -194,6 +201,48 @@ function applyOne(timeline: Timeline, op: Op, ctx: Required<Pick<ApplyContext, '
       });
     }
 
+    /**
+     * Replace the clip's framing, or take it off.
+     *
+     * Keyframes are sorted and de-duplicated on the way in rather than trusted: a sheet
+     * that drops a keyframe wherever the scrubber happens to be will eventually drop two
+     * at the same instant, and two keyframes at one `t` make the sampler's answer depend
+     * on array order. The last one wins, which is what "I just set it here" means.
+     */
+    case 'setTransform': {
+      const { clip, track, index } = locate(timeline, op.clipId);
+      const others = clip.effects.filter((effect) => effect.type !== 'transform');
+      const existing = clip.effects.find((effect) => effect.type === 'transform');
+
+      const keyframes = op.keyframes === null ? [] : dedupeKeyframes(op.keyframes);
+      const still =
+        keyframes.length === 1 &&
+        keyframes[0]!.value.scale === 1 &&
+        keyframes[0]!.value.x === 0 &&
+        keyframes[0]!.value.y === 0 &&
+        keyframes[0]!.value.rotation === 0;
+
+      return replaceClip(timeline, track.id, index, {
+        ...clip,
+        // A single identity framing is not a framing. Stored as no effect at all, for the
+        // same reason a neutral grade is: "framed to nothing" and "not framed" have to be
+        // the same clip or every reader downstream needs a special case.
+        effects:
+          keyframes.length === 0 || still
+            ? others
+            : [
+                ...others,
+                {
+                  id: existing?.id ?? ctx.newId('effect'),
+                  type: 'transform',
+                  enabled: true,
+                  ...(op.rationale ? { origin: { by: 'human' as const, rationale: op.rationale } } : {}),
+                  keyframes,
+                },
+              ],
+      });
+    }
+
     case 'removeEffect': {
       const { clip, track, index } = locate(timeline, op.clipId);
       assert(
@@ -217,6 +266,34 @@ function applyOne(timeline: Timeline, op: Op, ctx: Required<Pick<ApplyContext, '
     case 'setLabel': {
       const { clip, track, index } = locate(timeline, op.clipId);
       return replaceClip(timeline, track.id, index, { ...clip, label: op.label });
+    }
+
+    /**
+     * A copy of the clip, effects and all, with fresh ids throughout.
+     *
+     * `start: 0` on the copy and a renormalise afterwards is what puts it at the head —
+     * `normalizeTimeline` lays clips out in order, so placing the copy before everything
+     * else is a matter of giving it the earliest start rather than of shifting fifty other
+     * clips by hand. Effect ids are regenerated because two clips sharing one is a
+     * `removeEffect` that hits both.
+     */
+    case 'duplicateClip': {
+      const { clip, track, index } = locate(timeline, op.clipId);
+      const copy: Clip = {
+        ...structuredClone(clip),
+        id: op.newClipId ?? ctx.newId('clip'),
+        effects: clip.effects.map((effect) => ({ ...structuredClone(effect), id: ctx.newId('effect') })),
+        // Its own provenance: a duplicate is a decision, and a copy that still claims to
+        // have come from the import is a copy the log cannot account for.
+        origin: { by: 'human', ...(op.rationale ? { rationale: op.rationale } : {}) },
+        start: op.at === 'start' ? -1 : clip.start + outputDuration(clip),
+      };
+      const clips = [...track.clips];
+      clips.splice(op.at === 'start' ? 0 : index + 1, 0, copy);
+      return {
+        ...timeline,
+        tracks: timeline.tracks.map((t) => (t.id === track.id ? { ...t, clips } : t)),
+      };
     }
 
     case 'insertClip': {

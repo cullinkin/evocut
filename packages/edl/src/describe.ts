@@ -190,8 +190,29 @@ export function describeOp(op: Op, timeline?: Timeline): string {
         ? `Clear the colour adjustment on ${named(op.clipId)}`
         : `Adjust colour on ${named(op.clipId)}: ${describeColor(op.color)}`;
 
+    case 'setTransform': {
+      if (op.keyframes === null || op.keyframes.length === 0) {
+        return `Clear the framing on ${named(op.clipId)}`;
+      }
+      const first = op.keyframes[0]!.value;
+      const last = op.keyframes.at(-1)!.value;
+      if (op.keyframes.length === 1) return `Reframe ${named(op.clipId)} at ${formatRate(first.scale)}`;
+      if (last.scale > first.scale) {
+        return `Push in on ${named(op.clipId)}, ${formatRate(first.scale)} to ${formatRate(last.scale)}`;
+      }
+      if (last.scale < first.scale) {
+        return `Pull out on ${named(op.clipId)}, ${formatRate(first.scale)} to ${formatRate(last.scale)}`;
+      }
+      return `Move the frame on ${named(op.clipId)} over ${op.keyframes.length} keyframes`;
+    }
+
     case 'setLabel':
       return `Label ${named(op.clipId)} "${op.label}"`;
+
+    case 'duplicateClip':
+      return op.at === 'start'
+        ? `Copy ${named(op.clipId)} to the start as a teaser`
+        : `Duplicate ${named(op.clipId)}`;
 
     case 'insertClip':
       return `Restore ${short(op.sourceOut - op.sourceIn)} of footage from ${op.sourceId}`;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   clipEnd,
   formatTimecode,
@@ -11,7 +11,7 @@ import {
   type TrimBounds,
 } from '@evocut/edl';
 import type { OpPreview } from '@evocut/edl';
-import { frameAt, useFilmstrip } from './filmstrip.ts';
+import { frameAt, useFilmstrips, type Filmstrip } from './filmstrip.ts';
 
 /**
  * The editing timeline: draggable playhead, tap-to-select clips, drag-the-edges trimming.
@@ -143,6 +143,9 @@ export function TimelineEditor({
   const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The last time we announced, so a sub-pixel scroll does not re-render the editor. */
   const lastScrubRef = useRef<number | null>(null);
+  /** The pending animation frame that will announce the scroll, if one is already booked. */
+  const rafRef = useRef<number | null>(null);
+  const announcedRef = useRef<number | null>(null);
   /** Half the viewport: the padding that lets time zero sit under a centred playhead. */
   const [halfWidth, setHalfWidth] = useState(0);
   /**
@@ -168,6 +171,27 @@ export function TimelineEditor({
 
   const clips = timeline.tracks[0]?.clips ?? [];
   const committedTotal = timelineDuration(timeline);
+
+  /*
+    One subscription for the whole lane, rather than one inside each clip block.
+
+    Fifty-one blocks each holding their own `useFilmstrip` meant fifty-one pieces of state
+    that changed together and fifty-one components that could not be memoised — so every
+    playhead change re-rendered all of them, and a scroll is sixty playhead changes a
+    second. Hoisted, the blocks become pure functions of their props and a scroll stops
+    touching them at all.
+  */
+  const strips = useFilmstrips(
+    useMemo(
+      () =>
+        sources.map((source) => ({
+          id: source.id,
+          url: mediaUrls.get(source.id) ?? null,
+          durationUs: source.duration,
+        })),
+      [sources, mediaUrls],
+    ),
+  );
   // Read inside callbacks that must not re-create themselves on every playhead change.
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
@@ -304,12 +328,31 @@ export function TimelineEditor({
     }
 
     const us = Math.max(0, Math.min(committedTotal, Math.round((scroller.scrollLeft / pxPerSecond) * 1_000_000)));
-    // A long edit zoomed to fit is a quarter-second per pixel, so a coasting scroll emits
-    // plenty of events that describe the same instant. Re-rendering a fifty-clip editor
-    // for those costs frames and buys nothing.
-    if (us !== lastScrubRef.current) {
-      lastScrubRef.current = us;
-      onSeek(us, false);
+    /*
+      One announcement per painted frame, no more.
+
+      iOS emits scroll events faster than it paints, and every one of them used to become a
+      React commit. Coalescing to an animation frame means the app is asked to re-render at
+      most as often as the screen can show it — and because the scroller itself is native,
+      the lane keeps moving under the finger even when a commit runs long. Reading
+      `scrollLeft` again inside the frame is deliberate: the position when we paint is more
+      current than the position when the event fired.
+    */
+    lastScrubRef.current = us;
+    if (rafRef.current === null) {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        const live = scrollerRef.current;
+        if (!live) return;
+        const now = Math.max(
+          0,
+          Math.min(committedTotal, Math.round((live.scrollLeft / pxPerSecond) * 1_000_000)),
+        );
+        if (now !== announcedRef.current) {
+          announcedRef.current = now;
+          onSeek(now, false);
+        }
+      });
     }
 
     if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
@@ -320,6 +363,7 @@ export function TimelineEditor({
       // The exact seek, and the end of the gesture. Ordered so the player sees the final
       // position *and* the end of scrubbing in one commit, which is what turns the last
       // approximate seek into an exact one.
+      announcedRef.current = null;
       onSeek(us, true);
       onDragChange(null);
     }, 140);
@@ -454,7 +498,12 @@ export function TimelineEditor({
 
   const selected = clips.find((c) => c.id === selectedClipId) ?? null;
   const selectedSource = selected ? sources.find((s) => s.id === selected.sourceId) ?? null : null;
-  const bubbles = clusterBubbles(previews, accepted, pxPerSecond);
+  // Sorted and clustered, which is not free on a long pass and does not depend on the
+  // playhead — so it must not be redone sixty times a second while the lane is moving.
+  const bubbles = useMemo(
+    () => clusterBubbles(previews, accepted, pxPerSecond),
+    [previews, accepted, pxPerSecond],
+  );
 
   return (
     <section className="timeline" aria-label="Timeline">
@@ -523,19 +572,22 @@ export function TimelineEditor({
           )}
 
           <div className="timeline-lane" onPointerDown={() => onSelect(null)}>
-            {clips.map((clip, index) => (
-              <ClipBlock
-                key={clip.id}
-                clip={clip}
-                index={index}
-                source={sources.find((s) => s.id === clip.sourceId) ?? null}
-                mediaUrl={mediaUrls.get(clip.sourceId) ?? null}
-                geometry={geometryOf(clip)}
-                draft={draft?.clipId === clip.id ? draft : null}
-                selected={clip.id === selectedClipId}
-                onSelect={() => onSelect(clip.id)}
-              />
-            ))}
+            {clips.map((clip, index) => {
+              const box = geometryOf(clip);
+              return (
+                <ClipBlock
+                  key={clip.id}
+                  clip={clip}
+                  index={index}
+                  strip={strips.get(clip.sourceId)}
+                  left={box.left}
+                  width={box.width}
+                  draft={draft?.clipId === clip.id ? draft : null}
+                  selected={clip.id === selectedClipId}
+                  onSelect={onSelect}
+                />
+              );
+            })}
 
             {selected && selectedSource && !frozen && (
               <TrimHandles
@@ -616,26 +668,39 @@ function Ruler({
   );
 }
 
-function ClipBlock({
+/**
+ * One clip on the lane.
+ *
+ * Memoised, and that is the whole reason its props look the way they do. `left` and `width`
+ * arrive as numbers rather than inside a geometry object, and `onSelect` is one shared
+ * callback taking a clip id rather than a closure built per block — a freshly-built object
+ * or function in the props defeats `memo` completely, and a `memo` that never bails is
+ * slower than no `memo` at all.
+ *
+ * With this in place a playhead change re-renders the timeline shell and none of its
+ * fifty-one children, which is the difference between a scroll that tracks a finger and
+ * one that locks the phone.
+ */
+const ClipBlock = memo(function ClipBlock({
   clip,
   index,
-  source,
-  mediaUrl,
-  geometry,
+  strip,
+  left,
+  width,
   draft,
   selected,
   onSelect,
 }: {
   clip: Clip;
   index: number;
-  source: Source | null;
-  mediaUrl: string | null;
-  geometry: { left: number; width: number };
+  strip: Filmstrip | undefined;
+  left: number;
+  width: number;
   draft: TrimDraft | null;
   selected: boolean;
-  onSelect(): void;
+  onSelect(clipId: string): void;
 }) {
-  const strip = useFilmstrip(clip.sourceId, mediaUrl, source?.duration ?? 0);
+  const geometry = { left, width };
   const sourceIn = draft ? draft.sourceIn : clip.sourceIn;
   const sourceOut = draft ? draft.sourceOut : clip.sourceOut;
   const classes = ['clip-block', selected ? 'selected' : '', clip.enabled ? '' : 'dropped', draft ? 'trimming' : '']
@@ -646,7 +711,7 @@ function ClipBlock({
   // so the strip re-aims as the edge moves instead of stretching.
   const slots = Math.max(1, Math.round(geometry.width / 56));
   const thumbs = Array.from({ length: slots }, (_, i) =>
-    frameAt(strip, sourceIn + ((i + 0.5) / slots) * (sourceOut - sourceIn)),
+    strip ? frameAt(strip, sourceIn + ((i + 0.5) / slots) * (sourceOut - sourceIn)) : null,
   );
 
   return (
@@ -655,7 +720,7 @@ function ClipBlock({
       style={{ left: geometry.left, width: geometry.width }}
       onPointerDown={(event) => {
         event.stopPropagation();
-        onSelect();
+        onSelect(clip.id);
       }}
       role="button"
       aria-pressed={selected}
@@ -683,7 +748,7 @@ function ClipBlock({
       )}
     </div>
   );
-}
+});
 
 /**
  * The trim handles, plus the ghost of the footage waiting on either side.

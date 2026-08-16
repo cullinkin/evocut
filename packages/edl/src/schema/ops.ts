@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { ClipId, EffectId, NonNegativeMicrosSchema, SourceId, TrackId } from './common.js';
-import { ColorValue, Effect } from './effects.js';
+import { ClipId, Easing, EffectId, NonNegativeMicrosSchema, SourceId, TrackId } from './common.js';
+import { ColorValue, Effect, TransformValue } from './effects.js';
 import { ClipAudio } from './clip.js';
 
 /**
@@ -108,6 +108,33 @@ export const SetColorOp = z.object({
   ...withRationale,
 });
 
+/**
+ * Set (or clear) a clip's framing over time.
+ *
+ * The same bargain `setColor` makes, for the same reason: a person dragging a zoom slider
+ * emits a value per frame, and `addEffect` would stack an effect per frame on the way to
+ * one push-in. This replaces the clip's transform outright, so the op is idempotent and
+ * the EDL says how the clip is framed rather than how someone arrived at it.
+ *
+ * One keyframe is a static reframe. Two or more is a move, and `t` is measured from the
+ * clip's start on the *output* timeline — after speed — because that is the clock both the
+ * scrubber and the person are reading.
+ */
+export const SetTransformOp = z.object({
+  op: z.literal('setTransform'),
+  clipId: ClipId,
+  keyframes: z
+    .array(
+      z.object({
+        t: NonNegativeMicrosSchema,
+        value: TransformValue,
+        easing: Easing.default('easeInOut'),
+      }),
+    )
+    .nullable(),
+  ...withRationale,
+});
+
 export const RemoveEffectOp = z.object({
   op: z.literal('removeEffect'),
   clipId: ClipId,
@@ -126,6 +153,27 @@ export const SetLabelOp = z.object({
   op: z.literal('setLabel'),
   clipId: ClipId,
   label: z.string().max(200),
+  ...withRationale,
+});
+
+/**
+ * Copy a clip, with everything on it.
+ *
+ * Not `insertClip`, which builds a fresh clip from a source range and so loses the grade,
+ * the speed, the framing and the audio settings — every reason the clip is worth copying.
+ * A teaser at the head of a video is the *finished* shot appearing twice, not the same
+ * seconds of raw footage.
+ *
+ * `at` says where the copy lands: `after` for a beat repeated in place, `start` for the
+ * teaser, which is the reason this exists.
+ */
+export const DuplicateClipOp = z.object({
+  op: z.literal('duplicateClip'),
+  clipId: ClipId,
+  /** Omitted means `after`. Optional rather than defaulted so callers can just not say. */
+  at: z.enum(['after', 'start']).optional(),
+  /** Set it yourself if a later op in the same batch needs to name the copy. */
+  newClipId: ClipId.optional(),
   ...withRationale,
 });
 
@@ -152,9 +200,11 @@ export const Op = z.discriminatedUnion('op', [
   SetSpeedOp,
   AddEffectOp,
   SetColorOp,
+  SetTransformOp,
   RemoveEffectOp,
   SetAudioOp,
   SetLabelOp,
+  DuplicateClipOp,
   InsertClipOp,
 ]);
 export type Op = z.infer<typeof Op>;
@@ -168,6 +218,8 @@ export type MoveOp = z.infer<typeof MoveOp>;
 export type SetSpeedOp = z.infer<typeof SetSpeedOp>;
 export type AddEffectOp = z.infer<typeof AddEffectOp>;
 export type SetColorOp = z.infer<typeof SetColorOp>;
+export type SetTransformOp = z.infer<typeof SetTransformOp>;
+export type DuplicateClipOp = z.infer<typeof DuplicateClipOp>;
 export type RemoveEffectOp = z.infer<typeof RemoveEffectOp>;
 export type SetAudioOp = z.infer<typeof SetAudioOp>;
 export type SetLabelOp = z.infer<typeof SetLabelOp>;

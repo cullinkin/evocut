@@ -1,4 +1,4 @@
-import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport, scrubTo } from './harness.mjs';
+import { APP_URL, artifact, ensureClip, exportEdl, launch, makeReport, openClipTool, scrubTo } from './harness.mjs';
 
 /**
  * Colour and tone: on the picture, in the EDL, on every clip, and still there tomorrow.
@@ -41,7 +41,7 @@ set('filterBeforeAdjusting', before);
 check('anUntouchedClipHasNoFilter', before === '' || before === 'none', true);
 
 // --- The sliders reach the picture -----------------------------------------------------
-await page.locator('button[aria-label="Adjust colour"]').click();
+await openClipTool(page, 'Adjust');
 await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
 
 const slider = (name) => page.locator(`.sheet.adjust input[aria-label^="${name}"]`);
@@ -71,7 +71,7 @@ check('oneRevisionForTheWholeAdjustment', graded.revisions.at(-1).ops.length, 1)
 check('andItIsASetColorOp', graded.revisions.at(-1).ops[0].op, 'setColor');
 
 // --- Apply to all ----------------------------------------------------------------------
-await page.locator('button[aria-label="Adjust colour"]').click();
+await openClipTool(page, 'Adjust');
 await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
 // It reopens on the grade the clip already has, rather than on zero.
 check('theSheetReopensOnWhatIsThere', await slider('Saturation').inputValue(), '60');
@@ -99,7 +99,7 @@ check('appliedAsASingleRevision', all.revisions.at(-1).ops.length, 3);
  * pixels has something definite to say about it, and one that is returning a canned answer
  * or failing silently has nothing.
  */
-await page.locator('button[aria-label="Adjust colour"]').click();
+await openClipTool(page, 'Adjust');
 await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
 await page.locator('.sheet-actions button:has-text("Reset")').click();
 await page.locator('.sheet.adjust button:has-text("Auto")').click();
@@ -150,7 +150,7 @@ set('filterAfterReload', restored);
 check('andIsPaintedOnTheRestoredPreview', /brightness\(/.test(restored), true);
 
 // --- Reset -----------------------------------------------------------------------------
-await page.locator('button[aria-label="Adjust colour"]').click();
+await openClipTool(page, 'Adjust');
 await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
 await page.locator('.sheet-actions button:has-text("Reset")').click();
 await page.locator('.sheet-actions .primary').click();

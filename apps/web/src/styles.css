@@ -1408,3 +1408,168 @@ fieldset.duration legend {
 .proposal.stale {
   border-color: var(--danger);
 }
+
+/* --- Clip tools -----------------------------------------------------------------------
+   One toolbar slot opens onto four per-clip tools. A nine-button row on a phone is a row
+   you mis-tap, and none of these is reached mid-gesture. */
+
+.sheet.clip-menu h2 {
+  margin: 6px 0 0;
+  font-size: 15px;
+}
+
+/* --- Speed ---------------------------------------------------------------------------
+   The track is bent: four fifths of it covers 0.1x to 5x, where every real decision
+   lives, and the last fifth covers the rest. The marks are tappable because a slider on a
+   phone cannot reliably land on exactly 2x. */
+
+.speed-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0;
+}
+
+.speed-readout strong {
+  font-size: 30px;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-readout em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.slider.wide input[type='range'] {
+  height: 44px;
+}
+
+.speed-marks {
+  position: relative;
+  height: 30px;
+  margin-top: -6px;
+  /* The strip is decoration; only the ticks on it are controls. Without this the
+     container is the topmost element over its own children and eats every tap — which is
+     a mis-tap on a phone and an interceptor error in the browser checks. */
+  pointer-events: none;
+}
+
+.speed-marks .tick {
+  position: absolute;
+  pointer-events: auto;
+  transform: translateX(-50%);
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-marks .tick.on {
+  background: var(--accent);
+  color: #0b0b0f;
+  font-weight: 600;
+}
+
+/* --- Transform -----------------------------------------------------------------------
+   The keyline is the clip, not the edit. Keyframe times are clip-relative, and a
+   two-second shot inside a nine-minute assembly is invisible on the timeline and the whole
+   world in here. Dragging it moves the app playhead, so the preview above follows. */
+
+.sheet.transform {
+  max-height: 62vh;
+}
+
+.keyline {
+  position: relative;
+  padding-bottom: 18px;
+}
+
+.keyline input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 40px;
+  margin: 0;
+  background: transparent;
+  touch-action: none;
+}
+
+.keyline input[type='range']::-webkit-slider-runnable-track {
+  height: 22px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.keyline input[type='range']::-moz-range-track {
+  height: 22px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.keyline input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 34px;
+  margin-top: -7px;
+  border-radius: 4px;
+  border: 2px solid var(--bg);
+  background: var(--text);
+}
+
+.keyline input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 34px;
+  border-radius: 4px;
+  border: 2px solid var(--bg);
+  background: var(--text);
+}
+
+/* Diamonds on the strip, under the thumb, so they read as marks on the clip rather than
+   as controls of their own. */
+.keyline .keys {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 9px;
+  height: 22px;
+  pointer-events: none;
+}
+
+.keyline .key {
+  position: absolute;
+  top: 5px;
+  width: 11px;
+  height: 11px;
+  margin-left: -5.5px;
+  background: var(--accent);
+  transform: rotate(45deg);
+  border-radius: 2px;
+}
+
+.keyline .key.on {
+  background: var(--text);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.keyline-clock {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+button.primary.small.auto.on {
+  background: var(--text);
+  border-color: var(--text);
+}

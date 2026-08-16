@@ -202,6 +202,51 @@ export function useFilmstrip(sourceId: string | null, objectUrl: string | null, 
   return strip;
 }
 
+/**
+ * Every source's strip at once, from one subscription.
+ *
+ * `useFilmstrip` was called inside each clip block, which on a fifty-one clip timeline is
+ * fifty-one subscriptions to the same strip and fifty-one pieces of component state that
+ * all change together. It also meant a clip block could not be memoised — it held a hook
+ * whose value changed underneath it — so *every* one of them re-rendered on every playhead
+ * change, sixty times a second during a scroll, each rebuilding its row of thumbnails.
+ * That is the freeze.
+ *
+ * One subscription, one Map, and the blocks become pure functions of their props.
+ */
+export function useFilmstrips(
+  sources: Array<{ id: string; url: string | null; durationUs: number }>,
+): Map<string, Filmstrip> {
+  const [strips, setStrips] = useState<Map<string, Filmstrip>>(new Map());
+
+  // The effect must not re-run because an array literal was rebuilt; what it depends on is
+  // which sources exist and where their bytes are.
+  const identity = sources.map((source) => `${source.id}:${source.url}:${source.durationUs}`).join('|');
+
+  useEffect(() => {
+    let live = true;
+    const ready = new Map<string, Filmstrip>();
+
+    for (const source of sources) {
+      if (!source.url || source.durationUs <= 0) continue;
+      void loadFilmstrip(source.id, source.url, source.durationUs, (next) => {
+        if (!live) return;
+        ready.set(source.id, next);
+        // A new Map each time, because React compares by identity — but only one, rather
+        // than one per clip.
+        setStrips(new Map(ready));
+      });
+    }
+
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity]);
+
+  return strips;
+}
+
 /** The frame to show for a given source time — the last one at or before it. */
 export function frameAt(strip: Filmstrip, sourceTimeUs: number): Frame | null {
   if (strip.frames.length === 0) return null;

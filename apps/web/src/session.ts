@@ -14,6 +14,7 @@ import {
   resolveReview,
   type ColorValue,
   type Op,
+  type SetTransformOp,
   type OpPreview,
   type OpVerdict,
   type Project,
@@ -88,6 +89,9 @@ function deriveReview(project: Project): Project {
 }
 
 export type SessionStatus = 'loading' | 'empty' | 'ready';
+
+/** The keyframe shape `setTransform` takes, named so the UI does not have to spell it. */
+export type TransformKeyframe = NonNullable<SetTransformOp['keyframes']>[number];
 
 /**
  * A refinement pass, mid-flight.
@@ -185,6 +189,12 @@ export interface Session {
   setClipColor(clipId: string, color: ColorValue | null): void;
   /** The same grade on every clip in the timeline, as one revision. */
   applyColorToAll(color: ColorValue | null): void;
+  /** Framing over time for one clip. `null` clears it. */
+  setClipTransform(clipId: string, keyframes: TransformKeyframe[] | null): void;
+  /** How fast one clip plays. */
+  setClipSpeed(clipId: string, speed: number): void;
+  /** Copy a clip, with its grade, speed and framing, after itself or at the head. */
+  duplicateClip(clipId: string, at: 'after' | 'start'): void;
 
   /** True once the player has reported that this browser cannot seek the media. */
   seekingUnsupported: boolean;
@@ -693,6 +703,27 @@ export function useSession(): Session {
       );
     },
     [edit, project],
+  );
+
+  const setClipTransform = useCallback(
+    (clipId: string, keyframes: TransformKeyframe[] | null) => {
+      edit('clip.transform', [{ op: 'setTransform', clipId, keyframes }]);
+    },
+    [edit],
+  );
+
+  const setClipSpeed = useCallback(
+    (clipId: string, speed: number) => {
+      edit('clip.speed', [{ op: 'setSpeed', clipId, speed }]);
+    },
+    [edit],
+  );
+
+  const duplicateClip = useCallback(
+    (clipId: string, at: 'after' | 'start') => {
+      edit('clip.duplicate', [{ op: 'duplicateClip', clipId, at }]);
+    },
+    [edit],
   );
 
   const clipAtPlayhead = useCallback(() => {
@@ -1280,6 +1311,9 @@ export function useSession(): Session {
     commitTrim,
     setClipColor,
     applyColorToAll,
+    setClipTransform,
+    setClipSpeed,
+    duplicateClip,
     seekingUnsupported,
     reportMediaDiagnostics,
     requestRefinement,
