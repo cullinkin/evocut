@@ -40,6 +40,7 @@ import {
 import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
+import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
 import { EMPTY_SETTINGS, useSettings, type RefinementSettings } from './settings.ts';
 
@@ -499,6 +500,7 @@ export function useSession(): Session {
     // The frames belong to this project's media. Holding a hundred JPEGs for a project
     // nobody has open is memory spent on nothing.
     forgetContactSheets();
+    resetPlayhead();
     setProject(null);
     setEvents([]);
     setMediaUrls(new Map());
@@ -554,10 +556,10 @@ export function useSession(): Session {
 
       setHistory((previous) => [...previous, project].slice(-HISTORY_LIMIT));
       setProject(next);
-      record(type, { ops: result.applied, revisionId: result.revision.id, playhead });
+      record(type, { ops: result.applied, revisionId: result.revision.id, playhead: getPlayhead() });
       scheduleSave(next);
     },
-    [playhead, project, record, scheduleSave],
+    [project, record, scheduleSave],
   );
 
   /**
@@ -583,13 +585,24 @@ export function useSession(): Session {
     scheduleSave(previous);
   }, [history, playhead, project, record, scheduleSave]);
 
+  /**
+   * Move the playhead.
+   *
+   * The store is written every time; React state is written only on a *final* seek, plus a
+   * coalesced catch-up on the same timer as the scrub log. A scroll and a playing video
+   * both call this sixty times a second, and putting sixty renders of the whole editor
+   * behind each gesture is the jank — the four or five things that genuinely need the
+   * position at 60Hz subscribe to the store instead.
+   */
   const seek = useCallback(
     (to: number, final = true) => {
       const target = Math.max(0, to);
-      setPlayhead(target);
+      writePlayhead(target);
 
       const now = Date.now();
-      if (!final && now - lastScrubLogRef.current < SCRUB_LOG_INTERVAL_MS) return;
+      const due = now - lastScrubLogRef.current >= SCRUB_LOG_INTERVAL_MS;
+      if (final || due) setPlayhead(target);
+      if (!final && !due) return;
       lastScrubLogRef.current = now;
       record(final ? 'playback.seek' : 'playback.scrub', { playhead: target });
     },
@@ -731,16 +744,20 @@ export function useSession(): Session {
     return (
       clips.find((clip) => {
         const end = clip.start + Math.round((clip.sourceOut - clip.sourceIn) / clip.speed);
-        return clip.enabled && playhead >= clip.start && playhead < end;
+        const at = getPlayhead();
+        return clip.enabled && at >= clip.start && at < end;
       }) ?? null
     );
-  }, [project, playhead]);
+  }, [project]);
 
   const splitAtPlayhead = useCallback(() => {
     const clip = clipAtPlayhead();
     if (!clip) return;
-    edit('clip.split', [{ op: 'split', clipId: clip.id, at: playhead }]);
-  }, [clipAtPlayhead, edit, playhead]);
+    // The live position, not React's copy of it. A cut has to land where the playhead is
+    // *now* — the coalesced value can be a fraction of a second behind after a scroll, and
+    // a cut a fraction of a second off is a cut in the wrong place.
+    edit('clip.split', [{ op: 'split', clipId: clip.id, at: getPlayhead() }]);
+  }, [clipAtPlayhead, edit]);
 
   const removeClip = useCallback(
     (clipId: string) => {

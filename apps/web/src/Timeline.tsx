@@ -12,6 +12,7 @@ import {
 } from '@evocut/edl';
 import type { OpPreview } from '@evocut/edl';
 import { frameAt, useFilmstrips, type Filmstrip } from './filmstrip.ts';
+import { usePlayhead } from './playhead.ts';
 
 /**
  * The editing timeline: draggable playhead, tap-to-select clips, drag-the-edges trimming.
@@ -76,7 +77,6 @@ export interface TimelineProps {
   timeline: TimelineDoc;
   sources: Source[];
   mediaUrls: Map<string, string>;
-  playhead: number;
   selectedClipId: string | null;
   frozen: boolean;
   /** Open suggestions, drawn as bubbles over the clips they touch. */
@@ -121,7 +121,6 @@ export function TimelineEditor({
   timeline,
   sources,
   mediaUrls,
-  playhead,
   selectedClipId,
   frozen,
   previews,
@@ -168,6 +167,10 @@ export function TimelineEditor({
   const noteHand = useCallback(() => {
     handRef.current = true;
   }, []);
+
+  // Subscribed rather than passed in. The lane is one of the four things that genuinely
+  // needs the playhead at 60Hz; the rest of the app is not, and used to render anyway.
+  const playhead = usePlayhead();
 
   const clips = timeline.tracks[0]?.clips ?? [];
   const committedTotal = timelineDuration(timeline);

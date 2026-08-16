@@ -123,10 +123,19 @@ const scroll = await measure('fit');
 set('scrollAtFit', scroll);
 // 16ms is a frame. A gap past 250ms is a stall you can feel; the reported freeze was
 // seconds. This is the number the complaint is about.
-check('theMainThreadStaysFree', scroll.longestGapMs < 250, true);
-// Measured: 36ms with the lane memoised, 66ms without, under 6x throttling. The threshold
-// sits between them on purpose — this is the check that fails if the memo is ever lost.
-check('andMostFramesArePrompt', scroll.medianGapMs < 50, true);
+check('theMainThreadStaysFree', scroll.longestGapMs < 150, true);
+/*
+  Measured under 6x throttling on this fixture, as the fixes landed:
+
+    66ms  a playhead in React state, a filmstrip subscription per clip, unmemoised blocks
+    36ms  one subscription, memoised blocks, scroll coalesced to an animation frame
+    23ms  the playhead moved out of React entirely, into a store the four things that
+          actually need it subscribe to
+
+  The threshold sits below the middle number, so losing either fix fails here rather than
+  in someone's hands.
+*/
+check('andMostFramesArePrompt', scroll.medianGapMs < 32, true);
 // The lane's contents are a function of the clips, the zoom and the selection — none of
 // which a scroll changes. Any mutation here is work being done for nothing, per frame.
 check('scrollingDoesNotRebuildTheLane', scroll.laneMutations, 0);
@@ -142,7 +151,7 @@ for (let i = 0; i < 4 && !(await zoomIn.isDisabled()); i += 1) {
 const close = await measure('zoomed');
 set('scrollZoomedIn', close);
 check('theMainThreadStaysFreeZoomedIn', close.longestGapMs < 250, true);
-check('andMostFramesArePromptZoomedIn', close.medianGapMs < 50, true);
+check('andMostFramesArePromptZoomedIn', close.medianGapMs < 40, true);
 check('scrollingDoesNotRebuildTheLaneZoomedIn', close.laneMutations, 0);
 
 // --- And it still scrubs -----------------------------------------------------------

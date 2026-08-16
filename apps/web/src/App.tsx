@@ -11,7 +11,7 @@ import {
 import type { MissingMedia, ProjectSummary } from '@evocut/store';
 import { AdjustSheet } from './Adjust.tsx';
 import { SpeedSheet } from './Speed.tsx';
-import { TransformSheet, valueAt, type Keyframe } from './Transform.tsx';
+import { TransformPanel, type Keyframe } from './Transform.tsx';
 import { BriefSheet } from './Brief.tsx';
 import { ExportPanel } from './Export.tsx';
 import { SettingsScreen } from './Settings.tsx';
@@ -19,6 +19,7 @@ import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { SuggestionSheet } from './Suggestion.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
+import { usePlayhead } from './playhead.ts';
 import { downloadLog, downloadProject, useSession, type RefineProgress } from './session.ts';
 
 /**
@@ -205,9 +206,6 @@ export function App() {
   const framingDuration = framingClip
     ? Math.round((framingClip.sourceOut - framingClip.sourceIn) / framingClip.speed)
     : 0;
-  // Where the playhead sits *inside* the clip being framed. Keyframe times are clip-relative
-  // — a shot's move is a property of the shot, not of where it happens to sit in the edit.
-  const withinClip = framingClip ? Math.max(0, Math.min(framingDuration, playhead - framingClip.start)) : 0;
 
   // The export owns the whole screen while it runs. It takes about as long as the video
   // is, the tab has to stay in front for it, and a progress bar tucked into a corner of a
@@ -292,14 +290,11 @@ export function App() {
         <Player
           objectUrl={mediaUrl}
           timeline={project.timeline}
-          playhead={playhead}
           playing={playing}
           scrubbing={drag !== null}
           scrubSourceTime={drag?.scrubSourceTime ?? null}
           previewColor={adjusting}
-          previewTransform={
-            framing ? { clipId: framing.clipId, value: valueAt(framing.keys, withinClip) } : null
-          }
+          previewTransform={framing ? { clipId: framing.clipId, keys: framing.keys } : null}
           onTime={onTime}
           onEnded={onEnded}
           onDiagnostics={session.reportMediaDiagnostics}
@@ -321,17 +316,13 @@ export function App() {
         <button className="play" onClick={() => setPlaying((p) => !p)} disabled={!mediaUrl}>
           {playing ? '❚❚' : '▶'}
         </button>
-        <span className="clock">
-          {formatTimecode(playhead, undefined, { compact: true })}
-          <em> / {formatTimecode(total, undefined, { compact: true })}</em>
-        </span>
+        <TransportClock totalUs={total} />
       </div>
 
       <TimelineEditor
         timeline={project.timeline}
         sources={project.sources}
         mediaUrls={session.mediaUrls}
-        playhead={playhead}
         selectedClipId={session.selectedClipId}
         frozen={frozen}
         previews={previews}
@@ -343,18 +334,46 @@ export function App() {
         onOpenSuggestion={setOpenSuggestion}
       />
 
+      {/*
+        While framing, the panel *replaces* the toolbar rather than covering the timeline.
+        That is the whole design: the preview keeps its height, the timeline stays where it
+        always is and stays live, and keys drop at the playhead you scrub to with it.
+      */}
+      {framing && framingClip ? (
+        <TransformPanel
+          clipNumber={clips.indexOf(framingClip) + 1 || null}
+          clipStartUs={framingClip.start}
+          durationUs={framingDuration}
+          keyframes={framing.keys}
+          onChange={(keys) => setFraming((current) => (current ? { ...current, keys } : current))}
+          onCommit={(keys) => {
+            session.setClipTransform(framing.clipId, keys);
+            setFraming(null);
+          }}
+          onClose={() => setFraming(null)}
+        />
+      ) : (
       <nav className="toolbar" aria-label="Editing tools">
         <button onClick={session.undo} disabled={!session.canUndo} aria-label="Undo">
           <span aria-hidden="true">⤺</span>
           <small>Undo</small>
         </button>
-        <button onClick={session.splitAtPlayhead} disabled={frozen} aria-label="Cut at playhead">
+        {/*
+          Not gated on the coarse pass being committed.
+
+          Cut, Drop and Delete were all disabled once you pressed Done, on the theory that
+          freezing the coarse pass protects it. It does not need protecting: `coarseSnapshot`
+          keeps a copy of exactly what the coarse pass was, and the detailed edit is the
+          thing that happens *after* Done. So the gate did nothing but grey out the three
+          most-used buttons in the editor for the entire second half of the work.
+        */}
+        <button onClick={session.splitAtPlayhead} aria-label="Cut at playhead">
           <span aria-hidden="true">✂</span>
           <small>Cut</small>
         </button>
         <button
           onClick={() => selected && session.toggleClip(selected.id)}
-          disabled={frozen || !selected}
+          disabled={!selected}
           aria-label={selected?.enabled === false ? 'Restore clip' : 'Drop clip'}
         >
           <span aria-hidden="true">{selected?.enabled === false ? '◍' : '◌'}</span>
@@ -363,7 +382,7 @@ export function App() {
         <button
           className="danger"
           onClick={session.deleteSelected}
-          disabled={frozen || !selected}
+          disabled={!selected}
           aria-label="Delete clip"
         >
           <span aria-hidden="true">🗑</span>
@@ -382,6 +401,7 @@ export function App() {
           <small>Clip</small>
         </button>
       </nav>
+      )}
 
       {showClipMenu && adjustTarget && (
         <div className="sheet clip-menu" role="dialog" aria-label="Clip tools">
@@ -461,22 +481,6 @@ export function App() {
             teaser: the finished shot, appearing once up front and again where it belongs.
           </p>
         </div>
-      )}
-
-      {framing && framingClip && (
-        <TransformSheet
-          clipNumber={clips.indexOf(framingClip) + 1 || null}
-          durationUs={framingDuration}
-          atUs={withinClip}
-          keyframes={framing.keys}
-          onSeekWithin={(us) => session.seek(framingClip.start + us)}
-          onChange={(keys) => setFraming((current) => (current ? { ...current, keys } : current))}
-          onCommit={(keys) => {
-            session.setClipTransform(framing.clipId, keys);
-            setFraming(null);
-          }}
-          onClose={() => setFraming(null)}
-        />
       )}
 
       {retiming && retimingClip && (
@@ -614,6 +618,22 @@ export function App() {
         </button>
       </footer>
     </main>
+  );
+}
+
+/**
+ * The running time, on its own.
+ *
+ * A component of its own so that the playhead moving re-renders four words rather than the
+ * transport row, the toolbar and everything else that happens to be a sibling.
+ */
+function TransportClock({ totalUs }: { totalUs: number }) {
+  const playhead = usePlayhead();
+  return (
+    <span className="clock">
+      {formatTimecode(playhead, undefined, { compact: true })}
+      <em> / {formatTimecode(totalUs, undefined, { compact: true })}</em>
+    </span>
   );
 }
 

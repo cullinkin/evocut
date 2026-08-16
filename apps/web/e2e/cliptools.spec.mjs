@@ -44,34 +44,64 @@ const openTool = async (name) => {
 const effectsOf = (edl, index, type) =>
   edl.timeline.tracks[0].clips[index].effects.filter((effect) => effect.type === type);
 
-// --- Transform: a move, built the way an editor builds one ------------------------------
-await scrubTo(page, 0.05);
+/*
+  --- Transform: a move, built the way an editor builds one ------------------------------
+
+  On the *second* clip deliberately. Keyframe times are clip-relative, and on the first clip
+  — which starts at zero — clip-relative and absolute are the same number, so a spec that
+  frames clip one cannot tell the two apart and will pass either way.
+*/
+await scrubTo(page, 0.4);
 await page.waitForTimeout(400);
-await page.locator('.clip-block').first().click();
+await page.locator('.clip-block').nth(1).click();
 await openTool('Transform');
-await page.locator('.sheet.transform').waitFor({ timeout: 5000 });
+await page.locator('.panel.transform').waitFor({ timeout: 5000 });
 
-const keyline = page.locator('.keyline input[type=range]');
-const slider = (name) => page.locator(`.sheet.transform input[aria-label="${name}"]`);
+const tab = (name) => page.locator(`.panel.transform .tab:has-text("${name}")`);
+const slider = (name) => page.locator(`.panel.transform input[aria-label="${name}"]`);
+const keyCount = async () => {
+  const text = await page.locator('.panel-title em').innerText();
+  const found = /(\d+) key/.exec(text);
+  return found ? Number(found[1]) : 0;
+};
 
-check('itStartsWithNoKeyframes', await page.locator('.keyline .key').count(), 0);
+/*
+  The panel replaces the toolbar rather than covering the timeline, which is the point of
+  the layout: the preview keeps its height, and the timeline is still there to scrub with.
+*/
+check('theTimelineIsStillUsable', await page.locator('.timeline-scroller').isVisible(), true);
+check('andThePreviewIsStillOnScreen', await page.locator('.player video.live').isVisible(), true);
+check('theToolbarStoodAside', await page.locator('nav.toolbar').count(), 0);
+check('itStartsWithNoKeyframes', await keyCount(), 0);
 
 // Frame the head of the shot, which drops the first key.
-await keyline.fill('0');
+await page.locator('.panel.transform button[aria-label="Add keyframe"]').click();
+await page.waitForTimeout(150);
+check('addingAKeyIsCounted', await keyCount(), 1);
+await tab('Zoom').click();
 await slider('Zoom').fill('100');
 await page.waitForTimeout(150);
-await page.locator('.sheet.transform button:has-text("Add key")').click();
-await page.waitForTimeout(150);
-check('addingAKeyMarksTheStrip', await page.locator('.keyline .key').count(), 1);
 
-// Scrub forward inside the clip and change the framing. This must become a *second* key.
-await keyline.fill('900');
-await page.waitForTimeout(200);
+// Scrub with the real timeline — the panel has no clock of its own — then adjust. That
+// adjustment must become a *second* key rather than editing the first.
+await scrubTo(page, 0.55);
+await page.waitForTimeout(250);
 await slider('Zoom').fill('160');
-await slider('Pan across').fill('12');
+await tab('Position').click();
+await slider('X axis').fill('12');
 await page.waitForTimeout(200);
-set('keysAfterSecondAdjustment', await page.locator('.keyline .key').count());
-check('adjustingLaterMakesItsOwnKey', await page.locator('.keyline .key').count(), 2);
+set('keysAfterSecondAdjustment', await keyCount());
+check('adjustingLaterMakesItsOwnKey', await keyCount(), 2);
+
+// Undo and redo walk the panel's own draft, so a nudge too far costs one tap.
+await page.locator('.panel.transform button[aria-label="Undo framing"]').click();
+await page.waitForTimeout(150);
+const undone = await slider('X axis').inputValue();
+await page.locator('.panel.transform button[aria-label="Redo framing"]').click();
+await page.waitForTimeout(150);
+set('undoRedo', { undone, redone: await slider('X axis').inputValue() });
+check('undoTookTheNudgeBack', undone !== '12', true);
+check('andRedoPutItBack', await slider('X axis').inputValue(), '12');
 
 // The preview shows the framing while it is being set — the element's own transform.
 const liveTransform = await page.evaluate(
@@ -81,23 +111,30 @@ set('previewTransform', liveTransform);
 check('thePreviewIsFramedWhileYouFrameIt', liveTransform !== 'none', true);
 await page.screenshot({ path: artifact('transform-sheet.png') });
 
-await page.locator('.sheet.transform .sheet-actions .primary').click();
+await page.locator('.panel.transform button[aria-label="Done"]').click();
 await page.waitForTimeout(400);
 
 const framed = await exportEdl(page, 'tools-transform.json');
-const move = effectsOf(framed, 0, 'transform')[0];
+const framedClip = framed.timeline.tracks[0].clips[1];
+const framedLength = Math.round((framedClip.sourceOut - framedClip.sourceIn) / framedClip.speed);
+const move = effectsOf(framed, 1, 'transform')[0];
 set('transformKeyframes', move?.keyframes?.map((k) => ({ t: k.t, scale: k.value.scale })));
+set('framedClip', { start: framedClip.start, length: framedLength });
 check('theMoveIsInTheEdl', move?.keyframes?.length, 2);
 check('andItGoesFromWhereToWhere', move.keyframes[1].value.scale > move.keyframes[0].value.scale, true);
-// Clip-relative, because a shot's move belongs to the shot rather than to where it sits.
-check('keyframesAreClipRelative', move.keyframes[0].t, 0);
-check('andTheSecondIsInsideTheClip', move.keyframes[1].t <= framed.timeline.tracks[0].clips[0].sourceOut, true);
+/*
+  Clip-relative, because a shot's move belongs to the shot rather than to where it sits.
+  This clip starts well into the edit, so a keyframe recorded in timeline time would be
+  larger than the clip is long — which is exactly what this rules out.
+*/
+check('keyframesAreClipRelative', move.keyframes.every((k) => k.t <= framedLength), true);
+check('andNotTimelineTime', move.keyframes.every((k) => k.t < framedClip.start), true);
 // One op for the whole session with the sheet, not one per slider movement.
 check('oneRevisionForTheWholeMove', framed.revisions.at(-1).ops.length, 1);
 check('andItIsASetTransform', framed.revisions.at(-1).ops[0].op, 'setTransform');
 
 // --- Speed: the fine half is actually fine ---------------------------------------------
-await page.locator('.clip-block').nth(1).click();
+await page.locator('.clip-block').nth(2).click();
 await openTool('Speed');
 await page.locator('.sheet.speed').waitFor({ timeout: 5000 });
 
@@ -128,19 +165,19 @@ await page.waitForTimeout(400);
 
 const retimed = await exportEdl(page, 'tools-speed.json');
 set('speeds', retimed.timeline.tracks[0].clips.map((c) => c.speed));
-check('theSpeedIsInTheEdl', retimed.timeline.tracks[0].clips[1].speed, 2);
+check('theSpeedIsInTheEdl', retimed.timeline.tracks[0].clips[2].speed, 2);
 check('andOnlyOnThatClip', retimed.timeline.tracks[0].clips[0].speed, 1);
 
 // --- Duplicate: the finished shot, twice ------------------------------------------------
-// The first clip carries a move and a grade, so "did the copy bring them" has an answer.
-await page.locator('.clip-block').first().click();
+// Clip 2 carries the move, so grading it too makes "did the copy bring them" one question.
+await page.locator('.clip-block').nth(1).click();
 await openTool('Adjust');
 await page.locator('.sheet.adjust').waitFor({ timeout: 5000 });
 await page.locator('.sheet.adjust input[aria-label^="Saturation"]').fill('45');
 await page.locator('.sheet.adjust .sheet-actions .primary').click();
 await page.waitForTimeout(400);
 
-await page.locator('.clip-block').first().click();
+await page.locator('.clip-block').nth(1).click();
 await page.locator('button[aria-label="Clip tools"]').click();
 await page.locator('.sheet.clip-menu').waitFor({ timeout: 5000 });
 await page.locator('.sheet.clip-menu button:has-text("To the start")').click();
@@ -151,13 +188,13 @@ const clipsNow = copied.timeline.tracks[0].clips;
 set('clipCountAfterDuplicate', clipsNow.length);
 check('thereIsOneMoreClip', clipsNow.length, 4);
 check('theCopyIsAtTheHead', clipsNow[0].start, 0);
-check('andItIsTheSameFootage', clipsNow[0].sourceIn, clipsNow[1].sourceIn);
+check('andItIsTheSameFootage', clipsNow[0].sourceIn, clipsNow[2].sourceIn);
 // The point of duplicating rather than inserting: it is the *finished* shot.
 check('theCopyBroughtTheGrade', effectsOf(copied, 0, 'color').length, 1);
 check('andTheMove', effectsOf(copied, 0, 'transform')[0]?.keyframes?.length, 2);
 // Its own ids, or editing one edits both.
-check('withItsOwnClipId', clipsNow[0].id !== clipsNow[1].id, true);
-check('andItsOwnEffectIds', effectsOf(copied, 0, 'color')[0].id !== effectsOf(copied, 1, 'color')[0].id, true);
+check('withItsOwnClipId', clipsNow[0].id !== clipsNow[2].id, true);
+check('andItsOwnEffectIds', effectsOf(copied, 0, 'color')[0].id !== effectsOf(copied, 2, 'color')[0].id, true);
 
 // --- And it survives a reload ------------------------------------------------------------
 await page.waitForTimeout(700);
@@ -169,11 +206,11 @@ const reopened = await exportEdl(page, 'tools-reload.json');
 set('afterReload', {
   clips: reopened.timeline.tracks[0].clips.length,
   keys: effectsOf(reopened, 0, 'transform')[0]?.keyframes?.length,
-  speed: reopened.timeline.tracks[0].clips[2].speed,
+  speeds: reopened.timeline.tracks[0].clips.map((c) => c.speed),
 });
 check('everythingSurvivedTheReload', reopened.timeline.tracks[0].clips.length, 4);
 check('theMoveSurvived', effectsOf(reopened, 0, 'transform')[0]?.keyframes?.length, 2);
-check('theSpeedSurvived', reopened.timeline.tracks[0].clips[2].speed, 2);
+check('theSpeedSurvived', reopened.timeline.tracks[0].clips[3].speed, 2);
 
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();

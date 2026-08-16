@@ -5,9 +5,12 @@ import {
   sourceToTimeline,
   type ColorValue,
   type Timeline,
+  sampleTransform,
+  type Easing,
   type TransformValue,
 } from '@evocut/edl';
 import { filterFor, paintedSize, previewTransform, sampleTimeline, type FrameLayer } from '@evocut/renderer';
+import { usePlayhead } from './playhead.ts';
 
 /**
  * Preview player.
@@ -60,7 +63,6 @@ import { filterFor, paintedSize, previewTransform, sampleTimeline, type FrameLay
 export interface PlayerProps {
   objectUrl: string;
   timeline: Timeline;
-  playhead: number;
   playing: boolean;
   /** True while any drag is live: seeks go approximate and playback stands down. */
   scrubbing?: boolean;
@@ -79,8 +81,15 @@ export interface PlayerProps {
    * change that is not going to be made.
    */
   previewColor?: { clipId: string; value: ColorValue } | null;
-  /** The same, for framing, while the Transform sheet is open. */
-  previewTransform?: { clipId: string; value: TransformValue } | null;
+  /**
+   * The same, for framing, while the Transform panel is open.
+   *
+   * The whole keyframe list rather than one sampled value, because the panel no longer owns
+   * the clock: the playhead moves with the real timeline underneath it, and the preview has
+   * to show the framing *at the moment on screen* — which during playback is a different
+   * value every frame.
+   */
+  previewTransform?: { clipId: string; keys: TransformKeyframes } | null;
   onTime(outputTime: number): void;
   onEnded(): void;
   /** Reports what the element can do with this media, once metadata has loaded. */
@@ -120,10 +129,15 @@ const CONTIGUOUS_US = 20_000;
  */
 const SCRUB_SEEK_INTERVAL_MS = 160;
 
+/** What an empty draft looks like: no framing at all. */
+const IDENTITY_FRAMING: TransformValue = { scale: 1, x: 0, y: 0, rotation: 0 };
+
+/** The keyframe list the Transform panel hands over. */
+type TransformKeyframes = Array<{ t: number; value: TransformValue; easing: Easing }>;
+
 export function Player({
   objectUrl,
   timeline,
-  playhead,
   playing,
   scrubbing = false,
   scrubSourceTime = null,
@@ -151,6 +165,10 @@ export function Player({
   const liveVideo = useCallback(() => at(liveRef.current), [at]);
   const spareVideo = useCallback(() => at(1 - liveRef.current), [at]);
 
+  // Subscribed rather than passed in: a scroll moves the playhead sixty times a second, and
+  // the point of the store is that only the handful of components that need that rate pay
+  // for it. This is one of them.
+  const playhead = usePlayhead();
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
   const scrubRef = useRef<number | null>(scrubSourceTime);
@@ -190,7 +208,11 @@ export function Player({
 
     const framing = transformDraftRef.current;
     const transform =
-      framing && framing.clipId === layer.clip.id ? framing.value : layer.transform;
+      framing && framing.clipId === layer.clip.id && framing.keys.length > 0
+        ? sampleTransform(framing.keys, layer.clipOffset)
+        : framing && framing.clipId === layer.clip.id
+          ? IDENTITY_FRAMING
+          : layer.transform;
     const box = video.getBoundingClientRect();
     video.style.transform = previewTransform(
       transform,
