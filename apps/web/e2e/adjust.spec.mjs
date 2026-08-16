@@ -41,7 +41,7 @@ set('filterBeforeAdjusting', before);
 check('anUntouchedClipHasNoFilter', before === '' || before === 'none', true);
 
 // --- The sliders reach the picture -----------------------------------------------------
-await openClipTool(page, 'Adjust');
+await openClipTool(page, 'Adjust colour');
 await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
 
 /*
@@ -83,7 +83,7 @@ check('oneRevisionForTheWholeAdjustment', graded.revisions.at(-1).ops.length, 1)
 check('andItIsASetColorOp', graded.revisions.at(-1).ops[0].op, 'setColor');
 
 // --- Apply to all ----------------------------------------------------------------------
-await openClipTool(page, 'Adjust');
+await openClipTool(page, 'Adjust colour');
 await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
 // It reopens on the grade the clip already has, rather than on zero.
 await tab('Saturation').click();
@@ -102,7 +102,7 @@ set('undoRedo', { undone, redone: await slider().inputValue() });
 check('undoTookTheNudgeBack', undone !== '-25', true);
 check('andRedoPutItBack', await slider().inputValue(), '-25');
 
-await page.locator('.panel.adjust button:has-text("Apply to all")').click();
+await page.locator('.panel.adjust button[aria-label="Apply to all clips"]').click();
 await page.waitForTimeout(500);
 
 const all = await exportEdl(page, 'adjust-all.json');
@@ -125,7 +125,7 @@ check('appliedAsASingleRevision', all.revisions.at(-1).ops.length, 3);
  * pixels has something definite to say about it, and one that is returning a canned answer
  * or failing silently has nothing.
  */
-await openClipTool(page, 'Adjust');
+await openClipTool(page, 'Adjust colour');
 await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
 await page.locator('.panel.adjust button:has-text("Reset")').click();
 await page.locator('.panel.adjust button:has-text("Auto")').click();
@@ -141,7 +141,9 @@ const everySlider = async () => {
   return out;
 };
 const autoValues = await everySlider();
-const autoNote = await page.locator('.panel-title em').innerText();
+// The note takes the caption's place under the slider — the same line, saying the more
+// useful of the two things, because a panel this short has no room for both.
+const autoNote = await page.locator('.panel.adjust .slider-name small').innerText();
 set('autoValues', autoValues);
 set('autoNote', autoNote);
 check('autoProposedSomething', autoValues.some((amount) => amount !== 0), true);
@@ -181,7 +183,7 @@ set('filterAfterReload', restored);
 check('andIsPaintedOnTheRestoredPreview', /brightness\(/.test(restored), true);
 
 // --- Reset -----------------------------------------------------------------------------
-await openClipTool(page, 'Adjust');
+await openClipTool(page, 'Adjust colour');
 await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
 await page.locator('.panel.adjust button:has-text("Reset")').click();
 await page.locator('.panel.adjust button[aria-label="Done"]').click();

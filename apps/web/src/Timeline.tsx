@@ -78,6 +78,14 @@ export interface TimelineProps {
   sources: Source[];
   mediaUrls: Map<string, string>;
   selectedClipId: string | null;
+  /**
+   * Framing keyframes being drafted right now, if the Transform panel is open.
+   *
+   * Passed in rather than read off the clip, because the whole point of a draft is that it
+   * is not on the clip yet — and a keyframe you have just dropped has to appear on the
+   * timeline immediately or you cannot tell whether it landed.
+   */
+  draftKeys?: { clipId: string; keys: Array<{ t: number }> } | null;
   frozen: boolean;
   /** Open suggestions, drawn as bubbles over the clips they touch. */
   previews: OpPreview[];
@@ -122,6 +130,7 @@ export function TimelineEditor({
   sources,
   mediaUrls,
   selectedClipId,
+  draftKeys = null,
   frozen,
   previews,
   accepted,
@@ -585,6 +594,7 @@ export function TimelineEditor({
                   strip={strips.get(clip.sourceId)}
                   left={box.left}
                   width={box.width}
+                  keys={draftKeys?.clipId === clip.id ? draftKeys.keys : keyframesOn(clip)}
                   draft={draft?.clipId === clip.id ? draft : null}
                   selected={clip.id === selectedClipId}
                   onSelect={onSelect}
@@ -690,6 +700,7 @@ const ClipBlock = memo(function ClipBlock({
   strip,
   left,
   width,
+  keys,
   draft,
   selected,
   onSelect,
@@ -699,6 +710,8 @@ const ClipBlock = memo(function ClipBlock({
   strip: Filmstrip | undefined;
   left: number;
   width: number;
+  /** Framing keyframes, in clip-output microseconds. */
+  keys: ReadonlyArray<{ t: number }>;
   draft: TrimDraft | null;
   selected: boolean;
   onSelect(clipId: string): void;
@@ -706,6 +719,7 @@ const ClipBlock = memo(function ClipBlock({
   const geometry = { left, width };
   const sourceIn = draft ? draft.sourceIn : clip.sourceIn;
   const sourceOut = draft ? draft.sourceOut : clip.sourceOut;
+  const length = Math.round((sourceOut - sourceIn) / clip.speed);
   const classes = ['clip-block', selected ? 'selected' : '', clip.enabled ? '' : 'dropped', draft ? 'trimming' : '']
     .filter(Boolean)
     .join(' ');
@@ -738,6 +752,24 @@ const ClipBlock = memo(function ClipBlock({
           ),
         )}
       </div>
+      {/*
+        Keyframes, on the clip they belong to.
+
+        Drawn along the bottom edge rather than in the middle, so they read as marks on the
+        shot rather than as things to grab — they are not draggable here, and a diamond
+        sitting over the thumbnails invites a drag that does nothing.
+      */}
+      {keys.length > 0 && (
+        <div className="clip-keys" aria-hidden="true">
+          {keys.map((key) => (
+            <span
+              key={key.t}
+              className="clip-key"
+              style={{ left: `${Math.max(0, Math.min(100, (key.t / Math.max(1, length)) * 100))}%` }}
+            />
+          ))}
+        </div>
+      )}
       <span className="clip-badge">
         {index + 1}
         {clip.speed !== 1 && <em> {clip.speed}×</em>}
@@ -752,6 +784,18 @@ const ClipBlock = memo(function ClipBlock({
     </div>
   );
 });
+
+/** A clip's committed framing keyframes, or none. */
+function keyframesOn(clip: Clip): ReadonlyArray<{ t: number }> {
+  for (const effect of clip.effects) {
+    if (effect.type === 'transform' && effect.enabled) return effect.keyframes;
+  }
+  return EMPTY_KEYS;
+}
+
+/** One shared empty array, so an ungraded clip's `keys` prop is referentially stable and
+    `memo` keeps bailing out on it. */
+const EMPTY_KEYS: ReadonlyArray<{ t: number }> = [];
 
 /**
  * The trim handles, plus the ghost of the footage waiting on either side.

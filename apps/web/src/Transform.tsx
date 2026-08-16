@@ -154,6 +154,9 @@ export function TransformPanel({
   return (
     <section className="panel transform" aria-label="Transform">
       <div className="panel-top">
+        <button className="close" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
         <button
           className={here ? 'key-toggle on' : 'key-toggle'}
           onClick={toggleKeyframe}
@@ -170,8 +173,22 @@ export function TransformPanel({
           </em>
         </span>
         <PanelHistory {...history} what="framing" />
-        <button className="close" onClick={onClose} aria-label="Close">
-          ✕
+        <button
+          className="ghost small"
+          onClick={() => {
+            history.remember(keyframes);
+            onChange([]);
+          }}
+          disabled={keyframes.length === 0}
+        >
+          Reset
+        </button>
+        <button
+          className="primary confirm"
+          onClick={() => onCommit(keyframes.length > 0 ? keyframes : null)}
+          aria-label="Done"
+        >
+          ✓
         </button>
       </div>
 
@@ -200,25 +217,6 @@ export function TransformPanel({
         ))}
       </div>
 
-      <div className="panel-actions">
-        <button
-          className="ghost"
-          onClick={() => {
-            history.remember(keyframes);
-            onChange([]);
-          }}
-          disabled={keyframes.length === 0}
-        >
-          Reset
-        </button>
-        <button
-          className="primary confirm"
-          onClick={() => onCommit(keyframes.length > 0 ? keyframes : null)}
-          aria-label="Done"
-        >
-          ✓
-        </button>
-      </div>
     </section>
   );
 }

@@ -35,11 +35,7 @@ for (const fraction of [0.35, 0.7]) {
 }
 check('threeClips', await page.locator('.clip-block').count(), 3);
 
-const openTool = async (name) => {
-  await page.locator('button[aria-label="Clip tools"]').click();
-  await page.locator('.sheet.clip-menu').waitFor({ timeout: 5000 });
-  await page.locator(`.sheet.clip-menu .row-link:has-text("${name}")`).click();
-};
+const openTool = (label) => page.locator(`nav.toolbar button[aria-label="${label}"]`).click();
 
 const effectsOf = (edl, index, type) =>
   edl.timeline.tracks[0].clips[index].effects.filter((effect) => effect.type === type);
@@ -109,6 +105,66 @@ const liveTransform = await page.evaluate(
 );
 set('previewTransform', liveTransform);
 check('thePreviewIsFramedWhileYouFrameIt', liveTransform !== 'none', true);
+
+/*
+  A pan moves the picture *within* the frame, and the frame does not move.
+
+  Reported exactly: "the position adjust menu doesn't seem to actually move the picture in
+  the frame. It moves the entire frame left and right up/down in the app." The cause was
+  the video simply filling the player box under `object-fit: contain`, so the picture sat
+  letterboxed in black bars and translating it slid the whole picture around inside them.
+
+  The stage is the output frame now: it holds still and clips, and the source slides behind
+  it — which is what `drawLayer` does against the canvas edges.
+*/
+const framingGeometry = await page.evaluate(() => {
+  const player = document.querySelector('.player').getBoundingClientRect();
+  const stage = document.querySelector('.stage').getBoundingClientRect();
+  const video = document.querySelector('.player video.live').getBoundingClientRect();
+  return {
+    stage: { x: Math.round(stage.x - player.x), width: Math.round(stage.width), height: Math.round(stage.height) },
+    videoOffset: Math.round(video.x - stage.x),
+    clipped: getComputedStyle(document.querySelector('.stage')).overflow,
+  };
+});
+set('framingGeometry', framingGeometry);
+// The panned picture actually left the frame's left edge — otherwise nothing moved.
+check('thePictureMovedInsideTheFrame', framingGeometry.videoOffset !== 0, true);
+// And the frame itself is clipped, so what left the edge is gone rather than drawn beside it.
+check('andTheFrameClipsRatherThanLettingItSpill', framingGeometry.clipped, 'hidden');
+
+// Now prove the frame did not move: pan the other way and measure the stage again.
+await slider('X axis').fill('-40');
+await page.waitForTimeout(200);
+const panned = await page.evaluate(() => {
+  const player = document.querySelector('.player').getBoundingClientRect();
+  const stage = document.querySelector('.stage').getBoundingClientRect();
+  const video = document.querySelector('.player video.live').getBoundingClientRect();
+  return {
+    stageX: Math.round(stage.x - player.x),
+    stageWidth: Math.round(stage.width),
+    videoOffset: Math.round(video.x - stage.x),
+  };
+});
+set('afterPanningTheOtherWay', panned);
+check('theFrameItselfDidNotMove', panned.stageX, framingGeometry.stage.x);
+check('norDidItChangeSize', panned.stageWidth, framingGeometry.stage.width);
+// Compared rather than signed: the picture is also zoomed here, so both offsets are
+// negative — what matters is that panning left moved it left.
+check('butThePictureDid', panned.videoOffset < framingGeometry.videoOffset, true);
+await slider('X axis').fill('12');
+await page.waitForTimeout(150);
+
+// --- Keyframes are on the timeline ------------------------------------------------------
+// A key you cannot see on the lane is a key you cannot tell landed.
+const keysOnLane = await page.locator('.clip-block .clip-key').count();
+set('keysDrawnOnTheLane', keysOnLane);
+check('keyframesShowOnTheTimeline', keysOnLane, 2);
+check(
+  'andOnlyOnTheClipTheyBelongTo',
+  await page.locator('.clip-block').nth(1).locator('.clip-key').count(),
+  2,
+);
 await page.screenshot({ path: artifact('transform-sheet.png') });
 
 await page.locator('.panel.transform button[aria-label="Done"]').click();
@@ -172,7 +228,7 @@ check('andOnlyOnThatClip', retimed.timeline.tracks[0].clips[0].speed, 1);
 // --- Duplicate: the finished shot, twice ------------------------------------------------
 // Clip 2 carries the move, so grading it too makes "did the copy bring them" one question.
 await page.locator('.clip-block').nth(1).click();
-await openTool('Adjust');
+await openTool('Adjust colour');
 await page.locator('.panel.adjust').waitFor({ timeout: 5000 });
 await page.locator('.panel.adjust .tab:has-text("Saturation")').click();
 await page.locator('.panel.adjust input[type=range]').fill('45');
@@ -180,7 +236,7 @@ await page.locator('.panel.adjust button[aria-label="Done"]').click();
 await page.waitForTimeout(400);
 
 await page.locator('.clip-block').nth(1).click();
-await page.locator('button[aria-label="Clip tools"]').click();
+await page.locator('nav.toolbar button[aria-label="Duplicate clip"]').click();
 await page.locator('.sheet.clip-menu').waitFor({ timeout: 5000 });
 await page.locator('.sheet.clip-menu button:has-text("To the start")').click();
 await page.waitForTimeout(500);
@@ -213,6 +269,9 @@ set('afterReload', {
 check('everythingSurvivedTheReload', reopened.timeline.tracks[0].clips.length, 4);
 check('theMoveSurvived', effectsOf(reopened, 0, 'transform')[0]?.keyframes?.length, 2);
 check('theSpeedSurvived', reopened.timeline.tracks[0].clips[3].speed, 2);
+// The keys are drawn from the committed effect once the panel is closed, not only from
+// the draft — a restored project must show its own framing.
+check('andTheKeysAreStillDrawnOnTheLane', (await page.locator('.clip-block .clip-key').count()) >= 2, true);
 
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();

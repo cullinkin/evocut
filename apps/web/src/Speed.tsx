@@ -78,6 +78,9 @@ export function SpeedPanel({
   return (
     <section className="panel speed" aria-label="Speed">
       <div className="panel-top">
+        <button className="close" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
         <span className="speed-readout">
           <strong>{value}×</strong>
         </span>
@@ -88,8 +91,11 @@ export function SpeedPanel({
             {formatTimecode(outputUs, undefined, { compact: true })}
           </em>
         </span>
-        <button className="close" onClick={onClose} aria-label="Close">
-          ✕
+        <button className="ghost small" onClick={() => onChange(1)} disabled={value === 1}>
+          Reset
+        </button>
+        <button className="primary confirm" onClick={() => onCommit(value)} aria-label="Done">
+          ✓
         </button>
       </div>
 
@@ -115,15 +121,6 @@ export function SpeedPanel({
             {mark}×
           </button>
         ))}
-      </div>
-
-      <div className="panel-actions">
-        <button className="ghost" onClick={() => onChange(1)} disabled={value === 1}>
-          Reset
-        </button>
-        <button className="primary confirm" onClick={() => onCommit(value)} aria-label="Done">
-          ✓
-        </button>
       </div>
     </section>
   );

@@ -325,6 +325,7 @@ export function App() {
         sources={project.sources}
         mediaUrls={session.mediaUrls}
         selectedClipId={session.selectedClipId}
+        draftKeys={framing}
         frozen={frozen}
         previews={previews}
         accepted={review?.accepted ?? []}
@@ -422,74 +423,61 @@ export function App() {
           <small>Delete</small>
         </button>
         {/*
-          One slot for four tools. Adjust, Transform, Speed and Duplicate are all
-          per-clip and none of them is reached mid-gesture, so they belong one level in —
-          a nine-button row on a phone is a row you mis-tap.
+          The per-clip tools, as buttons rather than behind a menu.
+
+          They were one level in because eight buttons will not fit across a phone. They
+          still will not — so the row scrolls, sized so five sit on screen and the sixth
+          shows its edge, which is what says there is more without a label saying so.
 
           Not disabled by `frozen`: none of these is part of the coarse pass, and the
           moment you most want them is after the refinement has settled what the video is.
         */}
-        <button onClick={() => setShowClipMenu(true)} disabled={!adjustTarget} aria-label="Clip tools">
-          <span aria-hidden="true">⋯</span>
-          <small>Clip</small>
+        <button
+          onClick={() => adjustTarget && setAdjusting({ clipId: adjustTarget.id, value: colorOf(adjustTarget) })}
+          disabled={!adjustTarget}
+          aria-label="Adjust colour"
+        >
+          <span aria-hidden="true">◐</span>
+          <small>Adjust</small>
+        </button>
+        <button
+          onClick={() => adjustTarget && setFraming({ clipId: adjustTarget.id, keys: keyframesOf(adjustTarget) })}
+          disabled={!adjustTarget}
+          aria-label="Transform"
+        >
+          <span aria-hidden="true">⤢</span>
+          <small>Transform</small>
+        </button>
+        <button
+          onClick={() => adjustTarget && setRetiming({ clipId: adjustTarget.id, speed: adjustTarget.speed })}
+          disabled={!adjustTarget}
+          aria-label="Speed"
+        >
+          <span aria-hidden="true">⏱</span>
+          <small>Speed</small>
+        </button>
+        {/*
+          Duplicate keeps a chooser, because it is the one tool with a question in it:
+          a copy after the clip is a beat repeated, a copy at the head is a teaser, and
+          guessing wrong means an undo either way.
+        */}
+        <button onClick={() => setShowClipMenu(true)} disabled={!adjustTarget} aria-label="Duplicate clip">
+          <span aria-hidden="true">⧉</span>
+          <small>Copy</small>
         </button>
       </nav>
       )}
 
       {showClipMenu && adjustTarget && (
-        <div className="sheet clip-menu" role="dialog" aria-label="Clip tools">
+        <div className="sheet clip-menu" role="dialog" aria-label="Duplicate clip">
           <div className="sheet-head">
             <button className="close" onClick={() => setShowClipMenu(false)} aria-label="Close">
               ✕
             </button>
             <span className="sheet-count">
-              Clip {clips.indexOf(adjustTarget) + 1} of {clips.length}
+              Duplicate clip {clips.indexOf(adjustTarget) + 1} of {clips.length}
             </span>
           </div>
-
-          <button
-            className="row-link"
-            onClick={() => {
-              setShowClipMenu(false);
-              setAdjusting({ clipId: adjustTarget.id, value: colorOf(adjustTarget) });
-            }}
-          >
-            <span>
-              <strong>Adjust</strong>
-              <small>Exposure, contrast, colour. Auto reads the frame on screen.</small>
-            </span>
-            <span aria-hidden="true">›</span>
-          </button>
-
-          <button
-            className="row-link"
-            onClick={() => {
-              setShowClipMenu(false);
-              setFraming({ clipId: adjustTarget.id, keys: keyframesOf(adjustTarget) });
-            }}
-          >
-            <span>
-              <strong>Transform</strong>
-              <small>Zoom, pan and rotation — keyframed, so the frame can move.</small>
-            </span>
-            <span aria-hidden="true">›</span>
-          </button>
-
-          <button
-            className="row-link"
-            onClick={() => {
-              setShowClipMenu(false);
-              setRetiming({ clipId: adjustTarget.id, speed: adjustTarget.speed });
-            }}
-          >
-            <span>
-              <strong>Speed</strong>
-              <small>0.1× to 20×, currently {adjustTarget.speed}×.</small>
-            </span>
-            <span aria-hidden="true">›</span>
-          </button>
-
-          <h2>Duplicate</h2>
           <div className="sheet-actions">
             <button
               onClick={() => {
@@ -510,7 +498,7 @@ export function App() {
             </button>
           </div>
           <p className="meta">
-            A copy carries this clip’s grade, speed and framing. “To the start” is the
+            A copy carries this clip's grade, speed and framing. “To the start” is the
             teaser: the finished shot, appearing once up front and again where it belongs.
           </p>
         </div>

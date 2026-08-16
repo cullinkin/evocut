@@ -244,14 +244,13 @@ export async function exportLog(page, name = 'log.jsonl') {
 /**
  * Open one of the per-clip tools.
  *
- * They live behind a single toolbar slot rather than as four more buttons in the row: a
- * nine-button toolbar on a phone is a toolbar you mis-tap, and none of these is reached
- * mid-gesture. Going through the menu here means a spec fails if that path breaks.
+ * Each is a button in the toolbar now rather than a row inside a menu. The row scrolls —
+ * eight tools do not fit across a phone — so the click has to scroll the button into view
+ * first, which Playwright does, and which is also the thing worth exercising: a tool that
+ * cannot be reached because it is off the end of the row is a tool that does not exist.
  */
-export async function openClipTool(page, name) {
-  await page.locator('button[aria-label="Clip tools"]').click();
-  await page.locator('.sheet.clip-menu').waitFor({ timeout: 5000 });
-  await page.locator(`.sheet.clip-menu .row-link:has-text("${name}")`).click();
+export async function openClipTool(page, label) {
+  await page.locator(`nav.toolbar button[aria-label="${label}"]`).click();
 }
 
 /** Settings → Metadata, leaving the screen open. */

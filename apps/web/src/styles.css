@@ -181,7 +181,9 @@ button.danger {
 
 .player {
   flex: 1 1 auto;
-  min-height: 0;
+  /* A floor, so a tool panel can never take the picture down to a strip. Before this the
+     transform panel left 53px of preview on an iPhone. */
+  min-height: 26vh;
   background: #000;
   border-radius: 12px;
   overflow: hidden;
@@ -190,28 +192,41 @@ button.danger {
   justify-content: center;
 }
 
-/* Two elements, stacked: one playing, one parked on the first frame of the next clip so
-   the cut costs no seek. The spare must stay laid out and composited — `display: none` or
-   `visibility: hidden` lets a browser stop decoding it, which is the one thing it is for —
-   so it is a zero-opacity layer underneath, not a hidden one. */
+/* The stage is the output frame — the timeline's aspect ratio, letterboxed in whatever
+   space the player has, clipping at its own edges.
+
+   That clipping is the whole point. With the video simply filling the player box under
+   `object-fit: contain`, a pan slid the letterboxed picture around inside the black bars
+   instead of moving the framing within a fixed frame. `cover` here rather than `contain`
+   for the same reason the renderer covers at `scale: 1`: any other convention makes the
+   preview and the exported file disagree at every zoom. */
 .player {
   position: relative;
 }
 
-.player video {
+.stage {
+  position: relative;
+  overflow: hidden;
+  /* Sized in pixels by the player, from a ResizeObserver. Not by `aspect-ratio`: with
+     `max-width`/`max-height` the definite dimension wins and the ratio never re-derives,
+     so the box came out the shape of its container rather than the shape of the video. */
+  flex: 0 0 auto;
+}
+
+.stage video {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
 }
 
-.player video.live {
+.stage video.live {
   opacity: 1;
   z-index: 1;
 }
 
-.player video.spare {
+.stage video.spare {
   opacity: 0;
   z-index: 0;
   pointer-events: none;
@@ -505,14 +520,26 @@ button.play {
 
 /* --- Toolbar --- */
 
+/* Eight tools will not fit across a phone, so the row scrolls. Five fit exactly and the
+   sixth shows its edge, which is what tells you there is more without a label saying so. */
 .toolbar {
   display: flex;
   gap: 6px;
   flex: 0 0 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+
+.toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .toolbar button {
-  flex: 1;
+  /* Five across, gaps included, and no shrinking — a flex row that squeezes its children
+     to fit is a row that fits everything badly. */
+  flex: 0 0 calc((100% - 4 * 6px) / 5);
   min-height: 52px;
   display: flex;
   flex-direction: column;
@@ -978,7 +1005,7 @@ button.primary.small {
   appearance: none;
   -webkit-appearance: none;
   width: 100%;
-  height: 36px;
+  height: 32px;
   margin: 0;
   background: transparent;
   /* The lane scrolls-to-scrub underneath; a slider that let its drag through would move
@@ -1441,7 +1468,7 @@ fieldset.duration legend {
 
 .speed-marks {
   position: relative;
-  height: 30px;
+  height: 26px;
   margin-top: -6px;
   /* The strip is decoration; only the ticks on it are controls. Without this the
      container is the topmost element over its own children and eats every tap — which is
@@ -1453,7 +1480,7 @@ fieldset.duration legend {
   position: absolute;
   pointer-events: auto;
   transform: translateX(-50%);
-  min-height: 28px;
+  min-height: 24px;
   padding: 0 8px;
   border: 0;
   border-radius: 8px;
@@ -1474,15 +1501,23 @@ fieldset.duration legend {
    its height and the timeline stays live — you scrub with the timeline you already know
    and keys drop where the playhead is. Three tabs means at most two sliders on screen. */
 
+/* Three rows and no more. The panel takes its height straight out of the preview — a
+   270px panel left 53px of picture on a phone, which is not a preview — so every control
+   in here is 36px rather than the 44px a standalone button gets, and the actions live in
+   the top row instead of a fourth one. */
 .panel {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  gap: 5px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 12px;
+}
+
+.panel button {
+  min-height: 36px;
 }
 
 .panel-top {
@@ -1511,10 +1546,10 @@ fieldset.duration legend {
    and the one the whole flow is built around. */
 button.key-toggle {
   flex: 0 0 auto;
-  width: 44px;
-  min-width: 44px;
+  width: 38px;
+  min-width: 38px;
   padding: 0;
-  font-size: 18px;
+  font-size: 17px;
   color: var(--accent);
 }
 
@@ -1525,9 +1560,22 @@ button.key-toggle.on {
 }
 
 .panel-top button.icon {
-  min-width: 40px;
-  min-height: 40px;
+  min-width: 36px;
+  min-height: 36px;
   padding: 0;
+}
+
+.panel-top button.close {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+}
+
+.panel-top .ghost.small {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0 8px;
 }
 
 .tabs {
@@ -1546,7 +1594,7 @@ button.key-toggle.on {
 button.tab {
   flex: 1 0 auto;
   white-space: nowrap;
-  min-height: 36px;
+  min-height: 30px;
   padding: 0 8px;
   border: 0;
   border-radius: 8px;
@@ -1574,8 +1622,10 @@ button.tab.on {
 }
 
 button.confirm {
-  min-width: 56px;
-  font-size: 18px;
+  flex: 0 0 auto;
+  min-width: 46px;
+  padding: 0 10px;
+  font-size: 17px;
 }
 
 
@@ -1591,4 +1641,29 @@ button.confirm {
 button.primary.small.auto.on {
   background: var(--text);
   border-color: var(--text);
+}
+
+/* Keyframes, on the clip they belong to. Along the bottom edge rather than over the
+   thumbnails: they are marks on the shot, not handles, and a diamond in the middle of a
+   clip invites a drag that does nothing. */
+.clip-keys {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  height: 10px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.clip-key {
+  position: absolute;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  background: var(--accent);
+  border: 1px solid var(--bg);
+  border-radius: 2px;
+  transform: rotate(45deg);
 }

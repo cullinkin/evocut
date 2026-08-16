@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   microsToSeconds,
   secondsToMicros,
@@ -51,6 +51,19 @@ import { usePlayhead } from './playhead.ts';
  * "dragging the playhead does not scrub" looks like from the outside. `fastSeek` asks for
  * the nearest keyframe instead — approximate, and fast enough to track a finger. So every
  * seek made *during* a drag is approximate, and the exact one happens when the drag ends.
+ *
+ * ## The stage is the output frame
+ *
+ * The elements do not fill the player box — they fill a *stage* inside it, sized to the
+ * timeline's own aspect ratio and clipping at its edges. That is what makes a pan mean
+ * anything. With the video simply filling the box under `object-fit: contain`, the picture
+ * sat letterboxed inside black bars, and translating it slid the whole picture around in
+ * the bars instead of moving the framing within a fixed frame: "it moves the entire frame
+ * left and right in the app", which is exactly what it was doing.
+ *
+ * The stage is the frame the export will produce. The source covers it — the renderer's
+ * `scale: 1` means cover, so anything else would make the preview and the file disagree at
+ * every zoom — and slides behind it, cropped, the way `drawLayer` crops against the canvas.
  *
  * ## The loop corrects itself
  *
@@ -149,6 +162,8 @@ export function Player({
 }: PlayerProps) {
   const aRef = useRef<HTMLVideoElement>(null);
   const bRef = useRef<HTMLVideoElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const playerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
   const lastResyncRef = useRef(0);
 
@@ -157,6 +172,36 @@ export function Player({
   const [live, setLive] = useState(0);
   /** Source time the spare has been aimed at, or null when it is aimed at nothing. */
   const preppedRef = useRef<number | null>(null);
+
+  /**
+   * Size the stage to the output frame, fitted inside whatever room the player has.
+   *
+   * In pixels, from a `ResizeObserver`, rather than in CSS. `aspect-ratio` with
+   * `max-width`/`max-height` does not do this: whichever dimension is definite wins, the
+   * clamp applies to the other, and the ratio never re-derives — the stage came out the
+   * shape of the player box instead of the shape of the video. Measuring is exact, and the
+   * measurement is needed anyway, because a pan is a fraction of this box.
+   */
+  useLayoutEffect(() => {
+    const player = playerRef.current;
+    const stage = stageRef.current;
+    if (!player || !stage) return;
+
+    const fit = () => {
+      const box = player.getBoundingClientRect();
+      const size = paintedSize(
+        { width: box.width, height: box.height },
+        { width: timeline.resolution.width, height: timeline.resolution.height },
+      );
+      stage.style.width = `${Math.round(size.width)}px`;
+      stage.style.height = `${Math.round(size.height)}px`;
+    };
+
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(player);
+    return () => observer.disconnect();
+  }, [timeline.resolution.height, timeline.resolution.width]);
 
   const at = useCallback(
     (index: number) => (index === 0 ? aRef.current : bRef.current),
@@ -213,14 +258,15 @@ export function Player({
         : framing && framing.clipId === layer.clip.id
           ? IDENTITY_FRAMING
           : layer.transform;
-    const box = video.getBoundingClientRect();
-    video.style.transform = previewTransform(
-      transform,
-      paintedSize(
-        { width: box.width, height: box.height },
-        { width: video.videoWidth, height: video.videoHeight },
-      ),
-    );
+
+    // Measured off the stage, not the element: `x` is a fraction of the *output frame*, and
+    // the stage is the output frame. The element fills it, so the two agree — but reading
+    // the element would start disagreeing the moment a transform scaled it.
+    const stage = stageRef.current?.getBoundingClientRect();
+    video.style.transform = previewTransform(transform, {
+      width: stage?.width ?? 0,
+      height: stage?.height ?? 0,
+    });
   }, []);
 
   const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {
@@ -437,25 +483,31 @@ export function Player({
   }, [dress, liveVideo, playing, prepare, scrubbing, spareVideo, timeline]);
 
   return (
-    <div className="player">
+    <div className="player" ref={playerRef}>
       {/*
+        The stage is the output frame: the timeline's aspect ratio, letterboxed inside
+        whatever space the player has, clipping at its own edges. Everything inside it is
+        drawn the way the export draws it.
+
         Both elements carry the same source. The spare is not `hidden` and not
         `display: none` — a hidden element is allowed to stop decoding, which would undo
         the one thing it is here for. It is stacked behind the live one at zero opacity,
         fully alive, one frame ready to go.
       */}
-      <video
-        ref={aRef}
-        className={live === 0 ? 'live' : 'spare'}
-        src={objectUrl}
-        playsInline
-        preload="auto"
-        onLoadedMetadata={() => {
-          sync();
-          reportDiagnostics();
-        }}
-      />
-      <video ref={bRef} className={live === 1 ? 'live' : 'spare'} src={objectUrl} playsInline preload="auto" />
+      <div className="stage" ref={stageRef}>
+        <video
+          ref={aRef}
+          className={live === 0 ? 'live' : 'spare'}
+          src={objectUrl}
+          playsInline
+          preload="auto"
+          onLoadedMetadata={() => {
+            sync();
+            reportDiagnostics();
+          }}
+        />
+        <video ref={bRef} className={live === 1 ? 'live' : 'spare'} src={objectUrl} playsInline preload="auto" />
+      </div>
     </div>
   );
 }

@@ -137,16 +137,40 @@ export function AdjustPanel({
   return (
     <section className="panel adjust" aria-label="Adjust">
       <div className="panel-top">
+        <button className="close" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
         <button className="primary small auto" onClick={auto}>
           Auto
         </button>
         <span className="panel-title">
           {clipNumber === null ? 'Adjust' : `Clip ${clipNumber}`}
-          <em>{note ?? (touched ? 'Adjusted' : 'Not adjusted')}</em>
         </span>
         <PanelHistory {...history} what="adjustment" />
-        <button className="close" onClick={onClose} aria-label="Close">
-          ✕
+        <button
+          className="ghost small"
+          onClick={() => onApplyToAll(touched ? value : null)}
+          disabled={clipCount < 2}
+          aria-label="Apply to all clips"
+        >
+          All
+        </button>
+        <button
+          className="ghost small"
+          onClick={() => {
+            history.remember(value);
+            onChange({ ...NEUTRAL_COLOR });
+          }}
+          disabled={!touched}
+        >
+          Reset
+        </button>
+        <button
+          className="primary confirm"
+          onClick={() => onCommit(touched ? value : null)}
+          aria-label="Done"
+        >
+          ✓
         </button>
       </div>
 
@@ -159,9 +183,7 @@ export function AdjustPanel({
       <div className="sliders">
         <label className="slider">
           <span className="slider-name">
-            <small>
-              {control.low} · {control.high}
-            </small>
+            <small>{note ?? `${control.low} · ${control.high}`}</small>
             <em>{format(value[control.key])}</em>
           </span>
           <input
@@ -176,32 +198,6 @@ export function AdjustPanel({
         </label>
       </div>
 
-      <div className="panel-actions">
-        <button
-          className="ghost"
-          onClick={() => {
-            history.remember(value);
-            onChange({ ...NEUTRAL_COLOR });
-          }}
-          disabled={!touched}
-        >
-          Reset
-        </button>
-        <button
-          className="ghost"
-          onClick={() => onApplyToAll(touched ? value : null)}
-          disabled={clipCount < 2}
-        >
-          Apply to all
-        </button>
-        <button
-          className="primary confirm"
-          onClick={() => onCommit(touched ? value : null)}
-          aria-label="Done"
-        >
-          ✓
-        </button>
-      </div>
     </section>
   );
 }
