@@ -258,6 +258,7 @@ export function App() {
         <RefineBanner
           model={findModel(session.settings.model)?.label ?? session.settings.model}
           progress={session.refineProgress}
+          sendingFrames={session.settings.sendFrames}
           onCancel={session.cancelRefinement}
         />
       )}
@@ -392,15 +393,17 @@ export function App() {
           busy={session.refining}
           hasKey={Boolean(session.settings.apiKey)}
           model={session.settings.model}
-          onRun={(brief, target, model) => {
+          sendFrames={session.settings.sendFrames}
+          clipCount={kept.length}
+          onRun={(brief, target, model, sendFrames) => {
             // Saved *and* passed. The save is what persists it for next time; the argument
             // is what steers this run, because neither `setProject` nor the settings write
             // has committed yet.
             session.saveBrief(brief, target);
-            if (model !== session.settings.model) {
-              void session.saveSettings({ ...session.settings, model });
+            if (model !== session.settings.model || sendFrames !== session.settings.sendFrames) {
+              void session.saveSettings({ ...session.settings, model, sendFrames });
             }
-            session.requestRefinement({ brief, targetDurationUs: target, model });
+            session.requestRefinement({ brief, targetDurationUs: target, model, sendFrames });
             setShowBrief(false);
           }}
           onClose={() => setShowBrief(false)}
@@ -505,10 +508,12 @@ function colorOf(clip: Clip): ColorValue {
 function RefineBanner({
   model,
   progress,
+  sendingFrames,
   onCancel,
 }: {
   model: string;
   progress: RefineProgress | null;
+  sendingFrames: boolean;
   onCancel(): void;
 }) {
   const [now, setNow] = useState(Date.now());
@@ -520,16 +525,24 @@ function RefineBanner({
   const seconds = progress ? Math.max(0, Math.round((now - progress.startedAt) / 1000)) : 0;
   const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
-  return (
-    <p className="relink">
-      Asking Claude ({model}) for edits — {elapsed}.{' '}
-      {progress?.phase === 'drafting'
+  const doing =
+    progress?.phase === 'looking'
+      ? `Looking through the footage${
+          progress.framesTotal ? ` — frame ${progress.framesDone ?? 0} of ${progress.framesTotal}` : ''
+        }.`
+      : progress?.phase === 'drafting'
         ? progress.ops > 0
           ? `Writing the edit: ${progress.ops} so far.`
           : 'Writing the edit.'
-        : 'Reading the timeline.'}{' '}
-      Only the timeline description and the measurements leave this device — never the
-      footage. Keep this tab in front until it finishes.{' '}
+        : 'Reading the timeline.';
+
+  return (
+    <p className="relink">
+      Asking Claude ({model}) for edits — {elapsed}. {doing}{' '}
+      {sendingFrames
+        ? 'Still frames from your clips are being sent with the request; the video file and its audio are not.'
+        : 'Only the timeline description and the measurements leave this device — never the footage.'}{' '}
+      Keep this tab in front until it finishes.{' '}
       <button className="ghost small" onClick={onCancel}>
         Cancel
       </button>

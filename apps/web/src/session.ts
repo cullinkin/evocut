@@ -20,7 +20,7 @@ import {
   type RefinementPlan,
   type ReviewSession,
 } from '@evocut/edl';
-import { planLocalRefinement, proposeRefinement } from '@evocut/agent';
+import { planLocalRefinement, proposeRefinement, type ClipFrames } from '@evocut/agent';
 import type { SourceSignals } from '@evocut/signals';
 import {
   isRenderSupported,
@@ -38,6 +38,7 @@ import {
 } from '@evocut/store';
 import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
+import { captureContactSheet, forgetContactSheets } from './contact.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
 import { EMPTY_SETTINGS, useSettings, type RefinementSettings } from './settings.ts';
 
@@ -96,10 +97,14 @@ export type SessionStatus = 'loading' | 'empty' | 'ready';
  * pass that might have died four minutes ago.
  */
 export interface RefineProgress {
-  phase: 'thinking' | 'drafting';
+  /** `looking` is the frame capture, which happens before a single byte is sent. */
+  phase: 'looking' | 'thinking' | 'drafting';
   tokens: number;
   ops: number;
   startedAt: number;
+  /** Frames captured, while `phase` is `looking`. */
+  framesDone?: number;
+  framesTotal?: number;
 }
 
 /**
@@ -221,7 +226,13 @@ export interface Session {
    * by what the person just typed, not by what it replaced. The model is passed for the
    * same reason: it is picked on that sheet too.
    */
-  requestRefinement(steer?: { brief: string; targetDurationUs: number | null; model?: string }): void;
+  requestRefinement(steer?: {
+    brief: string;
+    targetDurationUs: number | null;
+    model?: string;
+    /** Send frames so the pass can see the footage. Pictures leave the device when true. */
+    sendFrames?: boolean;
+  }): void;
   cancelRefinement(): void;
 
   settings: RefinementSettings;
@@ -250,6 +261,10 @@ export function useSession(): Session {
   const [status, setStatus] = useState<SessionStatus>('loading');
   const [project, setProject] = useState<Project | null>(null);
   const [mediaUrls, setMediaUrls] = useState<Map<string, string>>(new Map());
+  // Read from inside the refinement's async body, which starts before the render that
+  // would have closed over a fresh copy.
+  const mediaUrlsRef = useRef(mediaUrls);
+  mediaUrlsRef.current = mediaUrls;
   const [missingMedia, setMissingMedia] = useState<MissingMedia[]>([]);
   const [recentProjects, setRecentProjects] = useState<ProjectSummary[]>([]);
   const [playhead, setPlayhead] = useState(0);
@@ -418,6 +433,8 @@ export function useSession(): Session {
   const relinkMedia = useCallback(
     async (sourceId: string, file: File) => {
       if (!project) return;
+      // A relink means these bytes are not the bytes the cached frames came from.
+      forgetContactSheets();
       setBusy(true);
       setError(null);
       try {
@@ -469,6 +486,9 @@ export function useSession(): Session {
 
   const closeProject = useCallback(() => {
     releaseUrls();
+    // The frames belong to this project's media. Holding a hundred JPEGs for a project
+    // nobody has open is memory spent on nothing.
+    forgetContactSheets();
     setProject(null);
     setEvents([]);
     setMediaUrls(new Map());
@@ -797,7 +817,12 @@ export function useSession(): Session {
    * signal. Both paths produce the same `RefinementPlan` and land on the same screen.
    */
   const requestRefinement = useCallback(
-    (steer?: { brief: string; targetDurationUs: number | null; model?: string }) => {
+    (steer?: {
+      brief: string;
+      targetDurationUs: number | null;
+      model?: string;
+      sendFrames?: boolean;
+    }) => {
     if (!project || refining) return;
 
     const steered: Project = steer
@@ -820,8 +845,10 @@ export function useSession(): Session {
 
     const controller = new AbortController();
     refineAbortRef.current = controller;
+    const sendFrames = steer?.sendFrames ?? false;
+
     setRefining(true);
-    setRefineProgress({ phase: 'thinking', tokens: 0, ops: 0, startedAt: Date.now() });
+    setRefineProgress({ phase: sendFrames ? 'looking' : 'thinking', tokens: 0, ops: 0, startedAt: Date.now() });
     setError(null);
 
     const startedAt = Date.now();
@@ -836,6 +863,9 @@ export function useSession(): Session {
         // brief is free text the user typed about their own life, which is not.
         brief: steered.brief ? digest(steered.brief).slice(0, 12) : null,
         targetDurationUs: steered.targetDurationUs ?? null,
+        // Recorded on every pass, because "did pictures of my footage leave this phone"
+        // is a question that must be answerable from the log rather than from memory.
+        sendFrames,
       },
     });
 
@@ -862,9 +892,43 @@ export function useSession(): Session {
           },
         );
 
+        /*
+          The frames, captured before the request goes out.
+
+          Every one is a seek in a multi-gigabyte file, so this is the slow part and it is
+          reported as its own phase — a person watching "Thinking…" for ninety seconds
+          while the phone is actually seeking has been told the wrong thing.
+        */
+        let frames: ClipFrames[] = [];
+        if (sendFrames) {
+          const url = mediaUrlsRef.current.get(steered.timeline.tracks[0]?.clips[0]?.sourceId ?? '');
+          if (url) {
+            frames = await captureContactSheet(steered.timeline, url, {
+              signal: controller.signal,
+              onProgress: ({ done, total }) =>
+                setRefineProgress((current) => ({
+                  phase: 'looking',
+                  tokens: 0,
+                  ops: 0,
+                  startedAt: current?.startedAt ?? startedAt,
+                  framesDone: done,
+                  framesTotal: total,
+                })),
+            });
+          }
+          if (controller.signal.aborted) return;
+          setRefineProgress((current) => ({
+            phase: 'thinking',
+            tokens: 0,
+            ops: 0,
+            startedAt: current?.startedAt ?? startedAt,
+          }));
+        }
+
         const result = await proposeRefinement(steered, {
           complete,
           signals,
+          ...(frames.length > 0 ? { frames } : {}),
           ...(steered.brief ? { instruction: steered.brief } : {}),
         });
         if (controller.signal.aborted) return;
@@ -879,6 +943,8 @@ export function useSession(): Session {
             // problem, and this is the only place it would show up.
             rejected: result.rejected.length,
             rejectedReasons: result.rejected.map((failure) => failure.message).slice(0, 5),
+            framesSent: frames.reduce((sum, clip) => sum + clip.frames.length, 0),
+            clipsSeen: frames.length,
             elapsedMs: Date.now() - startedAt,
             ...usage,
           },

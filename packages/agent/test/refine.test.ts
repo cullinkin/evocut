@@ -11,6 +11,7 @@ import {
   type Source,
 } from '@evocut/edl';
 import { buildRefinementPrompt, parseRefinementResponse, refineProject, summarizeOps } from '../src/index.js';
+import { textOf } from '../src/prompt.js';
 
 function deps(seed = 'a') {
   let tick = 0;
@@ -125,7 +126,7 @@ describe('refineProject', () => {
     expect(result.project.timeline.tracks[0]!.clips[0]!.label).toBe('opening');
     expect(result.project.timeline.tracks[0]!.clips[1]!.sourceIn).toBe(S(18.5));
 
-    const repairPrompt = complete.mock.calls[1]![0].prompt;
+    const repairPrompt = textOf(complete.mock.calls[1]![0].content);
     expect(repairPrompt).toContain('clp_ghost');
   });
 

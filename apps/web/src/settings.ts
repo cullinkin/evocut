@@ -15,6 +15,15 @@ export interface RefinementSettings {
   model: string;
   /** Empty means "whatever the API defaults to" rather than a level we picked. */
   effort: '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /**
+   * Send still frames with the request, so the pass can see the footage.
+   *
+   * Off until it is turned on. Remembered on the device rather than on the project,
+   * because it is a decision about what someone is willing to send from this phone, not a
+   * property of any particular edit — and it is asked again, in plain words, on every
+   * Refine sheet.
+   */
+  sendFrames: boolean;
 }
 
 /*
@@ -30,6 +39,7 @@ export const EMPTY_SETTINGS: RefinementSettings = {
   apiKey: '',
   model: DEFAULT_MODEL,
   effort: '',
+  sendFrames: false,
 };
 
 const KEY = 'refinement';

@@ -12,6 +12,7 @@ import {
 } from '@evocut/edl';
 import { createAnthropicComplete, describeApiError, readToolInput } from '../src/anthropic.js';
 import { proposeRefinement } from '../src/index.js';
+import { textOf, type PromptBlock } from '../src/prompt.js';
 
 /**
  * The transport is tested through the real SDK, against a stub `fetch`.
@@ -154,7 +155,7 @@ function project(): Project {
 describe('createAnthropicComplete', () => {
   const request = {
     system: 'You refine edits.',
-    prompt: 'Timeline description here.',
+    content: [{ type: 'text' as const, text: 'Timeline description here.' }],
     tool: refinementToolDefinition(),
   };
 
@@ -375,7 +376,7 @@ describe('describeApiError', () => {
     );
     const complete = createAnthropicComplete({ apiKey: 'sk-wrong', fetch: fetchStub });
 
-    const failure = await complete({ system: 's', prompt: 'p', tool: refinementToolDefinition() }).then(
+    const failure = await complete({ system: 's', content: [{ type: 'text', text: 'p' }], tool: refinementToolDefinition() }).then(
       () => null,
       (error: unknown) => error,
     );
@@ -437,8 +438,8 @@ describe('proposeRefinement', () => {
     const otherId = tl.timeline.tracks[0]!.clips[1]!.id;
 
     const rounds: string[] = [];
-    const complete = async ({ prompt }: { prompt: string }) => {
-      rounds.push(prompt);
+    const complete = async ({ content }: { content: PromptBlock[] }) => {
+      rounds.push(textOf(content));
       return rounds.length === 1
         ? { ops: [{ op: 'trim', clipId, sourceIn: S(1) }, { op: 'remove', clipId: 'clp_gone' }] }
         : { ops: [{ op: 'setSpeed', clipId: otherId, speed: 1.5 }] };

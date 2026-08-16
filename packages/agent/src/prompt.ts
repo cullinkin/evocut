@@ -35,6 +35,16 @@ What you do:
   it: a brief slowdown into it, or a push-in that arrives on it, rather than a cut across
   it. One or two of these in a video is emphasis; one on every hit is a music video.
 
+Using the frames, when you have them:
+- They are the footage. Say what you see. "Three clips of the same pack being opened, this
+  is the sharpest" is an edit decision; "tightened the join" is a guess with a haircut.
+- Redundancy is what you are best placed to find and the person is worst placed to see —
+  they filmed it, so every take feels different to them. If two shots show the same thing,
+  say which one survives and why.
+- A shot with nothing in it is a shot to cut. A minute of a table between two moments is
+  not pacing, it is a minute of a table.
+- Do not narrate the frames back. The rationale is one sentence and it exists to be judged.
+
 Using the signals:
 - They are measurements, not descriptions. A "hit" is a sudden rise in level — something
   struck or landed or was said hard. A "quiet" span is genuinely quiet. "Still" means the
@@ -95,7 +105,44 @@ export interface RefinementRequestOptions {
    * ops the engine rejected and why, rather than being asked to start over.
    */
   previousErrors?: Array<{ op: unknown; message: string }>;
+  /**
+   * Frames from the footage, by clip, in order.
+   *
+   * The one thing that turns this from a spreadsheet exercise into editing. Without them
+   * the model knows how long each clip is and where a transient landed, and nothing about
+   * what is *in* the shot — so it cannot know that four clips are the same card being
+   * opened, or that the sixty-second one is a wide of nothing. It said so itself on a real
+   * pass: "no level, quiet or hit data was returned for the long middle clips, so I left
+   * their interiors alone rather than guess."
+   *
+   * Absent by default, and the pass works without it. Present only when the person has
+   * turned frames on, because these are pictures of their life leaving their device.
+   */
+  frames?: ClipFrames[];
 }
+
+/** Frames belonging to one clip. `data` is base64, without a data-URL prefix. */
+export interface ClipFrames {
+  clipId: string;
+  /** Where the clip sits in the edit, for the label. 1-based. */
+  index: number;
+  total: number;
+  /** Output start and length, both in microseconds. */
+  startUs: number;
+  durationUs: number;
+  frames: Array<{ mediaType: string; data: string }>;
+}
+
+/**
+ * A piece of the request: either words or a picture.
+ *
+ * The prompt is a list rather than a string because the frames have to sit *next to* the
+ * clip they came from. A block of a hundred images after a block of text is a puzzle the
+ * model has to solve before it can start editing, and it will solve it wrong.
+ */
+export type PromptBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mediaType: string; data: string };
 
 export function buildRefinementPrompt(project: Project, options: RefinementRequestOptions = {}): string {
   const sections: string[] = [];
@@ -150,6 +197,64 @@ export function buildRefinementPrompt(project: Project, options: RefinementReque
 
   sections.push('Call propose_edits with your refinements.');
   return sections.join('\n\n');
+}
+
+/**
+ * The same prompt, with the footage in it.
+ *
+ * Falls back to exactly one text block when there are no frames, so the request the
+ * transport builds is byte-identical to the one it built before this existed.
+ *
+ * The closing instruction is moved to the very end, after the pictures. A request that
+ * says "now call the tool" and then shows a hundred images has buried its own instruction.
+ */
+export function buildRefinementContent(
+  project: Project,
+  options: RefinementRequestOptions = {},
+): PromptBlock[] {
+  const whole = buildRefinementPrompt(project, options);
+  if (!options.frames?.length) return [{ type: 'text', text: whole }];
+
+  const closing = 'Call propose_edits with your refinements.';
+  const blocks: PromptBlock[] = [{ type: 'text', text: whole.replace(new RegExp(`\n\n${closing}$`), '') }];
+
+  blocks.push({
+    type: 'text',
+    text: [
+      'Frames from the footage follow. Each label names a clip by the id used above; the',
+      'images after a label are from that clip, evenly spaced across it, in order.',
+      '',
+      'This is what you have that a list of durations does not. Use it to judge what a shot',
+      'is *of*: which clips repeat each other, which one is the best take of a moment that',
+      'was filmed three times, where the payoff actually lands, and which shots are setup',
+      'that can go. A rationale that names what is in the frame — "same pack opening as the',
+      'clip before it, and this one is out of focus" — is the kind this pass exists for.',
+    ].join('\n'),
+  });
+
+  for (const clip of options.frames) {
+    blocks.push({
+      type: 'text',
+      text:
+        `${clip.clipId} — clip ${clip.index} of ${clip.total}, ` +
+        `at ${formatTimecode(clip.startUs, undefined, { compact: true })}, ` +
+        `${(clip.durationUs / 1_000_000).toFixed(1)}s long`,
+    });
+    for (const frame of clip.frames) {
+      blocks.push({ type: 'image', mediaType: frame.mediaType, data: frame.data });
+    }
+  }
+
+  blocks.push({ type: 'text', text: closing });
+  return blocks;
+}
+
+/** Just the words out of a request, for tests and for anything that logs what was asked. */
+export function textOf(content: PromptBlock[]): string {
+  return content
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n\n');
 }
 
 /** The tool the model must call. Its schema is generated from the EDL's own op schema. */

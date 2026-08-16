@@ -1015,6 +1015,39 @@ button.primary.small {
   background: var(--accent);
 }
 
+/* A switch with its consequences written next to it, rather than a bare label. Sized so
+   the whole row is the target — a 20px checkbox is not a phone control. */
+.switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.switch input {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.switch > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.switch small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 /* A settings row that goes somewhere, rather than setting something. */
 .row-link {
   display: flex;

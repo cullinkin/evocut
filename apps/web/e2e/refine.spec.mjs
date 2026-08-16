@@ -213,7 +213,18 @@ check('sentTheKey', request.headers['x-api-key'], 'sk-ant-test-key');
 check('declaredBrowserAccess', request.headers['anthropic-dangerous-direct-browser-access'], 'true');
 
 // --- What was actually sent ---------------------------------------------------------
-const prompt = request.body.messages[0].content;
+/*
+  The request is content blocks now, not one string — words, and, when the person has
+  turned frames on, the footage interleaved with the clips it came from. The words are
+  what these assertions are about; the frames get their own section below.
+*/
+const blocks = request.body.messages[0].content;
+const wordsOf = (body) =>
+  body.messages[0].content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n\n');
+const prompt = wordsOf(request.body);
 set('model', request.body.model);
 set('promptChars', typeof prompt === 'string' ? prompt.length : -1);
 check('askedForTheOpTool', request.body.tools[0].name, 'propose_edits');
@@ -226,10 +237,19 @@ check('promptCarriesTheBrief', prompt.includes('Punchy. Hold on the hits'), true
 // length, and the gap, because those are what let it check its own work.
 check('promptCarriesTheTarget', /Target length: .*\(9000000us\)/.test(prompt), true);
 check('promptSaysHowFarOver', /which is .* (over|under)/.test(prompt), true);
+/*
+  Frames are off by default, and off means off.
+
+  This used to be an unconditional "no footage ever leaves". That claim is no longer true —
+  the pass can be shown the footage, because a pass that cannot see it produces edits an
+  editor would not make. What has to stay true is that it is a decision: nothing pictorial
+  goes out unless the switch on the Refine sheet was turned on, and the audio and the video
+  file never go out at all.
+*/
+check('framesAreOffUntilTurnedOn', blocks.every((block) => block.type === 'text'), true);
 check(
-  'noFootageLeftTheDevice',
-  !/"type"\s*:\s*"(image|document)"/.test(JSON.stringify(request.body)) &&
-    !/base64|data:video|data:image/.test(JSON.stringify(request.body)),
+  'andNothingPictorialWentOut',
+  !/base64|data:video|data:image/.test(JSON.stringify(request.body)),
   true,
 );
 set('promptHead', prompt.slice(0, 200).replace(/\s+/g, ' '));
@@ -276,6 +296,70 @@ check('loggedTheRequest', requested?.payload?.model, 'claude-opus-5');
 check('loggedTheBriefAsADigest', /^[0-9a-f]{12}$/.test(requested?.payload?.brief ?? ''), true);
 check('loggedTheCost', planned?.payload?.inputTokens, 2480);
 check('loggedTheDroppedOp', planned?.payload?.rejected, 1);
+
+/**
+ * --- Frames: the pass can be shown the footage -----------------------------------------
+ *
+ * The single change that makes this pass worth running. Without frames the model gets clip
+ * durations and onset timestamps, and it said what that is worth in its own words on a real
+ * session: "no level, quiet or hit data was returned for the long middle clips, so I left
+ * their interiors alone rather than guess."
+ *
+ * Three things have to be true and none can be checked anywhere but on the wire: the images
+ * are actually in the request, each one is labelled with the clip it came from, and the
+ * whole thing happens only because a switch was turned on.
+ */
+sent.length = 0;
+await page.locator('button:has-text("Refine")').click();
+await page.locator('.sheet').waitFor({ timeout: 10000 });
+
+const frameSwitch = page.locator('.sheet .switch input');
+check('theSwitchStartsOff', await frameSwitch.isChecked(), false);
+await frameSwitch.check();
+await page.locator('.sheet-actions .primary').click();
+
+// Capturing frames is a seek per frame, which is slow even on the twelve-second fixture.
+await page.locator('.relink').waitFor({ timeout: 20_000 });
+check('itSaysItIsLooking', /Looking through the footage/.test(await page.locator('.relink').innerText()), true);
+await page.locator('.bubble').first().waitFor({ timeout: 120_000 });
+
+const withFrames = sent.at(-1).body.messages[0].content;
+const images = withFrames.filter((block) => block.type === 'image');
+set('frameCount', images.length);
+set('blockCount', withFrames.length);
+check('framesWereSent', images.length > 0, true);
+check('theyAreJpegs', images.every((block) => block.source.media_type === 'image/jpeg'), true);
+check('sentAsBase64NotAUrl', images.every((block) => block.source.type === 'base64'), true);
+check('andCarryRealPixels', images.every((block) => (block.source.data?.length ?? 0) > 500), true);
+
+// Interleaved, not piled at the end: a hundred images after a wall of text is a puzzle the
+// model has to solve before it can start, and it will solve it wrong.
+const firstImage = withFrames.findIndex((block) => block.type === 'image');
+const labelBefore = withFrames[firstImage - 1];
+set('labelBeforeTheFirstFrame', labelBefore?.text?.slice(0, 80));
+check('everyRunOfFramesIsLabelled', labelBefore?.type === 'text' && /^clp_/.test(labelBefore.text), true);
+check(
+  'andTheLabelNamesAClipThatExists',
+  clips.some((clip) => labelBefore.text.startsWith(clip.id)),
+  true,
+);
+check('theSystemPromptTellsItToLook', /Using the frames/.test(sent.at(-1).body.system), true);
+
+// The disclosure is recorded, because "did pictures of my footage leave this phone" must be
+// answerable from the log rather than from memory.
+const framedLog = await exportLog(page, 'refine-frames-log.jsonl');
+const framedRequest = framedLog.events.filter((event) => event.type === 'llm.request').at(-1);
+const framedPlan = framedLog.events.filter((event) => event.type === 'llm.plan').at(-1);
+set('loggedFrames', { request: framedRequest?.payload?.sendFrames, sent: framedPlan?.payload?.framesSent });
+check('theLogRecordsThatFramesWereSent', framedRequest?.payload?.sendFrames, true);
+check('andHowMany', framedPlan?.payload?.framesSent, images.length);
+// Still text only, still no audio, still not the file itself.
+check('theVideoFileItselfNeverLeft', /data:video|"type"\s*:\s*"document"/.test(JSON.stringify(sent.at(-1).body)), false);
+
+await page.locator('header .primary').click();
+await page.locator('.review').waitFor({ timeout: 10000 });
+await page.locator('.review-actions .ghost.danger').click();
+await page.waitForTimeout(400);
 
 // --- A rejected key says so, and says where to fix it --------------------------------
 reply = { status: 401, body: { type: 'error', error: { type: 'authentication_error', message: 'bad key' } } };

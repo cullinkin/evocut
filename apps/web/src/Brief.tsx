@@ -40,7 +40,16 @@ export interface BriefProps {
   /** False when there is no API key, so this says which pass it is about to run. */
   hasKey: boolean;
   model: string;
-  onRun(brief: string, targetDurationUs: number | null, model: string): void;
+  /** Whether frames were sent last time. Remembered per device, like the model. */
+  sendFrames: boolean;
+  /** How many clips are in the edit, so the frame switch can say what it will cost. */
+  clipCount: number;
+  onRun(
+    brief: string,
+    targetDurationUs: number | null,
+    model: string,
+    sendFrames: boolean,
+  ): void;
   onClose(): void;
 }
 
@@ -51,6 +60,8 @@ export function BriefSheet({
   busy,
   hasKey,
   model,
+  sendFrames,
+  clipCount,
   onRun,
   onClose,
 }: BriefProps) {
@@ -59,6 +70,7 @@ export function BriefSheet({
   const [minutes, setMinutes] = useState(split.minutes);
   const [seconds, setSeconds] = useState(split.seconds);
   const [chosen, setChosen] = useState(model);
+  const [frames, setFrames] = useState(sendFrames);
 
   const parsed = joinDuration(minutes, seconds);
   const invalid = (minutes.trim() !== '' || seconds.trim() !== '') && parsed === null;
@@ -143,6 +155,27 @@ export function BriefSheet({
       </label>
       {choice && <p className={choice.costly ? 'warning' : 'meta'}>{choice.note}</p>}
 
+      {/*
+        The disclosure, on the screen where the decision is made rather than in a settings
+        page nobody opens. It is off until it is turned on, it says plainly what leaves,
+        and every pass records in the log whether it was on.
+
+        It is also the difference between a useful pass and a useless one, which is why the
+        cost is stated too — a switch framed only as a risk gets left off by people who
+        would have wanted it.
+      */}
+      <label className="switch">
+        <input type="checkbox" checked={frames} onChange={(event) => setFrames(event.target.checked)} />
+        <span>
+          <strong>Let Claude see the footage</strong>
+          <small>
+            {frames
+              ? `A few still frames from each of your ${clipCount} clips are sent with the request. Nothing else — no audio, no video file. Capturing them takes a minute or two before the pass starts.`
+              : 'Without this the pass only knows how long each clip is and where the loud moments are — it cannot tell that two shots are the same thing filmed twice, which is most of what it is for.'}
+          </small>
+        </span>
+      </label>
+
       <div className="sheet-actions">
         <button className="ghost" onClick={onClose}>
           Cancel
@@ -150,7 +183,7 @@ export function BriefSheet({
         <button
           className="primary"
           disabled={busy || invalid}
-          onClick={() => onRun(text, parsed, chosen)}
+          onClick={() => onRun(text, parsed, chosen, frames)}
         >
           {busy ? 'Thinking…' : hasKey ? 'Ask Claude' : 'Suggest edits'}
         </button>

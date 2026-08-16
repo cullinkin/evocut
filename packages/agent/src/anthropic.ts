@@ -20,8 +20,17 @@ import { DEFAULT_MODEL } from './models.js';
  * deployment it is not, which is why `baseUrl` exists — point it at a proxy that holds the
  * key server-side and the rest of this file is unchanged.
  *
- * **Only text leaves the device**: the timeline description and the signals summary. No
- * frames, no audio, no footage.
+ * ## What leaves the device
+ *
+ * Always: the timeline description and the signals summary — text about the edit, not the
+ * edit's contents. Never: audio, and never the video file.
+ *
+ * **Frames, only when the person has turned them on.** A pass that cannot see the footage
+ * cannot tell you that four clips are the same moment filmed four times, which is most of
+ * what a refinement pass is for; so frames are offered, and they are a real disclosure of
+ * pictures of someone's life. The switch is on the Refine sheet next to the button that
+ * spends the money, it is off until it is turned on, and what was sent is recorded in the
+ * log for every pass.
  */
 
 /**
@@ -113,7 +122,7 @@ export function createAnthropicComplete(
     dangerouslyAllowBrowser: options.allowBrowser ?? true,
   });
 
-  return async ({ system, prompt, tool }) => {
+  return async ({ system, content, tool }) => {
     /**
      * Streamed, and not for the typewriter effect.
      *
@@ -129,7 +138,23 @@ export function createAnthropicComplete(
         model: options.model ?? DEFAULT_MODEL,
         max_tokens: MAX_TOKENS,
         system,
-        messages: [{ role: 'user', content: prompt }],
+        messages: [
+          {
+            role: 'user',
+            content: content.map((block) =>
+              block.type === 'image'
+                ? {
+                    type: 'image' as const,
+                    source: {
+                      type: 'base64' as const,
+                      media_type: block.mediaType as 'image/jpeg',
+                      data: block.data,
+                    },
+                  }
+                : { type: 'text' as const, text: block.text },
+            ),
+          },
+        ],
         // The EDL generates this schema from the same zod definition the engine validates
         // against, so it is a JSON Schema object at runtime — but it is typed as an open
         // record, which the SDK's stricter `input_schema` will not accept on faith.

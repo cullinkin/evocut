@@ -7,7 +7,13 @@ import {
   type Project,
   type Revision,
 } from '@evocut/edl';
-import { REFINEMENT_SYSTEM_PROMPT, buildRefinementPrompt, refinementTool, type RefinementRequestOptions } from './prompt.js';
+import {
+  REFINEMENT_SYSTEM_PROMPT,
+  buildRefinementContent,
+  refinementTool,
+  type PromptBlock,
+  type RefinementRequestOptions,
+} from './prompt.js';
 
 /**
  * `@evocut/agent` — the refinement pass.
@@ -37,7 +43,12 @@ export * from './models.js';
 /** What the caller must supply: one round-trip to a model that can call tools. */
 export type CompleteFn = (request: {
   system: string;
-  prompt: string;
+  /**
+   * The request, in order: words, and — when frames are on — the footage interleaved with
+   * the clips it came from. A single text block when there are no frames, which is what
+   * every caller sent before the pass could see.
+   */
+  content: PromptBlock[];
   tool: ReturnType<typeof refinementTool>;
 }) => Promise<unknown>;
 
@@ -83,7 +94,7 @@ export async function refineProject(project: Project, options: RefineOptions): P
 
     const raw = await options.complete({
       system: REFINEMENT_SYSTEM_PROMPT,
-      prompt: buildRefinementPrompt(current, { ...options, ...(previousErrors ? { previousErrors } : {}) }),
+      content: buildRefinementContent(current, { ...options, ...(previousErrors ? { previousErrors } : {}) }),
       tool: refinementTool(),
     });
 
@@ -154,7 +165,7 @@ export async function proposeRefinement(project: Project, options: ProposeOption
 
     const raw = await options.complete({
       system: REFINEMENT_SYSTEM_PROMPT,
-      prompt: buildRefinementPrompt(project, { ...options, ...(previousErrors ? { previousErrors } : {}) }),
+      content: buildRefinementContent(project, { ...options, ...(previousErrors ? { previousErrors } : {}) }),
       tool: refinementTool(),
     });
 
