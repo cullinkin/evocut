@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Mp4Writer, audioSpecificConfig } from '../src/mp4.js';
-import { describeAudioTrack, readAudioTrack } from '../src/demux.js';
+import { describeAudioTrack, readAudioTrack, readVideoFrameRate } from '../src/demux.js';
 
 /**
  * The demuxer, checked against the muxer.
@@ -341,3 +341,90 @@ describe('readAudioTrack', () => {
     expect(describeAudioTrack(null)).toBe('no readable audio track');
   });
 });
+
+/**
+ * The frame rate, which nothing else in the browser will tell us.
+ *
+ * A `<video>` element reports duration and dimensions and stops there, so every import used
+ * a nominal 30fps. That was harmless while the rate was decoration; it stopped being
+ * harmless when the timeline ruler started counting frames, because a mark reading `15f`
+ * half a second into a 60fps recording is a lie the user aims a cut at.
+ *
+ * Written as durations rather than a rate, because that is what the container holds: `stts`
+ * says how long each sample lasts and the rate is inferred from it.
+ */
+function videoAt(durationsUs: number[]): Blob {
+  const writer = new Mp4Writer();
+  const track = writer.addVideoTrack({ codec: 'vp09.00.10.08', width: 64, height: 64 });
+  let at = 0;
+  for (const [index, durationUs] of durationsUs.entries()) {
+    writer.addSample(track, {
+      data: new Uint8Array(64).fill(0xaa),
+      timestampUs: at,
+      durationUs,
+      key: index === 0,
+    });
+    at += durationUs;
+  }
+  // An audio track after it, so the reader has to skip past one to find the picture.
+  const audio = writer.addAudioTrack({ codec: 'mp4a.40.2', sampleRate: SAMPLE_RATE, channels: 2 });
+  writer.addSample(audio, { data: audioFrame(0), timestampUs: 0, durationUs: 21_333 });
+  return writer.finalize().blob;
+}
+
+const constant = (count: number, durationUs: number) => new Array(count).fill(durationUs);
+
+describe('readVideoFrameRate', () => {
+  it('reads a constant rate off the sample table', async () => {
+    // 40ms a frame is 25fps, and the writer's microsecond timebase divides it exactly — so
+    // this checks the reduction too: 1000000/40000 has to come back as 25/1, not as itself.
+    expect(await readVideoFrameRate(videoAt(constant(50, 40_000)))).toEqual({
+      frameRate: { num: 25, den: 1 },
+      variable: false,
+    });
+    expect(await readVideoFrameRate(videoAt(constant(50, 20_000)))).toEqual({
+      frameRate: { num: 50, den: 1 },
+      variable: false,
+    });
+  });
+
+  it('tells 60fps from 30fps, which is the whole point of reading it', async () => {
+    const sixty = await readVideoFrameRate(videoAt(constant(60, 16_667)));
+    // Not 60/1 — the writer's timebase cannot express a sixtieth of a second — but the
+    // ruler asks for a number, and this one rounds to sixty rather than to thirty.
+    expect(sixty!.frameRate.num / sixty!.frameRate.den).toBeCloseTo(60, 1);
+  });
+
+  it('takes the commonest duration when a recording varies, and says that it did', async () => {
+    /*
+      A phone that dropped its rate in low light writes a `stts` full of different deltas.
+      The commonest one is still the answer worth showing — it is what most of the footage
+      was shot at — but the caller is told, because a frame ruler over that footage is an
+      approximation and the EDL records it as one.
+    */
+    const mixed = [...constant(40, 40_000), ...constant(10, 80_000)];
+    const rate = await readVideoFrameRate(videoAt(mixed));
+    expect(rate?.frameRate).toEqual({ num: 25, den: 1 });
+    expect(rate?.variable).toBe(true);
+
+    // A handful of odd frames in an otherwise steady take is not variable frame rate.
+    const nearly = [...constant(97, 40_000), ...constant(3, 41_000)];
+    expect((await readVideoFrameRate(videoAt(nearly)))?.variable).toBe(false);
+  });
+
+  it('returns nothing rather than guessing, on a file it cannot read', async () => {
+    expect(await readVideoFrameRate(new Blob([new Uint8Array(64)]))).toBe(null);
+    // Audio only: there is no video track to have a frame rate.
+    expect(await readVideoFrameRate(buildAudioOnly())).toBe(null);
+  });
+});
+
+/** A file with a sound track and no picture. */
+function buildAudioOnly(): Blob {
+  const writer = new Mp4Writer();
+  const audio = writer.addAudioTrack({ codec: 'mp4a.40.2', sampleRate: SAMPLE_RATE, channels: 2 });
+  for (let i = 0; i < 4; i += 1) {
+    writer.addSample(audio, { data: audioFrame(i), timestampUs: timestampFor(i), durationUs: 21_333 });
+  }
+  return writer.finalize().blob;
+}

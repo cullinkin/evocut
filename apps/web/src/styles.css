@@ -27,6 +27,9 @@
   --surface: #16161d;
   --surface-2: #1e1e28;
   --line: #2a2a37;
+  /* One step back from `--line`, for the frame marks: a hundred of them at `--line` reads
+     as a grey band rather than a scale. */
+  --line-dim: #22222d;
   --text: #f2f2f7;
   --muted: #9a9aab;
   --accent: #6c8cff;
@@ -339,6 +342,15 @@ button.play {
   line-height: 14px;
   pointer-events: none;
   white-space: nowrap;
+}
+
+/* One frame. Short and dim: at this zoom the numbers are for orientation and *these* are
+   the scale, so they have to be readable as a row without competing with the labels. */
+.ruler .tick.minor {
+  top: 20px;
+  height: 7px;
+  padding: 0;
+  border-left-color: var(--line-dim);
 }
 
 .timeline-lane {

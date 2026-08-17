@@ -13,6 +13,7 @@ import {
 import type { OpPreview } from '@evocut/edl';
 import { frameAt, useFilmstrips, type Filmstrip } from './filmstrip.ts';
 import { usePlayhead } from './playhead.ts';
+import { planRuler } from './ruler.ts';
 
 /**
  * The editing timeline: draggable playhead, tap-to-select clips, drag-the-edges trimming.
@@ -98,7 +99,28 @@ export interface TimelineProps {
 }
 
 const MIN_PPS = 4;
-const MAX_PPS = 400;
+/**
+ * How little of the edit may fill the screen at maximum zoom.
+ *
+ * A third of a second, which at 30fps is ten frames across a phone — close enough that each
+ * one is a finger's width apart and you can put a cut on the one you meant. Derived from the
+ * viewport rather than fixed, because "a third of a second on screen" is a statement about
+ * the screen: the old flat 400px-per-second ceiling was about one second on a phone and
+ * about a third of one on a desktop, for no reason anybody chose.
+ */
+const MIN_VISIBLE_SECONDS = 1 / 3;
+/** Floor under the derived ceiling, for a viewport too narrow to have measured yet. */
+const MAX_PPS_FLOOR = 400;
+/**
+ * How much ruler is built at once, in pixels.
+ *
+ * The ruler used to span the whole edit, which was fine at half-second steps and ruinous at
+ * frame steps: a 73-second assembly at full zoom is 85,000 pixels wide and two thousand
+ * marks, rebuilt on every scroll event because the ruler re-renders with the timeline. So it
+ * is built a page at a time, three pages wide, and the page only changes when the playhead
+ * crosses a boundary — which during a scrub is a few times a second rather than sixty.
+ */
+const RULER_PAGE_PX = 1600;
 /** Bubbles closer together than this are drawn as one, with a count. */
 const BUBBLE_CLUSTER_PX = 30;
 
@@ -253,6 +275,9 @@ export function TimelineEditor({
     return () => observer.disconnect();
   }, []);
 
+  /** As far in as the zoom goes: a third of a second across whatever screen this is. */
+  const maxPps = Math.max(MAX_PPS_FLOOR, (halfWidth * 2) / MIN_VISIBLE_SECONDS);
+
   // Wide enough for a drag that has pushed a clip past the committed end.
   const contentWidth = Math.max(
     (committedTotal / 1_000_000) * pxPerSecond + halfWidth * 2,
@@ -263,7 +288,7 @@ export function TimelineEditor({
     const scroller = scrollerRef.current;
     if (!scroller || committedTotal <= 0) return;
     const usable = Math.max(120, scroller.clientWidth - 32);
-    const next = clamp(usable / (committedTotal / 1_000_000), MIN_PPS, MAX_PPS);
+    const next = clamp(usable / (committedTotal / 1_000_000), MIN_PPS, maxPps);
     setPxPerSecond(next);
     // `scrollLeft` survives a scale change in pixels, which means it changes in *seconds*.
     // Re-anchoring keeps the playhead on the frame it was on instead of sliding it by the
@@ -272,7 +297,7 @@ export function TimelineEditor({
     requestAnimationFrame(() => {
       scroller.scrollLeft = Math.max(0, Math.round((playheadRef.current / 1_000_000) * next));
     });
-  }, [committedTotal]);
+  }, [committedTotal, maxPps]);
 
   const fittedRef = useRef(false);
   useEffect(() => {
@@ -496,7 +521,7 @@ export function TimelineEditor({
     const scroller = scrollerRef.current;
     const anchor = playhead;
     setPxPerSecond((previous) => {
-      const next = clamp(previous * factor, MIN_PPS, MAX_PPS);
+      const next = clamp(previous * factor, MIN_PPS, maxPps);
       // Zoom around the playhead — it is where the user is looking — which with a fixed
       // playhead means holding `scrollLeft` on the same instant at the new scale.
       if (scroller) {
@@ -507,6 +532,26 @@ export function TimelineEditor({
       return next;
     });
   };
+
+  /*
+    Which page of the ruler is on screen.
+
+    Deliberately coarse. The window has to follow the scroll, but recomputing it from the
+    playhead every frame would rebuild every tick sixty times a second, which is the cost
+    the ruler was windowed to avoid in the first place. A page is wider than the viewport,
+    three of them are drawn, and the number only changes when a boundary goes past.
+  */
+  const rulerPage = Math.floor(((playhead / 1_000_000) * pxPerSecond) / RULER_PAGE_PX);
+
+  /** Stable, so the memoised ruler is not re-rendered by a fresh closure every scroll. */
+  const seekRef = useRef(onSeek);
+  seekRef.current = onSeek;
+  const scrollToTimeRef = useRef(scrollToTime);
+  scrollToTimeRef.current = scrollToTime;
+  const onRulerTap = useCallback((us: number) => {
+    seekRef.current(us, true);
+    scrollToTimeRef.current(us, true);
+  }, []);
 
   const selected = clips.find((c) => c.id === selectedClipId) ?? null;
   const selectedSource = selected ? sources.find((s) => s.id === selected.sourceId) ?? null : null;
@@ -528,7 +573,7 @@ export function TimelineEditor({
         <button className="icon" onClick={fit} aria-label="Fit timeline">
           Fit
         </button>
-        <button className="icon" onClick={() => zoom(1.6)} aria-label="Zoom in" disabled={pxPerSecond >= MAX_PPS}>
+        <button className="icon" onClick={() => zoom(1.6)} aria-label="Zoom in" disabled={pxPerSecond >= maxPps}>
           ＋
         </button>
       </div>
@@ -557,10 +602,10 @@ export function TimelineEditor({
             total={committedTotal}
             pxPerSecond={pxPerSecond}
             offset={halfWidth}
-            onTap={(us) => {
-              onSeek(us, true);
-              scrollToTime(us, true);
-            }}
+            page={rulerPage}
+            frameRateNum={timeline.frameRate.num}
+            frameRateDen={timeline.frameRate.den}
+            onTap={onRulerTap}
           />
 
           {bubbles.length > 0 && (
@@ -646,20 +691,43 @@ export function TimelineEditor({
   );
 }
 
-function Ruler({
+/**
+ * The ruler.
+ *
+ * Memoised on primitives — the frame rate arrives as two numbers rather than a `Rational`
+ * because a fresh object in the props defeats `memo` entirely — and windowed to `page`, so
+ * a scroll rebuilds its marks a few times a second instead of sixty. What it draws at each
+ * zoom, and why the ladder is shaped the way it is, is in `ruler.ts`.
+ */
+const Ruler = memo(function Ruler({
   total,
   pxPerSecond,
   offset,
+  page,
+  frameRateNum,
+  frameRateDen,
   onTap,
 }: {
   total: number;
   pxPerSecond: number;
   offset: number;
+  page: number;
+  frameRateNum: number;
+  frameRateDen: number;
   onTap(us: number): void;
 }) {
-  const step = tickInterval(pxPerSecond);
-  const ticks: number[] = [];
-  for (let t = 0; t <= total; t += step) ticks.push(t);
+  const plan = useMemo(() => {
+    const toUs = (px: number) => (px / pxPerSecond) * 1_000_000;
+    return planRuler({
+      // A page of slack on each side, so the marks are already there when the edge of the
+      // screen reaches them rather than appearing as you arrive.
+      fromUs: toUs((page - 1) * RULER_PAGE_PX),
+      toUs: toUs((page + 2) * RULER_PAGE_PX),
+      totalUs: total,
+      pxPerSecond,
+      frameRate: { num: frameRateNum, den: frameRateDen },
+    });
+  }, [frameRateDen, frameRateNum, page, pxPerSecond, total]);
 
   return (
     // Dragging the ruler pans the lane like everything else; a *tap* brings that instant
@@ -672,14 +740,18 @@ function Ruler({
         onTap(Math.max(0, Math.round(((event.clientX - box.left - offset) / pxPerSecond) * 1_000_000)));
       }}
     >
-      {ticks.map((t) => (
-        <span key={t} className="tick" style={{ left: (t / 1_000_000) * pxPerSecond + offset }}>
-          {formatTimecode(t, undefined, { compact: true }).replace(/\.\d+$/, '')}
+      {plan.ticks.map((tick) => (
+        <span
+          key={tick.frame}
+          className={tick.label === null ? 'tick minor' : 'tick'}
+          style={{ left: (tick.us / 1_000_000) * pxPerSecond + offset }}
+        >
+          {tick.label}
         </span>
       ))}
     </div>
   );
-}
+});
 
 /**
  * One clip on the lane.
@@ -937,13 +1009,6 @@ function glyphFor(preview: OpPreview): string {
 
 function bubbleClass(bubble: Bubble): string {
   return ['bubble', bubble.accepted ? 'accepted' : '', bubble.stale ? 'stale' : ''].filter(Boolean).join(' ');
-}
-
-/** Tick spacing that keeps labels at least ~64px apart at the current zoom. */
-function tickInterval(pxPerSecond: number): number {
-  const candidates = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
-  const seconds = candidates.find((c) => c * pxPerSecond >= 64) ?? candidates.at(-1)!;
-  return seconds * 1_000_000;
 }
 
 function clamp(value: number, min: number, max: number): number {

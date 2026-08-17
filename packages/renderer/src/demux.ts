@@ -35,6 +35,8 @@
  * the picture; no phone writes one, and this says so rather than pretending otherwise.
  */
 
+import type { Rational } from '@evocut/edl';
+
 export interface AudioSampleRef {
   /** Byte offset of the frame within the file. */
   offset: number;
@@ -72,6 +74,55 @@ export async function readAudioTrack(file: Blob): Promise<SourceAudioTrack | nul
     if (trak.type !== 'trak') continue;
     const track = readSoundTrack(view, trak);
     if (track) return track;
+  }
+  return null;
+}
+
+/**
+ * What the video track's `stts` says the frame rate is.
+ *
+ * A `<video>` element will not tell you this — it reports duration and dimensions and
+ * nothing else — so until now every source was recorded at a nominal 30fps regardless of
+ * what it actually was. That was harmless while cut points only ever lived in microseconds
+ * and were snapped at render time. It stops being harmless the moment the ruler draws
+ * *frames*: a tick labelled `15f` half a second in is a lie on a 60fps recording, and it is
+ * a lie the user is aiming a cut at.
+ *
+ * Read from the same `moov` index the audio comes out of, so it costs a few hundred
+ * kilobytes rather than a decode. The answer is a rational rather than a float because
+ * containers are honest about 30000/1001 and rounding it to 29.97 puts a frame boundary
+ * three milliseconds out by the end of a two-minute take.
+ *
+ * Null for anything this cannot read — WebM, fragmented MP4, a track with no sample table —
+ * and every caller falls back to nominal, exactly as before.
+ */
+export interface VideoRate {
+  frameRate: Rational;
+  /**
+   * True when the sample table holds meaningfully varied durations.
+   *
+   * Phones do this: a recording that dropped its rate in low light carries a `stts` full of
+   * different deltas, and `frameRate` is then the most common one rather than the whole
+   * truth. Worth passing on, because a frame ruler over VFR footage is approximate and the
+   * EDL says so.
+   */
+  variable: boolean;
+}
+
+/** How much of the recording has to share one duration before it counts as constant. */
+const CONSTANT_RATE_SHARE = 0.9;
+
+export async function readVideoFrameRate(file: Blob): Promise<VideoRate | null> {
+  const moov = await findTopLevelBox(file, 'moov');
+  if (!moov) return null;
+
+  const bytes = new Uint8Array(await file.slice(moov.start, moov.end).arrayBuffer());
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  for (const trak of childBoxes(view, 0, bytes.byteLength)) {
+    if (trak.type !== 'trak') continue;
+    const rate = readVideoTrackRate(view, trak);
+    if (rate) return rate;
   }
   return null;
 }
@@ -231,6 +282,82 @@ function readSoundTrack(view: DataView, trak: BoxRef): SourceAudioTrack | null {
     samples,
     byteLength,
   };
+}
+
+function readVideoTrackRate(view: DataView, trak: BoxRef): VideoRate | null {
+  const mdia = findBox(view, trak, 'mdia');
+  if (!mdia) return null;
+
+  const hdlr = findBox(view, mdia, 'hdlr');
+  if (!hdlr || hdlr.end - hdlr.start < 12 || fourcc(view, hdlr.start + 8) !== 'vide') return null;
+
+  const mdhd = findBox(view, mdia, 'mdhd');
+  const stbl = descend(view, mdia, 'minf', 'stbl');
+  if (!mdhd || !stbl) return null;
+
+  const timescale = readMdhdTimescale(view, mdhd);
+  if (!timescale) return null;
+
+  const durations = sampleDurationHistogram(view, stbl);
+  if (durations.frames === 0 || durations.commonest === 0) return null;
+
+  const fps = timescale / durations.commonest;
+  // A number outside this band is a misparse rather than a recording — a slideshow track, a
+  // timecode track, or a `stts` we read wrong — and nominal is a better answer than nonsense.
+  if (!Number.isFinite(fps) || fps < 1 || fps > 1000) return null;
+
+  const divisor = gcd(timescale, durations.commonest);
+  return {
+    frameRate: { num: timescale / divisor, den: durations.commonest / divisor },
+    variable: durations.share < CONSTANT_RATE_SHARE,
+  };
+}
+
+/**
+ * The most common sample duration, and how much of the track shares it.
+ *
+ * Read straight off `stts`'s run-length form rather than the expanded per-sample list: a
+ * half-hour 4K recording has a hundred thousand frames and two or three runs.
+ */
+function sampleDurationHistogram(
+  view: DataView,
+  stbl: BoxRef,
+): { commonest: number; frames: number; share: number } {
+  const empty = { commonest: 0, frames: 0, share: 0 };
+  const stts = findBox(view, stbl, 'stts');
+  if (!stts) return empty;
+
+  const runs = view.getUint32(stts.start + 4);
+  const byDuration = new Map<number, number>();
+  let frames = 0;
+  for (let run = 0; run < runs; run += 1) {
+    const at = stts.start + 8 + run * 8;
+    if (at + 8 > stts.end) break;
+    const count = view.getUint32(at);
+    const delta = view.getUint32(at + 4);
+    // A zero delta is a sample with no duration of its own — not a frame rate.
+    if (delta === 0 || count === 0) continue;
+    byDuration.set(delta, (byDuration.get(delta) ?? 0) + count);
+    frames += count;
+  }
+  if (frames === 0) return empty;
+
+  let commonest = 0;
+  let best = 0;
+  for (const [delta, count] of byDuration) {
+    if (count > best) {
+      best = count;
+      commonest = delta;
+    }
+  }
+  return { commonest, frames, share: best / frames };
+}
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y !== 0) [x, y] = [y, x % y];
+  return x || 1;
 }
 
 function readMdhdTimescale(view: DataView, mdhd: BoxRef): number {
