@@ -326,7 +326,6 @@ export function App() {
         mediaUrls={session.mediaUrls}
         selectedClipId={session.selectedClipId}
         draftKeys={framing}
-        frozen={frozen}
         previews={previews}
         accepted={review?.accepted ?? []}
         onSeek={session.seek}

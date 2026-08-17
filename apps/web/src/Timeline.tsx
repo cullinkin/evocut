@@ -87,7 +87,6 @@ export interface TimelineProps {
    * timeline immediately or you cannot tell whether it landed.
    */
   draftKeys?: { clipId: string; keys: Array<{ t: number }> } | null;
-  frozen: boolean;
   /** Open suggestions, drawn as bubbles over the clips they touch. */
   previews: OpPreview[];
   accepted: boolean[];
@@ -153,7 +152,6 @@ export function TimelineEditor({
   mediaUrls,
   selectedClipId,
   draftKeys = null,
-  frozen,
   previews,
   accepted,
   onSeek,
@@ -456,7 +454,6 @@ export function TimelineEditor({
 
   const startDrag = useCallback(
     (event: React.PointerEvent, kind: DragKind) => {
-      if (frozen) return;
       event.preventDefault();
       event.stopPropagation();
       (event.target as Element).setPointerCapture?.(event.pointerId);
@@ -479,7 +476,7 @@ export function TimelineEditor({
           anchored.edge === 'in' ? anchored.originIn : Math.max(anchored.originIn, anchored.originOut - 40_000),
       });
     },
-    [frozen, onDragChange, toTime],
+    [onDragChange, toTime],
   );
 
   const moveDrag = useCallback(
@@ -555,6 +552,77 @@ export function TimelineEditor({
 
   const selected = clips.find((c) => c.id === selectedClipId) ?? null;
   const selectedSource = selected ? sources.find((s) => s.id === selected.sourceId) ?? null : null;
+
+  /**
+   * The lane, built once per thing that can change it — and a playhead is not one of them.
+   *
+   * `ClipBlock` has been memoised for a while, which stops each block *re-rendering* on a
+   * scroll. It does not stop the twenty-four elements being created, their props being
+   * compared, and the geometry being recomputed three times per clip, sixty times a second,
+   * because this component still re-renders at the frame rate: it owns the clock, the
+   * playhead's `aria-valuenow`, and the ruler's window.
+   *
+   * Measured on the fixture under 6x throttling, that residue was 23ms a frame for
+   * twenty-three extra clips — a memoised lane costing per-clip work anyway. Held in a memo
+   * of its own, React reuses the element tree outright and a scroll stops reaching the lane
+   * at all.
+   */
+  const lane = useMemo(
+    () => (
+      <div className="timeline-lane" onPointerDown={() => onSelect(null)}>
+        {clips.map((clip, index) => {
+          const box = geometryOf(clip);
+          return (
+            <ClipBlock
+              key={clip.id}
+              clip={clip}
+              index={index}
+              strip={strips.get(clip.sourceId)}
+              left={box.left}
+              width={box.width}
+              keys={draftKeys?.clipId === clip.id ? draftKeys.keys : keyframesOn(clip)}
+              draft={draft?.clipId === clip.id ? draft : null}
+              selected={clip.id === selectedClipId}
+              onSelect={onSelect}
+            />
+          );
+        })}
+
+        {/*
+          Not gated on the coarse pass being committed, for the same reason Cut, Drop and
+          Delete are not: `coarseSnapshot` already holds a copy of exactly what the coarse
+          pass was, so there is nothing for a gate to protect — and the detailed edit, where
+          a shot gets trimmed two frames off its head, is the work that happens *after*
+          Done. Freezing the handles took away the one gesture the second half of the job is
+          made of.
+        */}
+        {selected && selectedSource && (
+          <TrimHandles
+            clip={selected}
+            source={selectedSource}
+            geometry={geometryOf(selected)}
+            draft={draft?.clipId === selected.id ? draft : null}
+            pxPerSecond={pxPerSecond}
+            onStart={startDrag}
+          />
+        )}
+      </div>
+    ),
+    [
+      clips,
+      draft,
+      draftKeys,
+      geometryOf,
+      onSelect,
+      pxPerSecond,
+      selected,
+      selectedClipId,
+      selectedSource,
+      startDrag,
+      strips,
+    ],
+  );
+
   // Sorted and clustered, which is not free on a long pass and does not depend on the
   // playhead — so it must not be redone sixty times a second while the lane is moving.
   const bubbles = useMemo(
@@ -628,36 +696,7 @@ export function TimelineEditor({
             </div>
           )}
 
-          <div className="timeline-lane" onPointerDown={() => onSelect(null)}>
-            {clips.map((clip, index) => {
-              const box = geometryOf(clip);
-              return (
-                <ClipBlock
-                  key={clip.id}
-                  clip={clip}
-                  index={index}
-                  strip={strips.get(clip.sourceId)}
-                  left={box.left}
-                  width={box.width}
-                  keys={draftKeys?.clipId === clip.id ? draftKeys.keys : keyframesOn(clip)}
-                  draft={draft?.clipId === clip.id ? draft : null}
-                  selected={clip.id === selectedClipId}
-                  onSelect={onSelect}
-                />
-              );
-            })}
-
-            {selected && selectedSource && !frozen && (
-              <TrimHandles
-                clip={selected}
-                source={selectedSource}
-                geometry={geometryOf(selected)}
-                draft={draft?.clipId === selected.id ? draft : null}
-                pxPerSecond={pxPerSecond}
-                onStart={startDrag}
-              />
-            )}
-          </div>
+          {lane}
 
         </div>
       </div>

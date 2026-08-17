@@ -346,11 +346,48 @@ await page.reload();
 await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
 check('clipsAfterReload', await page.locator('.clip-block').count(), 1);
 
+// --- Done does not take the editor away -------------------------------------------
+/**
+ * The detailed pass happens *after* Done, so everything has to still work there.
+ *
+ * This has now been the same bug twice. Cut, Drop and Delete were greyed out once the
+ * coarse pass was committed, on the theory that freezing it protects it; the fix removed
+ * that gate from the three buttons and left it on the trim handles, which silently took
+ * away the gesture the second half of the job is actually made of — nudging a shot two
+ * frames off its head. There is nothing to protect: `coarseSnapshot` holds a copy of
+ * exactly what the coarse pass was, taken by Done itself.
+ *
+ * So this is asserted on the far side of Done rather than trusted to a comment.
+ */
+await page.locator('button:has-text("Done")').click();
+await page.waitForTimeout(400);
+
+// Fitted first, or the out handle is somewhere off to the right of the screen and the
+// drag below would be aimed at a point no thumb could reach.
+await page.locator('button[aria-label="Fit timeline"]').click();
+await page.waitForTimeout(300);
+await page.locator('.clip-block').first().tap();
+await page.waitForTimeout(200);
+check('theTrimHandlesSurviveDone', await page.locator('.trim-handle').count(), 2);
+
+const frozenBefore = await exportEdl(page, 'editor-after-done.json');
+const inBeforeDone = frozenBefore.timeline.tracks[0].clips[0].sourceIn;
+// The head, not the tail: it is the gesture the detailed pass is actually made of — take
+// two frames off the front of a shot — and, with the playhead parked at zero after the
+// reload, it is the handle that is on screen where a thumb could reach it.
+const headHandle = await centre(page.locator('.trim-handle.in'));
+await touchDrag(cdp, page, headHandle, { x: headHandle.x + 70, y: headHandle.y });
+
+const frozenAfter = await exportEdl(page, 'editor-trim-after-done.json');
+const inAfterDone = frozenAfter.timeline.tracks[0].clips[0].sourceIn;
+set('trimAfterDone', { before: inBeforeDone, after: inAfterDone });
+check('andStillTrim', inAfterDone > inBeforeDone, true);
+// The coarse pass is kept by the snapshot, which is why the gate was never needed.
+check('withTheCoarsePassStillOnRecord', typeof frozenAfter.coarseSnapshot, 'object');
+
 // --- And still reaches the refinement pass ----------------------------------------
 // Refine now asks what the video is before it asks a model anything, so the brief sheet
 // is the first thing on the path rather than a screen full of proposals.
-await page.locator('button:has-text("Done")').click();
-await page.waitForTimeout(300);
 await page.locator('button:has-text("Refine")').click();
 await page.locator('.sheet').waitFor({ timeout: 10000 });
 check('briefSheetReachable', (await page.locator('.sheet textarea').count()) > 0, true);

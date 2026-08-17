@@ -27,9 +27,13 @@
   --surface: #16161d;
   --surface-2: #1e1e28;
   --line: #2a2a37;
-  /* One step back from `--line`, for the frame marks: a hundred of them at `--line` reads
-     as a grey band rather than a scale. */
-  --line-dim: #22222d;
+  /* The ruler's own two greys, well clear of `--line`.
+     `--line` is a divider — something you are meant to stop noticing. A tick is the
+     opposite: it is the thing being read, on a phone, in daylight, and it has to be legible
+     at a glance or the ruler may as well not be there. The two differ enough that a
+     labelled mark is obviously the taller relative of the frame marks around it. */
+  --tick: #55556a;
+  --tick-strong: #8b8ba6;
   --text: #f2f2f7;
   --muted: #9a9aab;
   --accent: #6c8cff;
@@ -330,27 +334,29 @@ button.play {
 }
 
 /* Labels sit low in the ruler so the playhead's grip, which lives at the top, does not
-   cover the tick it is parked on. */
+   cover the tick it is parked on. The mark itself runs to the foot of the ruler, so it
+   reads as a rule the clip below is measured against rather than as a bullet by the text. */
 .tick {
   position: absolute;
-  top: 13px;
+  top: 12px;
+  bottom: 0;
   font-size: 10px;
-  color: var(--muted);
+  color: var(--tick-strong);
   font-variant-numeric: tabular-nums;
-  padding-left: 4px;
-  border-left: 1px solid var(--line);
-  line-height: 14px;
+  padding-left: 5px;
+  border-left: 2px solid var(--tick-strong);
+  line-height: 13px;
   pointer-events: none;
   white-space: nowrap;
 }
 
-/* One frame. Short and dim: at this zoom the numbers are for orientation and *these* are
-   the scale, so they have to be readable as a row without competing with the labels. */
+/* One frame. Shorter and a step down in weight, because at this zoom the numbers are for
+   orientation and *these* are the scale: they have to read as a row of marks you can count
+   along, without turning into a grey band or competing with the labels. */
 .ruler .tick.minor {
-  top: 20px;
-  height: 7px;
+  top: 21px;
   padding: 0;
-  border-left-color: var(--line-dim);
+  border-left: 1px solid var(--tick);
 }
 
 .timeline-lane {
