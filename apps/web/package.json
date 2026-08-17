@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "e2e": "node e2e/editor.spec.mjs && node e2e/preview.spec.mjs && node e2e/adjust.spec.mjs && node e2e/scroll.spec.mjs && node e2e/scrub.spec.mjs && node e2e/ruler.spec.mjs && node e2e/waveform.spec.mjs && node e2e/cliptools.spec.mjs && node e2e/review.spec.mjs && node e2e/signals.spec.mjs && node e2e/refine.spec.mjs && node e2e/export.spec.mjs"
+    "e2e": "node e2e/editor.spec.mjs && node e2e/preview.spec.mjs && node e2e/adjust.spec.mjs && node e2e/scroll.spec.mjs && node e2e/scrub.spec.mjs && node e2e/ruler.spec.mjs && node e2e/waveform.spec.mjs && node e2e/keyframes.spec.mjs && node e2e/cliptools.spec.mjs && node e2e/review.spec.mjs && node e2e/signals.spec.mjs && node e2e/refine.spec.mjs && node e2e/export.spec.mjs"
   },
   "dependencies": {
     "@evocut/agent": "*",

@@ -578,6 +578,7 @@ export function TimelineEditor({
           hopUs: measured.audio.hopUs,
           loudness: measured.audio.loudness,
           peakDb: measured.audio.peakDb,
+          medianDb: measured.audio.medianDb,
         });
       }
     }

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { SILENCE_DB } from '@evocut/signals';
-import { DISPLAY_RANGE_DB, clipAt, levelBetween, scaleDb, waveColumns, type WaveClip, type WaveSource } from '../src/waveform.ts';
+import {
+  clipAt,
+  displayFloor,
+  levelBetween,
+  scaleDb,
+  waveColumns,
+  type WaveClip,
+  type WaveSource,
+} from '../src/waveform.ts';
 
 /**
  * The audio lane, as arithmetic.
@@ -14,11 +22,20 @@ import { DISPLAY_RANGE_DB, clipAt, levelBetween, scaleDb, waveColumns, type Wave
 /** Ten seconds of levels at a 50ms hop, so index n is n * 50ms. */
 function tone(pattern: (index: number) => number, hops = 200): WaveSource {
   const loudness = Array.from({ length: hops }, (_, index) => pattern(index));
-  return { hopUs: 50_000, loudness, peakDb: Math.max(...loudness) };
+  const sorted = [...loudness].sort((a, b) => a - b);
+  return {
+    hopUs: 50_000,
+    loudness,
+    peakDb: Math.max(...loudness),
+    medianDb: sorted[Math.floor(sorted.length / 2)]!,
+  };
 }
 
-/** Silence everywhere except one hop, at `at` seconds. */
-const spikeAt = (seconds: number) => tone((i) => (i === Math.round((seconds * 1000) / 50) ? -6 : -80));
+/** Silence everywhere except one hop, at `at` seconds. Genuine silence, not merely quiet:
+ *  the display floor is derived from the recording, so a −80 dB "quiet" against a −6 dB
+ *  peak is a real level and correctly draws as one. */
+const spikeAt = (seconds: number) =>
+  tone((i) => (i === Math.round((seconds * 1000) / 50) ? -6 : SILENCE_DB));
 
 const clip = (over: Partial<WaveClip> = {}): WaveClip => ({
   sourceId: 'src',
@@ -32,18 +49,37 @@ const clip = (over: Partial<WaveClip> = {}): WaveClip => ({
 
 describe('the level scale', () => {
   it('puts the recording\'s own peak at the top', () => {
-    expect(scaleDb(-22.5, -22.5)).toBe(1);
+    expect(scaleDb(-22.5, -22.5, -76.6)).toBe(1);
     // A take shot in a quiet room and one shouted into wind both fill the lane, which is
     // the point: the display is about this recording's shape, not about full scale.
-    expect(scaleDb(-60, -60)).toBe(1);
+    expect(scaleDb(-60, -60, -90)).toBe(1);
   });
 
-  it('floors a fixed distance below the peak', () => {
-    const peak = -20;
-    expect(scaleDb(peak - DISPLAY_RANGE_DB, peak)).toBe(0);
-    expect(scaleDb(peak - DISPLAY_RANGE_DB - 20, peak)).toBe(0);
-    expect(scaleDb(SILENCE_DB, peak)).toBe(0);
-    expect(scaleDb(peak - DISPLAY_RANGE_DB / 2, peak)).toBeCloseTo(0.5, 5);
+  it('puts the ordinary level a quarter of the way up, whatever the recording', () => {
+    /*
+      The fix for "very coarse, bigger histogram bars". These are the real numbers off a
+      27-minute take: a peak of −22.5 and a median of −76.6, fifty-four decibels apart. The
+      old flat 48 dB window put the median *below the floor*, so everything ordinary drew as
+      nothing and everything else drew full height — blocks and gaps.
+    */
+    expect(scaleDb(-76.6, -22.5, -76.6)).toBeCloseTo(0.25, 2);
+    // And a well-recorded source, where the two are close together, is not blown up to fill
+    // the lane with its own noise floor.
+    expect(scaleDb(-20, -6, -20)).toBeCloseTo(0.61, 2);
+  });
+
+  it('never stretches past what a small screen can show', () => {
+    // A recording with almost no dynamic range must not have its floor lifted to a hair
+    // below its peak, or a hiss would draw the same height as a shout.
+    expect(displayFloor(-6, -7)).toBe(-42);
+    // Nor may a pathological one be stretched without limit.
+    expect(displayFloor(-6, -95)).toBe(-90);
+    expect(displayFloor(-60, -99)).toBe(SILENCE_DB);
+  });
+
+  it('draws silence as nothing', () => {
+    expect(scaleDb(SILENCE_DB, -20, -50)).toBe(0);
+    expect(scaleDb(displayFloor(-20, -50), -20, -50)).toBe(0);
   });
 });
 

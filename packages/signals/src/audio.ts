@@ -42,7 +42,19 @@ export interface AudioAnalysisOptions {
 }
 
 const DEFAULTS = {
-  hopMs: 50,
+  /*
+    10ms, and the reason is the display rather than the analysis.
+
+    50ms was chosen for finding hits and dead air, where it is plenty. It is not plenty for
+    *drawing* the audio: the timeline now zooms until a third of a second fills a phone, and
+    at that scale a 50ms hop is sixty pixels wide — the waveform reads as a row of blocks
+    rather than as sound, which is what "very coarse, bigger histogram bars" was.
+
+    Nothing downstream is stated in hops: the onset window, the minimum gap between hits and
+    the minimum length of a quiet run are all expressed in milliseconds and converted, so
+    they measure the same spans of time as before.
+  */
+  hopMs: 10,
   quietBelowDb: -18,
   minQuietMs: 600,
   minOnsetGapMs: 150,

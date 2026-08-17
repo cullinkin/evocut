@@ -3,6 +3,7 @@ import { findModel } from '@evocut/agent';
 import {
   NEUTRAL_COLOR,
   formatTimecode,
+  isNeutralColor,
   lengthStanding,
   timelineDuration,
   type Clip,
@@ -38,12 +39,24 @@ export function App() {
   const [showMetadata, setShowMetadata] = useState(false);
   const [showBrief, setShowBrief] = useState(false);
   const [showList, setShowList] = useState(false);
+  /*
+    Each per-clip panel carries `from`: where the playhead was when it opened.
+
+    The panels follow the playhead onto whatever clip it crosses into, and that rule needs
+    one exception at the moment of opening. You can select a clip that is nowhere near the
+    playhead — tap it on the lane, from anywhere — and a panel that followed immediately
+    would leave that clip before you had touched a control, silently editing whatever
+    happened to be under the playhead instead. So following starts once the playhead has
+    actually moved.
+  */
   /** The clip whose grade is being adjusted, and the uncommitted value. */
-  const [adjusting, setAdjusting] = useState<{ clipId: string; value: ColorValue } | null>(null);
+  const [adjusting, setAdjusting] = useState<{ clipId: string; value: ColorValue; from: number } | null>(
+    null,
+  );
   /** The clip whose framing is being built, and the uncommitted keyframe list. */
-  const [framing, setFraming] = useState<{ clipId: string; keys: Keyframe[] } | null>(null);
+  const [framing, setFraming] = useState<{ clipId: string; keys: Keyframe[]; from: number } | null>(null);
   /** The clip whose speed is being set, and the uncommitted value. */
-  const [retiming, setRetiming] = useState<{ clipId: string; speed: number } | null>(null);
+  const [retiming, setRetiming] = useState<{ clipId: string; speed: number; from: number } | null>(null);
   /** The clip tools, one level in so the toolbar stays reachable by a thumb. */
   const [showClipMenu, setShowClipMenu] = useState(false);
   /** Index of the suggestion whose sheet is open, or null. */
@@ -62,6 +75,59 @@ export function App() {
   useEffect(() => {
     if (drag) setPlaying(false);
   }, [drag]);
+
+  /**
+   * A per-clip panel follows the playhead onto whatever clip it is over.
+   *
+   * The panels are opened on one clip and the timeline underneath them stays live — that is
+   * the whole design, and it is what makes "drop a key, scrub forward, adjust" possible.
+   * But the panel was pinned to the clip it opened on, so scrubbing past the end of that
+   * clip left every control pointed at a shot that was no longer on screen. Transform then
+   * clamped: an adjustment made from three clips away wrote a keyframe onto the *last frame
+   * of the clip you had left*, and since that was usually the first key on it, the result
+   * was one keyframe — a static reframe of a whole shot you were not looking at. Reported
+   * as "I move along the timeline, zoom in to drop another, it just doesn't; the whole clip
+   * seems to be set at that zoom instead".
+   *
+   * So crossing into another clip carries the panel with it: whatever was drafted on the
+   * clip being left is committed, and the panel reopens on the new one holding its values.
+   * Committed only when it actually changed, or a scrub across a long edit with a panel open
+   * would fill the log with revisions that changed nothing.
+   */
+  useEffect(() => {
+    const timelineClips = session.project?.timeline.tracks[0]?.clips ?? [];
+    const under = timelineClips.find((clip) => {
+      if (!clip.enabled) return false;
+      const end = clip.start + Math.round((clip.sourceOut - clip.sourceIn) / clip.speed);
+      return session.playhead >= clip.start && session.playhead < end;
+    });
+    if (!under) return;
+
+    const moved = (from: number) => session.playhead !== from;
+
+    if (framing && framing.clipId !== under.id && moved(framing.from)) {
+      const leaving = timelineClips.find((clip) => clip.id === framing.clipId);
+      const drafted = framing.keys;
+      if (leaving && JSON.stringify(keyframesOf(leaving)) !== JSON.stringify(drafted)) {
+        session.setClipTransform(framing.clipId, drafted.length > 0 ? drafted : null);
+      }
+      setFraming({ clipId: under.id, keys: keyframesOf(under), from: session.playhead });
+    }
+
+    if (adjusting && adjusting.clipId !== under.id && moved(adjusting.from)) {
+      const leaving = timelineClips.find((clip) => clip.id === adjusting.clipId);
+      if (leaving && JSON.stringify(colorOf(leaving)) !== JSON.stringify(adjusting.value)) {
+        session.setClipColor(adjusting.clipId, isNeutralColor(adjusting.value) ? null : adjusting.value);
+      }
+      setAdjusting({ clipId: under.id, value: colorOf(under), from: session.playhead });
+    }
+
+    if (retiming && retiming.clipId !== under.id && moved(retiming.from)) {
+      const leaving = timelineClips.find((clip) => clip.id === retiming.clipId);
+      if (leaving && leaving.speed !== retiming.speed) session.setClipSpeed(retiming.clipId, retiming.speed);
+      setRetiming({ clipId: under.id, speed: under.speed, from: session.playhead });
+    }
+  }, [adjusting, framing, retiming, session]);
 
   /**
    * The two files this app produces besides the video.
@@ -201,12 +267,34 @@ export function App() {
     null;
   const mediaUrl = session.mediaUrls.get(clips[0]?.sourceId ?? '') ?? null;
 
+  /**
+   * Bring the playhead to the clip a tool is about to open on.
+   *
+   * A clip can be selected from anywhere on the lane, so the clip a panel opens on need not
+   * be the one on screen — and a panel whose controls act on a shot you cannot see is a
+   * panel you cannot use. Transform makes that concrete: its keyframes go where the playhead
+   * is, so with the playhead elsewhere it has nowhere honest to put one and the sliders do
+   * nothing at all.
+   *
+   * Returns where the playhead ends up, which is what the panel records as the position it
+   * opened at — the point from which it starts following.
+   */
+  const focusClip = (clip: Clip): number => {
+    const end = clip.start + Math.round((clip.sourceOut - clip.sourceIn) / clip.speed);
+    if (playhead >= clip.start && playhead < end) return playhead;
+    session.seek(clip.start, true);
+    return clip.start;
+  };
+
   const framingClip = framing ? clips.find((clip) => clip.id === framing.clipId) ?? null : null;
   const retimingClip = retiming ? clips.find((clip) => clip.id === retiming.clipId) ?? null : null;
   const adjustingClip = adjusting ? clips.find((clip) => clip.id === adjusting.clipId) ?? null : null;
   const framingDuration = framingClip
     ? Math.round((framingClip.sourceOut - framingClip.sourceIn) / framingClip.speed)
     : 0;
+  /** One frame of the output, which is what a keyframe's position is rounded to. */
+  const frameUs =
+    (1_000_000 * project.timeline.frameRate.den) / Math.max(1, project.timeline.frameRate.num);
 
   // The export owns the whole screen while it runs. It takes about as long as the video
   // is, the tab has to stay in front for it, and a progress bar tucked into a corner of a
@@ -346,6 +434,7 @@ export function App() {
           clipNumber={clips.indexOf(framingClip) + 1 || null}
           clipStartUs={framingClip.start}
           durationUs={framingDuration}
+          frameUs={frameUs}
           keyframes={framing.keys}
           onChange={(keys) => setFraming((current) => (current ? { ...current, keys } : current))}
           onCommit={(keys) => {
@@ -433,7 +522,7 @@ export function App() {
           moment you most want them is after the refinement has settled what the video is.
         */}
         <button
-          onClick={() => adjustTarget && setAdjusting({ clipId: adjustTarget.id, value: colorOf(adjustTarget) })}
+          onClick={() => adjustTarget && setAdjusting({ clipId: adjustTarget.id, value: colorOf(adjustTarget), from: focusClip(adjustTarget) })}
           disabled={!adjustTarget}
           aria-label="Adjust colour"
         >
@@ -441,7 +530,7 @@ export function App() {
           <small>Adjust</small>
         </button>
         <button
-          onClick={() => adjustTarget && setFraming({ clipId: adjustTarget.id, keys: keyframesOf(adjustTarget) })}
+          onClick={() => adjustTarget && setFraming({ clipId: adjustTarget.id, keys: keyframesOf(adjustTarget), from: focusClip(adjustTarget) })}
           disabled={!adjustTarget}
           aria-label="Transform"
         >
@@ -449,7 +538,7 @@ export function App() {
           <small>Transform</small>
         </button>
         <button
-          onClick={() => adjustTarget && setRetiming({ clipId: adjustTarget.id, speed: adjustTarget.speed })}
+          onClick={() => adjustTarget && setRetiming({ clipId: adjustTarget.id, speed: adjustTarget.speed, from: focusClip(adjustTarget) })}
           disabled={!adjustTarget}
           aria-label="Speed"
         >

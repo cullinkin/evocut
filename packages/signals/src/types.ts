@@ -38,7 +38,7 @@
  * of those went wrong on a cached result that looked perfectly valid, which is the case
  * this number exists for.
  */
-export const SIGNALS_VERSION = 3;
+export const SIGNALS_VERSION = 4;
 
 /** A transient: something struck, said hard, or landed. In source microseconds. */
 export interface Onset {

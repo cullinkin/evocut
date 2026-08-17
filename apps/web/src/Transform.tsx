@@ -44,6 +44,8 @@ export interface TransformProps {
   clipStartUs: number;
   /** Output length of the clip. */
   durationUs: number;
+  /** One frame of the timeline, which is what a keyframe's position is rounded to. */
+  frameUs: number;
   keyframes: Keyframe[];
   onChange(keyframes: Keyframe[]): void;
   onCommit(keyframes: Keyframe[] | null): void;
@@ -85,8 +87,23 @@ const TABS: Array<{ id: Tab; label: string; controls: Control[] }> = [
 
 export const IDENTITY: TransformValue = { scale: 1, x: 0, y: 0, rotation: 0 };
 
-/** How close two keyframes have to be to count as the same one. Two frames at 30fps. */
-const SAME_TIME_US = 66_000;
+/**
+ * How close two keyframes have to be to count as the same one: the same frame.
+ *
+ * It used to be a flat 66ms — two frames at 30fps — which was a sliver of the screen at the
+ * zoom the timeline had when it was written. The timeline now zooms until a third of a
+ * second fills the phone, where 66ms is a *fifth of the screen*: you move along a visibly
+ * long way, adjust, and the adjustment silently rewrites the keyframe you just made instead
+ * of adding one. Reported exactly that way — "if I try moving along the timeline, zooming in
+ * to drop another, it just doesn't".
+ *
+ * A frame is the honest answer, because a frame is the finest distinction the output can
+ * carry. Half of one either side, so it means "this frame" and not "this frame or its
+ * neighbour".
+ */
+export function sameFrame(frameUs: number): number {
+  return Math.max(1, frameUs / 2);
+}
 
 /** The framing at `atUs`, whether or not a keyframe sits there. */
 export function valueAt(keyframes: Keyframe[], atUs: number): TransformValue {
@@ -95,8 +112,9 @@ export function valueAt(keyframes: Keyframe[], atUs: number): TransformValue {
 }
 
 /** The keyframe at `atUs`, if there is one. */
-export function keyframeAt(keyframes: Keyframe[], atUs: number): Keyframe | null {
-  return keyframes.find((keyframe) => Math.abs(keyframe.t - atUs) <= SAME_TIME_US) ?? null;
+export function keyframeAt(keyframes: Keyframe[], atUs: number, frameUs: number): Keyframe | null {
+  const near = sameFrame(frameUs);
+  return keyframes.find((keyframe) => Math.abs(keyframe.t - atUs) < near) ?? null;
 }
 
 /**
@@ -107,17 +125,36 @@ export function keyframeAt(keyframes: Keyframe[], atUs: number): Keyframe | null
  * list that already has keyframes gets a new one at this instant, which is what makes
  * "move forward, adjust" build a move instead of rewriting the one that exists.
  */
-export function writeAt(keyframes: Keyframe[], atUs: number, value: TransformValue): Keyframe[] {
-  const existing = keyframeAt(keyframes, atUs);
+export function writeAt(
+  keyframes: Keyframe[],
+  atUs: number,
+  value: TransformValue,
+  frameUs: number,
+): Keyframe[] {
+  const existing = keyframeAt(keyframes, atUs, frameUs);
   const next = keyframes.filter((keyframe) => keyframe !== existing);
   next.push({ t: existing ? existing.t : atUs, value, easing: existing?.easing ?? 'easeInOut' });
   return next.sort((a, b) => a.t - b.t);
+}
+
+/**
+ * The frame boundary a time belongs to.
+ *
+ * Keyframes land on frames because frames are what gets rendered. A key at an arbitrary
+ * microsecond is a key whose value is never sampled exactly — the frame before it and the
+ * frame after it both show an interpolation — which is the "they don't drop where I tell
+ * them to, they are offset a bit" that started this.
+ */
+export function snapToFrame(atUs: number, frameUs: number): number {
+  if (!Number.isFinite(frameUs) || frameUs <= 0) return Math.round(atUs);
+  return Math.round(Math.round(atUs / frameUs) * frameUs);
 }
 
 export function TransformPanel({
   clipNumber,
   clipStartUs,
   durationUs,
+  frameUs,
   keyframes,
   onChange,
   onCommit,
@@ -127,27 +164,46 @@ export function TransformPanel({
   // Subscribed here rather than passed down, so scrubbing the timeline while the panel is
   // open re-renders the panel and nothing above it.
   const playhead = usePlayhead();
-  const atUs = Math.max(0, Math.min(durationUs, playhead - clipStartUs));
+  /*
+    Where in the clip we are — on a frame, and honestly.
+
+    `outside` is the case that used to be silently wrong. The panel is opened on one clip
+    and the timeline stays live, so the playhead can walk off the end of it; this used to
+    clamp, which meant every adjustment made from anywhere else in the edit landed on the
+    *last frame of this clip*. The first such write, on a clip with no keys, is a single
+    keyframe — a static reframe of the whole shot. "The whole clip seems to be set at that
+    zoom then instead of in a new keyframe" is precisely that, and the panel said nothing.
+
+    The editor moves the panel to whatever clip the playhead is over, so this state is brief;
+    when it happens anyway the controls stand down rather than write somewhere false.
+  */
+  const rawUs = playhead - clipStartUs;
+  const outside = rawUs < -sameFrame(frameUs) || rawUs > durationUs + sameFrame(frameUs);
+  const atUs = snapToFrame(Math.max(0, Math.min(durationUs, rawUs)), frameUs);
 
   const history = useDraftHistory(keyframes, onChange);
 
   const current = useMemo(() => valueAt(keyframes, atUs), [keyframes, atUs]);
-  const here = useMemo(() => keyframeAt(keyframes, atUs), [keyframes, atUs]);
+  const here = useMemo(() => keyframeAt(keyframes, atUs, frameUs), [keyframes, atUs, frameUs]);
 
   const set = useCallback(
     (key: keyof TransformValue, amount: number) => {
+      if (outside) return;
       history.remember(keyframes);
-      onChange(writeAt(keyframes, atUs, { ...current, [key]: amount }));
+      onChange(writeAt(keyframes, atUs, { ...current, [key]: amount }, frameUs));
     },
-    [atUs, current, history, keyframes, onChange],
+    [atUs, current, frameUs, history, keyframes, onChange, outside],
   );
 
   const toggleKeyframe = useCallback(() => {
+    if (outside) return;
     history.remember(keyframes);
     onChange(
-      here ? keyframes.filter((keyframe) => keyframe !== here) : writeAt(keyframes, atUs, current),
+      here
+        ? keyframes.filter((keyframe) => keyframe !== here)
+        : writeAt(keyframes, atUs, current, frameUs),
     );
-  }, [atUs, current, here, history, keyframes, onChange]);
+  }, [atUs, current, frameUs, here, history, keyframes, onChange, outside]);
 
   const active = TABS.find((entry) => entry.id === tab) ?? TABS[0]!;
 

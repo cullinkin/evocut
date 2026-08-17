@@ -6,22 +6,29 @@ import { SILENCE_DB } from '@evocut/signals';
  * ## Where the data comes from
  *
  * Nowhere new. The signals pass already decodes every source's audio and reduces it to an
- * RMS level every 50ms — that is how it finds the hits and the dead air — and caches the
- * result per source. This reads the same array. A 27-minute recording is about 33,000
- * numbers, which is nothing to hold and nothing to draw from.
+ * RMS level every 10ms — that is how it finds the hits and the dead air — and caches the
+ * result per source. This reads the same array.
+ *
+ * That hop used to be 50ms, which is ample for finding hits and far too coarse for drawing
+ * them: at the zoom the timeline now reaches, one hop is sixty pixels wide and the lane
+ * reads as a row of blocks. Five times finer costs five times the numbers — a 27-minute
+ * recording is about 163,000 of them — and nothing downstream noticed, because every
+ * threshold in the analysis is stated in milliseconds rather than in hops.
  *
  * ## Level, not amplitude
  *
  * A literal waveform plots sample amplitude, and on real footage that is close to useless
  * on a phone: a take whose peak is −22 dBFS and whose median is −77 has an amplitude ratio
  * of about three hundred to one between its loud and ordinary moments, so the ordinary
- * moments — where all the cuts are — draw as a flat line. What is wanted is where the
- * sound *is*, at a glance, and that is a level envelope: decibels, floored a fixed distance
- * below this recording's own peak, mapped to the height of the lane.
+ * moments — where all the cuts are — draw as a flat line. What is wanted is where the sound
+ * *is*, at a glance, and that is a level envelope in decibels.
  *
- * Relative to the recording's peak rather than to full scale, for the same reason the quiet
- * detector works that way: a take shot at arm's length in a room and one shouted into wind
- * have nothing in common on an absolute scale, and both have obvious shape.
+ * ## Stretched to fit the recording it is drawing
+ *
+ * And scaled against this recording rather than against full scale, or against a fixed
+ * window below its peak. See `displayFloor`: the first version used a flat 48 dB window,
+ * which on the take above put the entire body of the recording below the floor and drew it
+ * as blocks separated by nothing.
  *
  * ## Columns, not curves
  *
@@ -37,6 +44,8 @@ export interface WaveSource {
   loudness: number[];
   /** Loudest hop in the source, which the display is scaled against. */
   peakDb: number;
+  /** The level this recording usually sits at, which sets where the floor goes. */
+  medianDb: number;
 }
 
 /** What a column needs to know about the clip under it. */
@@ -51,13 +60,37 @@ export interface WaveClip {
 }
 
 /**
- * How far below the peak counts as silence on the display.
+ * Where the typical level of a recording should sit in the lane.
  *
- * 48 dB is the range a small screen can show without either clipping everything together
- * or flattening the body of the recording into the floor. Wider and ordinary speech becomes
- * a hairline; narrower and every moderate sound pins to the top.
+ * The display is stretched so that the median lands here and the peak lands at the top.
+ * A quarter height for "ordinary" leaves three quarters of the lane for the things that
+ * stand out, which is what the lane is read for.
  */
-export const DISPLAY_RANGE_DB = 48;
+const MEDIAN_AT = 0.25;
+
+/** Bounds on how far the display may be stretched, in dB. */
+const MIN_RANGE_DB = 36;
+const MAX_RANGE_DB = 84;
+
+/**
+ * The level that draws as nothing, chosen from this recording rather than fixed.
+ *
+ * A flat window below the peak — the first version used 48 dB — assumes recordings have a
+ * typical dynamic range. Real footage does not. A 27-minute take peaking at −22 dBFS with a
+ * median of −77 has 55 dB between "ordinary" and "loud", so a 48 dB window puts the entire
+ * body of the recording *below the floor*: every quiet stretch drew as nothing and every
+ * column containing a transient drew full height. Blocks and gaps, with no shape between
+ * them.
+ *
+ * Stretching the display instead is what the user asked for in so many words — "visualise
+ * the audio as if it were scaled up heavily, but the audio plays as if it were normal" —
+ * and it costs nothing, because this is a drawing decision that touches no sample.
+ */
+export function displayFloor(peakDb: number, medianDb: number): number {
+  const wanted = (medianDb - MEDIAN_AT * peakDb) / (1 - MEDIAN_AT);
+  const bounded = Math.min(Math.max(wanted, peakDb - MAX_RANGE_DB), peakDb - MIN_RANGE_DB);
+  return Math.max(SILENCE_DB, bounded);
+}
 
 /** Level 0..1 for the loudest hop between two source times. Zero where there is nothing. */
 export function levelBetween(audio: WaveSource, fromUs: number, toUs: number): number {
@@ -83,12 +116,12 @@ export function levelBetween(audio: WaveSource, fromUs: number, toUs: number): n
     const db = loudness[index]!;
     if (db > loudest) loudest = db;
   }
-  return scaleDb(loudest, audio.peakDb);
+  return scaleDb(loudest, audio.peakDb, audio.medianDb);
 }
 
-/** dBFS to 0..1, relative to this recording's peak. */
-export function scaleDb(db: number, peakDb: number): number {
-  const floor = Math.max(SILENCE_DB, peakDb - DISPLAY_RANGE_DB);
+/** dBFS to 0..1, stretched between this recording's own floor and its peak. */
+export function scaleDb(db: number, peakDb: number, medianDb: number): number {
+  const floor = displayFloor(peakDb, medianDb);
   if (db <= floor) return 0;
   return Math.min(1, (db - floor) / Math.max(1, peakDb - floor));
 }
