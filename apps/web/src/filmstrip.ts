@@ -258,6 +258,68 @@ export function frameAt(strip: Filmstrip, sourceTimeUs: number): Frame | null {
   return best;
 }
 
+/**
+ * How far apart this strip's frames actually are.
+ *
+ * Not a constant, and that turns out to matter a great deal. `planExtraction` divides the
+ * source into at most `MAX_FRAMES`, so a twelve-second clip gets a frame a second and a
+ * twenty-seven-minute recording gets one every twenty seconds. Anything that treats a
+ * filmstrip frame as "roughly what is on screen right now" has to know which of those it
+ * is holding.
+ */
+export function frameSpacingUs(strip: Filmstrip): number {
+  if (strip.frames.length < 2) return Number.POSITIVE_INFINITY;
+  return strip.frames[1]!.t - strip.frames[0]!.t;
+}
+
+/**
+ * How many thumbnails to draw across a clip.
+ *
+ * ## The bug this is
+ *
+ * It used to be one per 56 pixels of block, with nothing bounding it. That is fine at the
+ * zoom the editor originally had. It is ruinous at the zoom it has now: a thirty-second
+ * clip at full zoom is thirty-five thousand pixels wide, which is *six hundred* `<img>`
+ * elements for one clip, and a fifty-clip timeline is tens of thousands of DOM nodes built
+ * on a phone. Reported as "extraordinarily slow and laggy, especially when zoomed in",
+ * which is exactly where the number explodes.
+ *
+ * ## Two ceilings, and the interesting one is the second
+ *
+ * The first is a flat cap, so no single block can ever be unbounded.
+ *
+ * The second is the honest one: **there is no point drawing more thumbnails than the
+ * filmstrip has frames for that stretch of recording.** The strip holds at most eighty
+ * frames for a whole source, so on a twenty-seven minute master they are twenty seconds
+ * apart — and a thirty-second clip has two of them, whatever its width. The old code drew
+ * six hundred copies of those two pictures. Asking for what exists rather than for what
+ * would fit is both faster and more truthful: the strip stops pretending to a detail it
+ * does not have.
+ */
+export const MAX_THUMBNAILS_PER_CLIP = 40;
+
+export function thumbnailSlots(widthPx: number, spanUs: number, spacingUs: number): number {
+  const byWidth = Math.round(widthPx / 56);
+  const available = Number.isFinite(spacingUs) && spacingUs > 0 ? Math.ceil(spanUs / spacingUs) : byWidth;
+  return Math.max(1, Math.min(byWidth, available, MAX_THUMBNAILS_PER_CLIP));
+}
+
+/**
+ * A frame close enough to `sourceTimeUs` to stand in for it, or null.
+ *
+ * The distinction `frameAt` does not make, and the reason the scrub preview was reported as
+ * "the picture just gets all grainy until the next clip is hit". On a twenty-seven minute
+ * source the nearest filmstrip frame can be twenty seconds away from where the thumb is:
+ * it is not a preview of that moment, it is a picture of somewhere else entirely, and
+ * holding it over the video while the real frame is on its way is worse than showing
+ * nothing. Better a stale sharp frame you can recognise than a wrong blurry one.
+ */
+export function frameNear(strip: Filmstrip, sourceTimeUs: number, withinUs: number): Frame | null {
+  const frame = frameAt(strip, sourceTimeUs);
+  if (!frame) return null;
+  return Math.abs(frame.t - sourceTimeUs) <= withinUs ? frame : null;
+}
+
 interface ExtractHandlers {
   onFrame(frame: Frame, sample: LumaSample, aspect: number): void;
   onThumbnailsDone(aspect: number): void;

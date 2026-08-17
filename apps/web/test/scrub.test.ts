@@ -9,6 +9,7 @@ import {
   noteSeekLanded,
   shouldSeekNow,
 } from '../src/scrub.ts';
+import { MAX_THUMBNAILS_PER_CLIP, thumbnailSlots } from '../src/filmstrip.ts';
 
 /**
  * The pacing rule, stated exactly.
@@ -139,5 +140,39 @@ describe('the interval is learned', () => {
     */
     const idle = newScrubPace();
     expect(noteSeekLanded(idle, 9_999)).toEqual(idle);
+  });
+});
+
+/**
+ * How many thumbnails a clip block draws.
+ *
+ * Extracted and tested because the unbounded version was the single largest cost in the
+ * editor and nothing caught it: it is invisible at the zoom the tests used and catastrophic
+ * at the zoom the editor now reaches.
+ */
+describe('thumbnail slots', () => {
+  it('draws one per 56 pixels at an ordinary zoom', () => {
+    // A four-second clip at 40px/s: 160px, and a strip with a frame a second.
+    expect(thumbnailSlots(160, 4_000_000, 1_000_000)).toBe(3);
+  });
+
+  it('never asks for more pictures than the filmstrip has', () => {
+    /*
+      The case that mattered. A thirty-second clip at full zoom is thirty-five thousand
+      pixels wide, and on a twenty-seven minute source the filmstrip holds a frame every
+      twenty seconds — so there are two pictures to draw. The old rule drew six hundred and
+      thirty copies of those two, per clip, across fifty clips.
+    */
+    expect(thumbnailSlots(35_000, 30_000_000, 20_000_000)).toBe(2);
+    // A short source, where the strip is dense: thirty seconds at a frame a second is
+    // thirty pictures, and thirty is what gets drawn — not six hundred, and not the cap.
+    expect(thumbnailSlots(35_000, 30_000_000, 1_000_000)).toBe(30);
+  });
+
+  it('is bounded whatever it is asked', () => {
+    expect(thumbnailSlots(1_000_000, 600_000_000, 1_000_000)).toBe(MAX_THUMBNAILS_PER_CLIP);
+    expect(thumbnailSlots(0, 0, 1_000_000)).toBe(1);
+    // No strip yet: fall back to the width, still capped.
+    expect(thumbnailSlots(300, 4_000_000, Number.POSITIVE_INFINITY)).toBe(5);
   });
 });

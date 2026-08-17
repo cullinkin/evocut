@@ -11,9 +11,11 @@ import {
   type TrimBounds,
 } from '@evocut/edl';
 import type { OpPreview } from '@evocut/edl';
-import { frameAt, useFilmstrips, type Filmstrip } from './filmstrip.ts';
+import type { SourceSignals } from '@evocut/signals';
+import { frameAt, frameSpacingUs, thumbnailSlots, useFilmstrips, type Filmstrip } from './filmstrip.ts';
 import { usePlayhead } from './playhead.ts';
 import { planRuler } from './ruler.ts';
+import { waveColumns, type WaveClip, type WaveSource } from './waveform.ts';
 
 /**
  * The editing timeline: draggable playhead, tap-to-select clips, drag-the-edges trimming.
@@ -87,6 +89,15 @@ export interface TimelineProps {
    * timeline immediately or you cannot tell whether it landed.
    */
   draftKeys?: { clipId: string; keys: Array<{ t: number }> } | null;
+  /**
+   * What each source sounds like, for the audio lane.
+   *
+   * Straight from the signals pass, which measures it anyway to find the hits and the dead
+   * air — so the waveform costs a read of a cached array rather than a decode. Sources
+   * still being measured, or whose audio could not be read, are simply absent and draw
+   * nothing.
+   */
+  signals: Map<string, SourceSignals>;
   /** Open suggestions, drawn as bubbles over the clips they touch. */
   previews: OpPreview[];
   accepted: boolean[];
@@ -152,6 +163,7 @@ export function TimelineEditor({
   mediaUrls,
   selectedClipId,
   draftKeys = null,
+  signals,
   previews,
   accepted,
   onSeek,
@@ -540,6 +552,38 @@ export function TimelineEditor({
   */
   const rulerPage = Math.floor(((playhead / 1_000_000) * pxPerSecond) / RULER_PAGE_PX);
 
+  /*
+    What the audio lane needs, reduced to plain data.
+
+    Pulled out of the clips and the signals cache here so `WaveLane` can be memoised on two
+    stable values instead of on the whole timeline and a map of everything ever measured.
+  */
+  const waveClips = useMemo(
+    () =>
+      clips.map((clip) => ({
+        sourceId: clip.sourceId,
+        start: clip.start,
+        sourceIn: clip.sourceIn,
+        sourceOut: clip.sourceOut,
+        speed: clip.speed,
+        enabled: clip.enabled,
+      })),
+    [clips],
+  );
+  const waveAudio = useMemo(() => {
+    const out = new Map<string, WaveSource>();
+    for (const [sourceId, measured] of signals) {
+      if (measured.audio) {
+        out.set(sourceId, {
+          hopUs: measured.audio.hopUs,
+          loudness: measured.audio.loudness,
+          peakDb: measured.audio.peakDb,
+        });
+      }
+    }
+    return out;
+  }, [signals]);
+
   /** Stable, so the memoised ruler is not re-rendered by a fresh closure every scroll. */
   const seekRef = useRef(onSeek);
   seekRef.current = onSeek;
@@ -698,6 +742,15 @@ export function TimelineEditor({
 
           {lane}
 
+          <WaveLane
+            clips={waveClips}
+            audio={waveAudio}
+            total={committedTotal}
+            pxPerSecond={pxPerSecond}
+            offset={halfWidth}
+            page={rulerPage}
+          />
+
         </div>
       </div>
 
@@ -728,6 +781,135 @@ export function TimelineEditor({
       </div>
     </section>
   );
+}
+
+/** How wide one canvas tile of waveform is, in CSS pixels. */
+const WAVE_TILE_PX = 512;
+/** The lane's height, which the stylesheet also knows as `--wave-height`. */
+const WAVE_HEIGHT_PX = 34;
+
+/**
+ * The audio under the picture.
+ *
+ * ## Tiles
+ *
+ * The obvious shape — one canvas per clip — falls over at the zoom this editor now reaches.
+ * A clip a minute long at full zoom is seventy thousand pixels wide, which is past what a
+ * canvas can be, and fifty of them would be an enormous amount of memory for something you
+ * can see four hundred pixels of.
+ *
+ * So the lane is tiled: fixed-width canvases, only near the viewport, positioned by `left`
+ * so the browser scrolls them natively and a gesture costs nothing. Same page window as the
+ * ruler, and the same reason — the tiles change when a page boundary goes past, a few times
+ * a second, rather than on every frame of a scroll.
+ *
+ * ## Drawn once per tile
+ *
+ * Each tile is painted in an effect when it mounts or its zoom changes, never on a scroll.
+ * The drawing is a column per device pixel: cheap, and it does not touch React at all.
+ */
+const WaveLane = memo(function WaveLane({
+  clips,
+  audio,
+  total,
+  pxPerSecond,
+  offset,
+  page,
+}: {
+  clips: WaveClip[];
+  audio: Map<string, WaveSource>;
+  total: number;
+  pxPerSecond: number;
+  offset: number;
+  page: number;
+}) {
+  const tiles = useMemo(() => {
+    const contentPx = (total / 1_000_000) * pxPerSecond;
+    const first = Math.max(0, Math.floor(((page - 1) * RULER_PAGE_PX) / WAVE_TILE_PX));
+    const last = Math.floor(Math.min(contentPx, (page + 2) * RULER_PAGE_PX) / WAVE_TILE_PX);
+    const out: number[] = [];
+    for (let tile = first; tile <= last; tile += 1) out.push(tile);
+    return out;
+  }, [page, pxPerSecond, total]);
+
+  if (audio.size === 0) return null;
+
+  return (
+    // Inset to the edit itself rather than spanning the content box. The lane has half a
+    // viewport of padding at each end so the first and last frame can reach the middle of
+    // the screen, and a bed of audio drawn across that padding reads as sound before the
+    // video starts.
+    <div
+      className="wave-lane"
+      aria-hidden="true"
+      style={{ marginLeft: offset, width: Math.max(0, (total / 1_000_000) * pxPerSecond) }}
+    >
+      {tiles.map((tile) => (
+        <WaveTile
+          key={tile}
+          index={tile}
+          clips={clips}
+          audio={audio}
+          pxPerSecond={pxPerSecond}
+          left={tile * WAVE_TILE_PX}
+        />
+      ))}
+    </div>
+  );
+});
+
+function WaveTile({
+  index,
+  clips,
+  audio,
+  pxPerSecond,
+  left,
+}: {
+  index: number;
+  clips: WaveClip[];
+  audio: Map<string, WaveSource>;
+  pxPerSecond: number;
+  left: number;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const width = Math.max(1, Math.round(WAVE_TILE_PX * dpr));
+    const height = Math.max(1, Math.round(WAVE_HEIGHT_PX * dpr));
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const usPerColumn = 1_000_000 / (pxPerSecond * dpr);
+    const levels = waveColumns({
+      clips,
+      audio,
+      fromUs: ((index * WAVE_TILE_PX) / pxPerSecond) * 1_000_000,
+      usPerColumn,
+      columns: width,
+    });
+
+    ctx.clearRect(0, 0, width, height);
+    // Mirrored about the centre line, the way every editor draws it — the shape reads as
+    // one object rather than as a bar chart, and the centre gives the eye something to
+    // follow through the quiet parts.
+    const middle = height / 2;
+    ctx.fillStyle = getComputedStyle(canvas).getPropertyValue('--wave-ink') || '#b6a8ff';
+    for (let column = 0; column < width; column += 1) {
+      const level = levels[column]!;
+      if (level <= 0) continue;
+      const half = Math.max(dpr, level * middle);
+      ctx.fillRect(column, middle - half, 1, half * 2);
+    }
+  }, [audio, clips, index, pxPerSecond]);
+
+  return <canvas ref={ref} className="wave-tile" style={{ left, width: WAVE_TILE_PX }} />;
 }
 
 /**
@@ -835,9 +1017,14 @@ const ClipBlock = memo(function ClipBlock({
     .filter(Boolean)
     .join(' ');
 
-  // One thumbnail per ~56px of block, sampled across the range the clip currently uses,
-  // so the strip re-aims as the edge moves instead of stretching.
-  const slots = Math.max(1, Math.round(geometry.width / 56));
+  // Sampled across the range the clip currently uses, so the strip re-aims as the edge
+  // moves instead of stretching — and bounded, by the block's width *and* by how many
+  // frames the filmstrip actually holds for this stretch. See `thumbnailSlots`.
+  const slots = thumbnailSlots(
+    geometry.width,
+    sourceOut - sourceIn,
+    strip ? frameSpacingUs(strip) : Number.POSITIVE_INFINITY,
+  );
   const thumbs = Array.from({ length: slots }, (_, i) =>
     strip ? frameAt(strip, sourceIn + ((i + 0.5) / slots) * (sourceOut - sourceIn)) : null,
   );

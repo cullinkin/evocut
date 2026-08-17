@@ -38,7 +38,14 @@
   --muted: #9a9aab;
   --accent: #6c8cff;
   --danger: #ff6b6b;
-  --lane-height: 64px;
+  /* The picture lane. Shorter than it was, to make room for the audio underneath it
+     without either of them losing the preview any height. */
+  --lane-height: 48px;
+  --wave-height: 34px;
+  /* The audio. Violet rather than the accent blue, so a glance can tell the two lanes
+     apart without reading either. */
+  --wave-ink: #a794ff;
+  --wave-bed: #241f3d;
   color-scheme: dark;
 }
 
@@ -324,7 +331,7 @@ button.play {
 
 .timeline-content {
   position: relative;
-  height: calc(var(--lane-height) + 30px);
+  height: calc(var(--lane-height) + var(--wave-height) + 34px);
 }
 
 .ruler {
@@ -362,6 +369,28 @@ button.play {
 .timeline-lane {
   position: relative;
   height: var(--lane-height);
+}
+
+/* --- The audio ------------------------------------------------------------------------
+   A level envelope of the diegetic sound, drawn from the same measurement the signals pass
+   makes to find hits and dead air. Tiled canvases, positioned in content space, so a scroll
+   moves them natively and costs nothing. */
+
+.wave-lane {
+  position: relative;
+  height: var(--wave-height);
+  margin-top: 4px;
+  border-radius: 6px;
+  background: var(--wave-bed);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.wave-tile {
+  position: absolute;
+  top: 0;
+  height: var(--wave-height);
+  --wave-ink: #a794ff;
 }
 
 .clip-block {

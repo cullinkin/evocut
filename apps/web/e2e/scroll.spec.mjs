@@ -232,6 +232,40 @@ check('theMainThreadStaysFreeZoomedIn', close.longestGapMs < 250, true);
 check('theLaneCostsAlmostNothingPerClipZoomedIn', close.medianGapMs - oneClip.medianGapMs < 16, true);
 check('scrollingDoesNotRebuildTheLaneZoomedIn', close.laneMutations, 0);
 
+/*
+  --- How much DOM the lane builds, all the way in -----------------------------------------
+
+  The number that mattered most, and the one no timing check would ever have named.
+  Thumbnails were one per 56 pixels of block with nothing bounding them, so at full zoom a
+  single clip built hundreds of `<img>` elements and a real fifty-clip timeline built tens
+  of thousands — on a phone, synchronously, the moment you pressed the zoom button.
+  "Extraordinarily slow and laggy, especially when zoomed in" was this, and "especially
+  when zoomed in" was the clue: it is the only number in the editor that grew without bound
+  as the zoom went up.
+
+  The bound now comes from two places, and the second is the useful one: a block never draws
+  more pictures than the filmstrip actually holds for that stretch of recording. On the
+  fixture the strip is dense, so the flat cap does the work; on a half-hour master there are
+  two frames for a thirty-second clip and it draws two.
+*/
+for (let i = 0; i < 20 && !(await zoomIn.isDisabled()); i += 1) {
+  await zoomIn.click();
+  await page.waitForTimeout(60);
+}
+await page.waitForTimeout(400);
+
+const built = await page.evaluate(() => ({
+  thumbnails: document.querySelectorAll('.clip-block img').length,
+  worstClip: Math.max(
+    ...[...document.querySelectorAll('.clip-block')].map((block) => block.querySelectorAll('img').length),
+  ),
+  contentPx: Math.round(document.querySelector('.timeline-content').getBoundingClientRect().width),
+}));
+set('laneAtFullZoom', built);
+check('theContentIsEnormous', built.contentPx > 8000, true);
+check('andTheLaneIsStillASensibleSize', built.thumbnails < 600, true);
+check('noSingleBlockRunsAway', built.worstClip <= 40, true);
+
 // --- And it still scrubs -----------------------------------------------------------
 await page.locator('button[aria-label="Fit timeline"]').click();
 await page.waitForTimeout(400);

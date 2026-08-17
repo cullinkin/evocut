@@ -10,7 +10,7 @@ import {
   type TransformValue,
 } from '@evocut/edl';
 import { filterFor, paintedSize, previewTransform, sampleTimeline, type FrameLayer } from '@evocut/renderer';
-import { frameAt, useFilmstrips } from './filmstrip.ts';
+import { frameNear, frameSpacingUs, useFilmstrips } from './filmstrip.ts';
 import { usePlayhead } from './playhead.ts';
 import {
   newScrubPace,
@@ -72,7 +72,7 @@ import {
  * `scale: 1` means cover, so anything else would make the preview and the file disagree at
  * every zoom — and slides behind it, cropped, the way `drawLayer` crops against the canvas.
  *
- * ## The proxy carries the gesture
+ * ## The proxy carries the gesture, where there is a proxy worth having
  *
  * A seek on a multi-gigabyte 4K file costs most of a second no matter how it is paced, so
  * even a perfectly paced scrub shows about one frame per second — which is a slideshow, not
@@ -80,11 +80,19 @@ import {
  * decoded, already in memory, and already indexed by source time because the timeline draws
  * them.
  *
- * So during a gesture the picture is a filmstrip frame, swapped on every scroll, and the
- * element seeks behind it at whatever rate it can sustain. When the gesture settles the
- * proxy goes away and the real frame is underneath. It is low resolution and it is the
- * right trade: a coarse picture that tracks your thumb tells you where you are, and a sharp
- * picture that arrives a second later does not.
+ * So during a gesture the picture can be a filmstrip frame, swapped on every scroll, with
+ * the element seeking behind it at whatever rate it can sustain.
+ *
+ * The catch, and it is a large one: the filmstrip is capped at eighty frames for a whole
+ * source, so its spacing is a function of how long the recording is. A twelve-second clip
+ * gets a frame a second, and the proxy is exactly what it should be. A twenty-seven minute
+ * master gets one every twenty seconds, and the "proxy" is then a 144-pixel-tall picture of
+ * a completely different moment, stretched over a 4K preview and held there for the length
+ * of the gesture. That shipped, and it was reported as the scrub not working at all.
+ *
+ * So the proxy is conditional on the strip being dense enough to be about *now*. Where it
+ * is not, the element keeps showing its own last decoded frame: stale and sharp, which you
+ * can read, over wrong and blurry, which you cannot.
  *
  * ## The loop corrects itself
  *
@@ -148,6 +156,25 @@ const HANDOFF_TOLERANCE_US = 60_000;
  * nothing to hand over: the element is already playing the frames the next clip wants.
  */
 const CONTIGUOUS_US = 20_000;
+/**
+ * How far apart filmstrip frames may be before they stop being a preview of *now*.
+ *
+ * Two seconds. Inside that, a frame is close enough to the thumb that it reads as the shot
+ * you are scrubbing through; past it, it is a picture of a different moment wearing the
+ * costume of this one. The filmstrip's spacing is a function of how long the source is, so
+ * this is really a rule about which recordings a thumbnail proxy can help with at all: it
+ * carries a phone clip, and it steps out of the way on a half-hour master.
+ */
+const PROXY_USEFUL_SPACING_US = 2_000_000;
+
+/**
+ * How long before a cut the spare starts its seek.
+ *
+ * Long enough to absorb a slow one — a keyframe seek in a 4K master runs to about a second
+ * — and short enough that the live element has the pipe to itself for the rest of the clip.
+ */
+const PREROLL_LEAD_US = 4_000_000;
+
 /** How long a source runs, from the furthest any clip reaches into it. */
 function sourceDurationOf(timeline: Timeline, sourceId: string): number {
   let furthest = 0;
@@ -180,6 +207,8 @@ export function Player({
   const aRef = useRef<HTMLVideoElement>(null);
   const bRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  /** The stage's painted size, measured once per resize rather than once per frame. */
+  const stageSizeRef = useRef({ width: 0, height: 0 });
   const playerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
   const lastResyncRef = useRef(0);
@@ -212,6 +241,10 @@ export function Player({
       );
       stage.style.width = `${Math.round(size.width)}px`;
       stage.style.height = `${Math.round(size.height)}px`;
+      // Kept, because `dress` needs it on every frame and asking the DOM for it there
+      // forces a layout sixty times a second — during a scrub, in the middle of the
+      // gesture that is already struggling. It only changes when this observer fires.
+      stageSizeRef.current = { width: size.width, height: size.height };
     };
 
     fit();
@@ -250,10 +283,24 @@ export function Player({
   const strips = useFilmstrips(sources);
 
   /**
-   * The proxy frame for wherever the playhead is, or null when it is not needed.
+   * The proxy frame for wherever the playhead is, or null when there isn't a usable one.
    *
-   * Only while scrubbing: the rest of the time the element itself is showing the right
-   * thing at full resolution, and covering it with a thumbnail would be a downgrade.
+   * Only while scrubbing: the rest of the time the element is showing the right thing at
+   * full resolution, and covering it with a thumbnail would be a downgrade.
+   *
+   * ## And only when the frame is genuinely of this moment
+   *
+   * The original version showed the nearest filmstrip frame, always. On the twelve-second
+   * test fixture that is a frame a second and it works beautifully. On a twenty-seven
+   * minute recording the filmstrip is capped at eighty frames — *one every twenty seconds*
+   * — so the nearest frame is a picture of somewhere else, held at 144 pixels tall over a
+   * 4K preview for the whole gesture. Reported, accurately, as "the scrub doesn't really
+   * seem to work at all, the picture just gets all grainy until the next clip is hit".
+   *
+   * So a frame has to be close in time to be worth showing, and the strip has to be dense
+   * enough for "close" to mean anything. Where it is not, this is null and the element
+   * shows its own last decoded frame — stale and sharp, which is legible, rather than
+   * wrong and blurry, which is not.
    */
   const proxy = useMemo(() => {
     if (!scrubbing) return null;
@@ -261,10 +308,12 @@ export function Player({
     if (!layer) return null;
     const strip = strips.get(layer.clip.sourceId);
     if (!strip) return null;
+    const spacing = frameSpacingUs(strip);
+    if (spacing > PROXY_USEFUL_SPACING_US) return null;
     // A trim drag overrides the playhead — the preview is showing a source time that has
     // no place on the timeline yet — so the proxy has to follow the same override, or the
     // handle would drag against a still frame of wherever the playhead happens to be.
-    return frameAt(strip, scrubSourceTime ?? layer.sourceTime);
+    return frameNear(strip, scrubSourceTime ?? layer.sourceTime, spacing);
   }, [playhead, scrubbing, scrubSourceTime, strips, timeline]);
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
@@ -315,11 +364,7 @@ export function Player({
     // Measured off the stage, not the element: `x` is a fraction of the *output frame*, and
     // the stage is the output frame. The element fills it, so the two agree — but reading
     // the element would start disagreeing the moment a transform scaled it.
-    const stage = stageRef.current?.getBoundingClientRect();
-    video.style.transform = previewTransform(transform, {
-      width: stage?.width ?? 0,
-      height: stage?.height ?? 0,
-    });
+    video.style.transform = previewTransform(transform, stageSizeRef.current);
   }, []);
 
   const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {
@@ -524,8 +569,23 @@ export function Player({
       // free; not setting it means the preview shows the framing the shot started on.
       dress(current, layer);
 
-      // Pay for the next cut's seek now, while there is time to spare.
-      prepare(endOutput);
+      /*
+        Pay for the next cut's seek before it is needed — but not the instant this clip
+        starts.
+
+        Both elements hold the same multi-gigabyte source, and they contend: for the range
+        server, for OPFS, for the decoder. Prerolling on the first frame of a clip put the
+        spare's seek exactly on top of the live element refilling its own buffer, which is
+        the most expensive moment there is — the live picture stalls, which is the "freezes
+        between each clip" this whole mechanism exists to prevent.
+
+        So the seek waits until the live element has had a run at full speed, and is issued
+        with a few seconds of lead. On a clip shorter than the lead there is nothing to
+        wait for and it goes immediately, which is the old behaviour for exactly the case
+        where the old behaviour was fine.
+      */
+      const remaining = endOutput - (sourceToTimeline(layer.clip, sourceNow) ?? layer.clip.start);
+      if (remaining <= PREROLL_LEAD_US) prepare(endOutput);
 
       const output = sourceToTimeline(layer.clip, sourceNow);
       if (output !== null) {
