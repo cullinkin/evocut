@@ -294,6 +294,15 @@ button.play {
   color: var(--muted);
 }
 
+/* The frame the playhead is on, next to the clock but visibly secondary to it. */
+.timeline-frame {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.65;
+  margin-left: 6px;
+}
+
 .timeline-spacer {
   flex: 1;
 }

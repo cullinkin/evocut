@@ -55,9 +55,14 @@ await page.locator('.panel.transform').waitFor({ timeout: 5000 });
 
 const tab = (name) => page.locator(`.panel.transform .tab:has-text("${name}")`);
 const slider = (name) => page.locator(`.panel.transform input[aria-label="${name}"]`);
+// The title says either "3 keys" or, when the playhead is standing on one, "on key 2/3" —
+// the second form being how you can tell, before pressing ◆, whether it will add one or
+// take one away.
 const keyCount = async () => {
   const text = await page.locator('.panel-title em').innerText();
-  const found = /(\d+) key/.exec(text);
+  const standing = /on key \d+\/(\d+)/.exec(text);
+  if (standing) return Number(standing[1]);
+  const found = /(\d+) keys?/.exec(text);
   return found ? Number(found[1]) : 0;
 };
 

@@ -169,11 +169,22 @@ const smallKeys = keysOf(small, 0);
 set('keysFromNudges', smallKeys.map((key) => ({ t: key.t, scale: key.value.scale })));
 check('everyAdjustmentIsItsOwnKey', smallKeys.length, 3);
 check('andNoneOfTheValuesWereLost', smallKeys.map((key) => key.value.scale), [1.2, 1.8, 2.6]);
-// On frame boundaries, because a key between frames is a key whose value is never sampled.
+/*
+  On frame boundaries — measured in *absolute* time, which is the only grid that means
+  anything. A clip starts at whatever microsecond a coarse cut left it on, so a key rounded
+  against its own clip sits between two of the ruler's ticks and between two of the frames
+  the renderer samples. From the reported session's EDL: keys at exact clip frames 2, 6, 9
+  landing at absolute frames 93.488, 97.488, 100.488.
+*/
 const frameUs = 1_000_000 / (small.timeline.frameRate.num / small.timeline.frameRate.den);
+const firstStart = small.timeline.tracks[0].clips[0].start;
+set('keyAbsoluteFrames', smallKeys.map((key) => (firstStart + key.t) / frameUs));
 check(
   'andTheyLandOnFrames',
-  smallKeys.every((key) => Math.abs(key.t / frameUs - Math.round(key.t / frameUs)) < 0.001),
+  smallKeys.every((key) => {
+    const frame = (firstStart + key.t) / frameUs;
+    return Math.abs(frame - Math.round(frame)) < 0.001;
+  }),
   true,
 );
 
@@ -221,6 +232,77 @@ check(
   Math.abs((keysOf(crossed, 2)[0]?.t ?? -1) - (landedIn - thirdStart)) <= 40_000,
   true,
 );
+
+// --- The diamond adds, and only takes away where it says it will ------------------------
+/**
+ * Pressing ◆ at a new position adds a key. It does not remove a distant one.
+ *
+ * Reported after a long session of framing a knife cutting a box seal:
+ *
+ *   "The keyframe button seemed to be referencing an old keyframe despite being far away
+ *   from it on the timeline as well, because when I would try to drop a new one, it would
+ *   instead delete the old one that was still being referenced."
+ *
+ * The button is a toggle, so pressing it on a key removes that key — which is right, and is
+ * how every editor does it. What was missing was any way to tell the two states apart
+ * before pressing: the title read a time measured inside the clip, a number that appears
+ * nowhere else on screen, so a pan gesture that had been dropped looked exactly like one
+ * that had worked. It now reads absolute time, the frame number, and which key it is on.
+ *
+ * So this walks the gesture — press, move, press, move, press — and asserts both halves:
+ * the count only ever goes up, and the title says which of the two things the next press
+ * will do.
+ */
+await page.locator('button[aria-label="Fit timeline"]').click();
+await page.waitForTimeout(300);
+await scrubTo(page, 0.45);
+await page.waitForTimeout(300);
+await page.locator('.clip-block').nth(1).tap();
+await page.waitForTimeout(200);
+await openClipTool(page, 'Transform');
+await page.locator('.panel.transform').waitFor({ timeout: 5000 });
+await page.locator('.panel.transform button:has-text("Reset")').click();
+await page.waitForTimeout(200);
+for (let i = 0; i < 8; i += 1) {
+  await page.locator('button[aria-label="Zoom in"]').click();
+  await page.waitForTimeout(50);
+}
+await page.waitForTimeout(250);
+
+const title = () => page.locator('.panel.transform .panel-title em').innerText();
+const diamond = page.locator('.panel.transform .key-toggle');
+const titles = [];
+const counts = [];
+for (let i = 0; i < 3; i += 1) {
+  if (i > 0) {
+    await page.evaluate(() => {
+      const scroller = document.querySelector('.timeline-scroller');
+      const box = scroller.getBoundingClientRect();
+      scroller.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, clientX: box.left + box.width / 2, clientY: box.top + 4 }),
+      );
+      scroller.scrollLeft += 60;
+    });
+    await page.waitForTimeout(400);
+  }
+  // Before the press the panel has to be saying "there is no key here".
+  titles.push(await title());
+  await diamond.click();
+  await page.waitForTimeout(250);
+  counts.push(await title());
+}
+set('beforeEachPress', titles);
+set('afterEachPress', counts);
+
+check('theDiamondNeverRemovedAKeyItWasNotOn', titles.every((text) => !/on key/.test(text)), true);
+check('andEachPressAddedOne', counts.map((text) => /on key \d+\/(\d+)/.exec(text)?.[1]), ['1', '2', '3']);
+// Absolute time and a frame number, so a pan that did not take is visible before you press.
+check('andTheTitleReadsTheRulersOwnClock', /\d+:\d\d\.\d+ · f\d+/.test(titles[0]), true);
+
+await page.locator('.panel.transform button[aria-label="Done"]').click();
+await page.waitForTimeout(400);
+const toggled = await exportEdl(page, 'keyframes-toggled.json');
+check('andThreePressesAreThreeKeys', keysOf(toggled, 1).length, 3);
 
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();

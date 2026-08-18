@@ -5,7 +5,7 @@ import { findClip, findTrack, type Timeline } from './schema/timeline.js';
 import type { Op } from './schema/ops.js';
 import type { Source } from './schema/source.js';
 import { normalizeTimeline } from './normalize.js';
-import { splitEffect } from './interpolate.js';
+import { retimeEffect, splitEffect, stretchEffect } from './interpolate.js';
 
 export interface ApplyContext {
   /** Used to bounds-check trims and inserts against real media. Skipped when absent. */
@@ -84,7 +84,23 @@ function applyOne(timeline: Timeline, op: Op, ctx: Required<Pick<ApplyContext, '
           `trim: sourceOut ${sourceOut} runs past the end of source ${source.id} (${source.duration})`,
         );
       }
-      return replaceClip(timeline, track.id, index, { ...clip, sourceIn, sourceOut });
+      /*
+        The keyframes come with the footage.
+
+        A clip's effects are keyed in *clip-output* time, and a trim moves that coordinate:
+        extend the head by five frames and everything in the clip is five frames further in
+        than it was. Leaving the numbers alone therefore slides every move off the moment it
+        was placed on — which is what a real session found, and the last thing a keyframe
+        should ever do.
+      */
+      const shift = (clip.sourceIn - sourceIn) / clip.speed;
+      const length = Math.round((sourceOut - sourceIn) / clip.speed);
+      return replaceClip(timeline, track.id, index, {
+        ...clip,
+        sourceIn,
+        sourceOut,
+        effects: clip.effects.map((effect) => retimeEffect(effect, shift, length)),
+      });
     }
 
     case 'split': {
@@ -151,7 +167,18 @@ function applyOne(timeline: Timeline, op: Op, ctx: Required<Pick<ApplyContext, '
         outputDuration(next) > 0,
         `setSpeed: speed ${op.speed} collapses clip ${clip.id} to zero length`,
       );
-      return replaceClip(timeline, track.id, index, next);
+      /*
+        Retimed with the clip, for the same reason a trim retimes them: a keyframe is a
+        moment in the *footage*, and output time is the coordinate that moves. Halve the
+        speed and the shot takes twice as long, so a push-in that started on a particular
+        gesture has to start twice as far into the clip to still be on it.
+      */
+      const stretch = clip.speed / op.speed;
+      const length = outputDuration(next);
+      return replaceClip(timeline, track.id, index, {
+        ...next,
+        effects: next.effects.map((effect) => stretchEffect(effect, stretch, length)),
+      });
     }
 
     case 'addEffect': {

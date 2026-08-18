@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { formatTimecode, sampleTransform, type Easing, type TransformValue } from '@evocut/edl';
 import { PanelHistory, PanelTabs, useDraftHistory } from './panel.tsx';
+import { keyframeTimeAt, sameFrame } from './frames.ts';
 import { usePlayhead } from './playhead.ts';
 
 /**
@@ -87,24 +88,6 @@ const TABS: Array<{ id: Tab; label: string; controls: Control[] }> = [
 
 export const IDENTITY: TransformValue = { scale: 1, x: 0, y: 0, rotation: 0 };
 
-/**
- * How close two keyframes have to be to count as the same one: the same frame.
- *
- * It used to be a flat 66ms — two frames at 30fps — which was a sliver of the screen at the
- * zoom the timeline had when it was written. The timeline now zooms until a third of a
- * second fills the phone, where 66ms is a *fifth of the screen*: you move along a visibly
- * long way, adjust, and the adjustment silently rewrites the keyframe you just made instead
- * of adding one. Reported exactly that way — "if I try moving along the timeline, zooming in
- * to drop another, it just doesn't".
- *
- * A frame is the honest answer, because a frame is the finest distinction the output can
- * carry. Half of one either side, so it means "this frame" and not "this frame or its
- * neighbour".
- */
-export function sameFrame(frameUs: number): number {
-  return Math.max(1, frameUs / 2);
-}
-
 /** The framing at `atUs`, whether or not a keyframe sits there. */
 export function valueAt(keyframes: Keyframe[], atUs: number): TransformValue {
   if (keyframes.length === 0) return { ...IDENTITY };
@@ -137,19 +120,6 @@ export function writeAt(
   return next.sort((a, b) => a.t - b.t);
 }
 
-/**
- * The frame boundary a time belongs to.
- *
- * Keyframes land on frames because frames are what gets rendered. A key at an arbitrary
- * microsecond is a key whose value is never sampled exactly — the frame before it and the
- * frame after it both show an interpolation — which is the "they don't drop where I tell
- * them to, they are offset a bit" that started this.
- */
-export function snapToFrame(atUs: number, frameUs: number): number {
-  if (!Number.isFinite(frameUs) || frameUs <= 0) return Math.round(atUs);
-  return Math.round(Math.round(atUs / frameUs) * frameUs);
-}
-
 export function TransformPanel({
   clipNumber,
   clipStartUs,
@@ -179,7 +149,14 @@ export function TransformPanel({
   */
   const rawUs = playhead - clipStartUs;
   const outside = rawUs < -sameFrame(frameUs) || rawUs > durationUs + sameFrame(frameUs);
-  const atUs = snapToFrame(Math.max(0, Math.min(durationUs, rawUs)), frameUs);
+  /*
+    Rounded in *absolute* time, then made relative — not the other way round. A clip starts
+    at whatever microsecond the coarse pass left it on, so rounding `rawUs` put the key on
+    the clip's own grid, which sits somewhere between two of the ruler's ticks. Read off a
+    real session's EDL: keys at exact clip frames 2, 6, 9 … landing at absolute frames
+    93.488, 97.488, 100.488 — half a frame from the tick they were aimed at, every time.
+  */
+  const atUs = keyframeTimeAt(playhead, clipStartUs, durationUs, frameUs);
 
   const history = useDraftHistory(keyframes, onChange);
 
@@ -221,11 +198,26 @@ export function TransformPanel({
         >
           <span aria-hidden="true">◆</span>
         </button>
+        {/*
+          Where the panel thinks it is, in the coordinate the ruler is drawn in.
+
+          It used to read the time *within the clip*, which is a number that appears nowhere
+          else on screen — so there was no way to tell a panel sitting where you left it
+          from one that had followed you, and no way to notice that a pan gesture had been
+          dropped and the playhead had not actually moved. Absolute time and the frame
+          number, then, both of which can be checked against the timeline at a glance; and
+          the key under the playhead named as *which* key it is, so pressing ◆ is never a
+          guess about whether it will add one or take one away.
+        */}
         <span className="panel-title">
           {clipNumber === null ? 'Transform' : `Clip ${clipNumber}`}
           <em>
-            {formatTimecode(atUs, undefined, { compact: true })}
-            {keyframes.length > 0 && ` · ${keyframes.length} key${keyframes.length === 1 ? '' : 's'}`}
+            {formatTimecode(clipStartUs + atUs, undefined, { compact: true })}
+            {` · f${Math.round((clipStartUs + atUs) / Math.max(1, frameUs))}`}
+            {keyframes.length > 0 &&
+              (here
+                ? ` · on key ${keyframes.indexOf(here) + 1}/${keyframes.length}`
+                : ` · ${keyframes.length} key${keyframes.length === 1 ? '' : 's'}`)}
           </em>
         </span>
         <PanelHistory {...history} what="framing" />

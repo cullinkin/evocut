@@ -125,6 +125,81 @@ export function splitEffect(effect: Effect, offset: number): [Effect, Effect] {
   ];
 }
 
+/**
+ * Move an effect's keyframes so they stay on the footage they were placed on.
+ *
+ * Keyframes are stored in clip-output time, which is a coordinate that *moves* when the
+ * clip is trimmed or retimed: extend the head by five frames and clip-time 0 is now five
+ * frames earlier in the recording, so a key that was on a particular gesture is now five
+ * frames late. Reported exactly that way — "I did a drag at the beginning of the clip and it
+ * seemed to shift all of the keyframes" — and it is the one thing a keyframe must never do.
+ *
+ * `shiftUs` is how far the clip's content moved in output time: `(oldSourceIn - newSourceIn)
+ * / speed`. Positive when the head was extended, because there is now more clip before
+ * everything.
+ *
+ * Keys pushed outside the clip are not simply dropped. The framing at the new edge is
+ * sampled first and pinned there, so trimming into the middle of a push-in leaves the shot
+ * starting at the size it had reached rather than snapping back to whatever the nearest
+ * surviving key happened to say. Same rule, and the same reason, as splitting.
+ */
+export function retimeEffect(effect: Effect, shiftUs: number, lengthUs: number): Effect {
+  if (effect.type === 'crop' || effect.type === 'color') return { ...effect };
+
+  if (effect.type === 'transform') {
+    return { ...effect, keyframes: retimeKeys(effect.keyframes, shiftUs, lengthUs, sampleTransform) };
+  }
+  return { ...effect, keyframes: retimeKeys(effect.keyframes, shiftUs, lengthUs, sampleNumber) };
+}
+
+/**
+ * Scale an effect's keyframe times, for a speed change.
+ *
+ * The same rule as `retimeEffect` under a different transformation: output time is the
+ * coordinate that moved, so the numbers have to move with it or every move slides off its
+ * moment.
+ */
+export function stretchEffect(effect: Effect, factor: number, lengthUs: number): Effect {
+  if (effect.type === 'crop' || effect.type === 'color') return { ...effect };
+  if (!Number.isFinite(factor) || factor <= 0) return { ...effect };
+
+  const scale = <T,>(keys: ReadonlyArray<Keyframe<T>>) =>
+    keys.map((keyframe) => ({ ...keyframe, t: Math.round(keyframe.t * factor) }));
+
+  if (effect.type === 'transform') {
+    return { ...effect, keyframes: retimeKeys(scale(effect.keyframes), 0, lengthUs, sampleTransform) };
+  }
+  return { ...effect, keyframes: retimeKeys(scale(effect.keyframes), 0, lengthUs, sampleNumber) };
+}
+
+function retimeKeys<T>(
+  keyframes: ReadonlyArray<Keyframe<T>>,
+  shiftUs: number,
+  lengthUs: number,
+  sample: (keys: ReadonlyArray<Keyframe<T>>, t: number) => T,
+): Array<Keyframe<T>> {
+  if (keyframes.length === 0) return [];
+
+  let out: Array<Keyframe<T>> = keyframes
+    .map((keyframe) => ({ ...keyframe, t: Math.round(keyframe.t + shiftUs) }))
+    .sort((a, b) => a.t - b.t);
+
+  if (out[0]!.t < 0) {
+    const boundary = sample(out, 0);
+    const easing = out.filter((k) => k.t <= 0).at(-1)?.easing ?? 'linear';
+    out = [{ t: 0, value: boundary, easing }, ...out.filter((k) => k.t > 0)];
+  }
+
+  const last = out.at(-1)!;
+  if (last.t > lengthUs) {
+    const boundary = sample(out, lengthUs);
+    const easing = out.filter((k) => k.t <= lengthUs).at(-1)?.easing ?? 'linear';
+    out = [...out.filter((k) => k.t < lengthUs), { t: lengthUs, value: boundary, easing }];
+  }
+
+  return out;
+}
+
 function leftKeyframes<T>(keyframes: ReadonlyArray<Keyframe<T>>, offset: number, boundary: T): Array<Keyframe<T>> {
   const kept = keyframes.filter((k) => k.t < offset).map((k) => ({ ...k }));
   const easing = keyframes.filter((k) => k.t < offset).at(-1)?.easing ?? 'linear';

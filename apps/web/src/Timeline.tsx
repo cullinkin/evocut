@@ -13,7 +13,8 @@ import {
 import type { OpPreview } from '@evocut/edl';
 import type { SourceSignals } from '@evocut/signals';
 import { frameAt, frameSpacingUs, thumbnailSlots, useFilmstrips, type Filmstrip } from './filmstrip.ts';
-import { usePlayhead } from './playhead.ts';
+import { frameUsOf } from './frames.ts';
+import { getPlayhead, subscribePlayhead, usePlayhead } from './playhead.ts';
 import { planRuler } from './ruler.ts';
 import { waveColumns, type WaveClip, type WaveSource } from './waveform.ts';
 
@@ -201,12 +202,20 @@ export function TimelineEditor({
     handRef.current = true;
   }, []);
 
-  // Subscribed rather than passed in. The lane is one of the four things that genuinely
-  // needs the playhead at 60Hz; the rest of the app is not, and used to render anyway.
-  const playhead = usePlayhead();
+  /*
+    The shell does not subscribe to the playhead. Two leaves do.
 
+    It used to, and it was the last 60Hz React render left in the editor: a pan or a
+    playing video moved the playhead sixty times a second, and each one re-rendered this
+    component — memo checks across every clip block, the ruler and wave canvases, the
+    bubbles, the whole shell — to change a clock and one ARIA attribute. Everything else
+    here already reads the store imperatively or paints to a canvas, so the two things that
+    genuinely need the number at that rate are now components of their own, and a pan
+    re-renders eight words and a slider handle instead of the timeline.
+  */
   const clips = timeline.tracks[0]?.clips ?? [];
   const committedTotal = timelineDuration(timeline);
+  const frameUs = frameUsOf(timeline.frameRate);
 
   /*
     One subscription for the whole lane, rather than one inside each clip block.
@@ -228,10 +237,6 @@ export function TimelineEditor({
       [sources, mediaUrls],
     ),
   );
-  // Read inside callbacks that must not re-create themselves on every playhead change.
-  const playheadRef = useRef(playhead);
-  playheadRef.current = playhead;
-
   const toX = useCallback((us: number) => (us / 1_000_000) * pxPerSecond + halfWidth, [halfWidth, pxPerSecond]);
 
   const toTime = useCallback(
@@ -297,7 +302,7 @@ export function TimelineEditor({
     // ratio of the two zooms — and, without this, the scroll that follows reads as a
     // gesture nobody made.
     requestAnimationFrame(() => {
-      scroller.scrollLeft = Math.max(0, Math.round((playheadRef.current / 1_000_000) * next));
+      scroller.scrollLeft = Math.max(0, Math.round((getPlayhead() / 1_000_000) * next));
     });
   }, [committedTotal, maxPps]);
 
@@ -340,9 +345,13 @@ export function TimelineEditor({
    * every playhead change — which, during a scrub, is exactly the run that must do nothing.
    */
   useEffect(() => {
-    if (drag || scrubbingRef.current) return;
-    scrollToTime(playhead);
-  }, [drag, playhead, scrollToTime]);
+    const follow = () => {
+      if (drag || scrubbingRef.current) return;
+      scrollToTime(getPlayhead());
+    };
+    follow();
+    return subscribePlayhead(follow);
+  }, [drag, scrollToTime]);
 
   /**
    * Scrolling the lane is scrubbing.
@@ -520,7 +529,7 @@ export function TimelineEditor({
 
   const zoom = (factor: number) => {
     const scroller = scrollerRef.current;
-    const anchor = playhead;
+    const anchor = getPlayhead();
     setPxPerSecond((previous) => {
       const next = clamp(previous * factor, MIN_PPS, maxPps);
       // Zoom around the playhead — it is where the user is looking — which with a fixed
@@ -827,7 +836,7 @@ export function TimelineEditor({
   return (
     <section className="timeline" aria-label="Timeline">
       <div className="timeline-tools">
-        <span className="timeline-clock">{formatTimecode(playhead, undefined, { compact: true })}</span>
+        <TimelineClock frameUs={frameUs} />
         <span className="timeline-spacer" />
         <button className="icon" onClick={() => zoom(1 / 1.6)} aria-label="Zoom out" disabled={pxPerSecond <= MIN_PPS}>
           −
@@ -906,27 +915,60 @@ export function TimelineEditor({
         timeline that can be at the wrong place — it is a mark on the screen, and the
         timeline moves behind it.
       */}
-      <div
-        className="playhead"
-        role="slider"
-        aria-label="Playhead"
-        aria-valuemin={0}
-        aria-valuemax={committedTotal}
-        aria-valuenow={playhead}
-        aria-orientation="horizontal"
-        tabIndex={0}
-        onKeyDown={(event) => {
-          const step = event.shiftKey ? 1_000_000 : 100_000;
-          if (event.key === 'ArrowLeft') onSeek(Math.max(0, playhead - step), true);
-          else if (event.key === 'ArrowRight') onSeek(Math.min(committedTotal, playhead + step), true);
-          else return;
-          event.preventDefault();
-        }}
-      >
-        <div className="playhead-line" />
-      </div>
+      <PlayheadHandle total={committedTotal} onSeek={onSeek} />
       </div>
     </section>
+  );
+}
+
+/**
+ * The clock, and the frame it is on.
+ *
+ * A component of its own so that a pan re-renders eight words rather than the timeline —
+ * and the frame number is there because it was asked for outright: "I need to know exactly
+ * when events happen to know where to drop keyframes and then adjust zooms and pans." A
+ * timecode to the millisecond does not answer that on its own, because the thing being
+ * aimed at is a frame and 0:05.400 and 0:05.412 are the same one.
+ */
+function TimelineClock({ frameUs }: { frameUs: number }) {
+  const playhead = usePlayhead();
+  return (
+    <>
+      <span className="timeline-clock">{formatTimecode(playhead, undefined, { compact: true })}</span>
+      <span className="timeline-frame">f{Math.round(playhead / Math.max(1, frameUs))}</span>
+    </>
+  );
+}
+
+/**
+ * The mark down the middle of the viewport.
+ *
+ * Nothing about it moves — the lane moves behind it — so the only reason it subscribes at
+ * all is `aria-valuenow`, which is the playhead's position as far as anything reading the
+ * page is concerned. Kept a leaf for the same reason as the clock.
+ */
+function PlayheadHandle({ total, onSeek }: { total: number; onSeek: (us: number, final: boolean) => void }) {
+  const playhead = usePlayhead();
+  return (
+    <div
+      className="playhead"
+      role="slider"
+      aria-label="Playhead"
+      aria-valuemin={0}
+      aria-valuemax={total}
+      aria-valuenow={playhead}
+      aria-orientation="horizontal"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        const step = event.shiftKey ? 1_000_000 : 100_000;
+        if (event.key === 'ArrowLeft') onSeek(Math.max(0, playhead - step), true);
+        else if (event.key === 'ArrowRight') onSeek(Math.min(total, playhead + step), true);
+        else return;
+        event.preventDefault();
+      }}
+    >
+      <div className="playhead-line" />
+    </div>
   );
 }
 

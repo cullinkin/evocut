@@ -40,6 +40,7 @@ import {
 import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
+import { frameUsOf, snapToFrame } from './frames.ts';
 import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
 import { EMPTY_SETTINGS, useSettings, type RefinementSettings } from './settings.ts';
@@ -294,6 +295,12 @@ export function useSession(): Session {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const urlsRef = useRef<Map<string, string>>(new Map());
   const lastScrubLogRef = useRef(0);
+  /*
+    One frame of the output, kept in a ref so `seek` does not have to be rebuilt — and
+    every consumer of `seek` re-memoised — each time the project changes.
+  */
+  const frameUsRef = useRef(0);
+  frameUsRef.current = project ? frameUsOf(project.timeline.frameRate) : 0;
   const exportAbortRef = useRef<AbortController | null>(null);
   const exportUrlRef = useRef<string | null>(null);
   const refineAbortRef = useRef<AbortController | null>(null);
@@ -596,7 +603,18 @@ export function useSession(): Session {
    */
   const seek = useCallback(
     (to: number, final = true) => {
-      const target = Math.max(0, to);
+      /*
+        A parked playhead sits on a frame.
+
+        Not while it is moving — a scrub and a playing video both want the continuous
+        position, and rounding sixty times a second would make the picture stutter against
+        its own clock. But the moment a gesture ends, the position becomes a place: it is
+        what a cut is made at, what a keyframe is dropped on, and what the ruler's ticks are
+        being read against. Left unrounded it is none of those things exactly, and the frame
+        on screen — which is always the frame the time falls *inside* — sits up to a whole
+        frame away from wherever the next edit lands.
+      */
+      const target = final ? snapToFrame(Math.max(0, to), frameUsRef.current) : Math.max(0, to);
       writePlayhead(target);
 
       const now = Date.now();

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { IDENTITY, keyframeAt, sameFrame, snapToFrame, valueAt, writeAt } from '../src/Transform.tsx';
+import { IDENTITY, keyframeAt, valueAt, writeAt } from '../src/Transform.tsx';
+import { keyframeTimeAt, sameFrame, snapToFrame } from '../src/frames.ts';
 
 /**
  * Where a keyframe goes, and when two of them are one.
@@ -103,5 +104,66 @@ describe('building a move', () => {
     keys = writeAt(keys, 200_000, { ...IDENTITY, scale: 1 }, FRAME_30);
     keys = writeAt(keys, 600_000, { ...IDENTITY, scale: 2 }, FRAME_30);
     expect(keys.map((k) => k.t)).toEqual([200_000, 600_000, 1_000_000]);
+  });
+});
+
+/**
+ * And *which* frame it goes on.
+ *
+ * The second half of the same report — "I would drop one and it would show up a few frames
+ * back or in front" — is not about merging at all. It is about which grid the rounding
+ * happens on.
+ *
+ * Straight out of the session's own EDL: clip `clp_0kt77a025b493ca` starts at 3,049,593µs,
+ * which is 91.488 frames. Its eight keys sat at exact clip-relative frames 2, 6, 9, 24, 46,
+ * 62, 65 and 69 — and therefore at absolute frames 93.488, 97.488, 100.488 … Every one of
+ * them half a frame off the ruler tick it was aimed at, and half a frame off the instant
+ * the renderer would ever sample it. Rounding the clip-relative time is rounding on a grid
+ * that only that clip believes in.
+ */
+describe('a keyframe lands on the frame the ruler drew', () => {
+  const CLIP_START = 3_049_593;
+
+  it('puts the key on an absolute frame boundary, not the clip’s own', () => {
+    const duration = 4_000_000;
+    for (const frame of [93, 97, 100, 115, 137]) {
+      const at = keyframeTimeAt(frame * FRAME_30, CLIP_START, duration, FRAME_30);
+      // Absolute, which is where the tick is and where the render samples.
+      expect((CLIP_START + at) / FRAME_30).toBeCloseTo(frame, 4);
+    }
+  });
+
+  it('rounds to the nearest frame either side', () => {
+    const duration = 4_000_000;
+    const frameOf = (playhead: number) =>
+      (CLIP_START + keyframeTimeAt(playhead, CLIP_START, duration, FRAME_30)) / FRAME_30;
+    expect(frameOf(100 * FRAME_30 + 4_000)).toBeCloseTo(100, 4);
+    expect(frameOf(100 * FRAME_30 - 4_000)).toBeCloseTo(100, 4);
+    expect(frameOf(100 * FRAME_30 + 20_000)).toBeCloseTo(101, 4);
+  });
+
+  it('stays on the grid at the clip’s edges rather than clamping to them', () => {
+    /*
+      A key pinned to `duration` exactly is a key at a time no frame is rendered at, which
+      is the same fault one level down. So the ends of a clip give the first and last frame
+      boundaries that are actually inside it.
+    */
+    const duration = 2_299_960;
+    const head = keyframeTimeAt(0, CLIP_START, duration, FRAME_30);
+    const tail = keyframeTimeAt(9_999_999, CLIP_START, duration, FRAME_30);
+
+    expect(head).toBeGreaterThanOrEqual(0);
+    expect(tail).toBeLessThanOrEqual(duration);
+    expect((CLIP_START + head) / FRAME_30).toBeCloseTo(92, 4);
+    expect((CLIP_START + tail) / FRAME_30).toBeCloseTo(160, 4);
+  });
+
+  it('falls back to the plain offset when a clip is shorter than a frame', () => {
+    expect(keyframeTimeAt(1_000_000, 999_990, 20, FRAME_30)).toBe(10);
+  });
+
+  it('and when there is no frame rate to speak of', () => {
+    expect(keyframeTimeAt(1_000_000, 400_000, 5_000_000, 0)).toBe(600_000);
+    expect(keyframeTimeAt(1_000_000, 400_000, 100_000, 0)).toBe(100_000);
   });
 });

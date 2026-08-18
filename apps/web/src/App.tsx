@@ -20,6 +20,7 @@ import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { SuggestionSheet } from './Suggestion.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
+import { frameUsOf } from './frames.ts';
 import { usePlayhead } from './playhead.ts';
 import { downloadLog, downloadProject, useSession, type RefineProgress } from './session.ts';
 
@@ -293,8 +294,7 @@ export function App() {
     ? Math.round((framingClip.sourceOut - framingClip.sourceIn) / framingClip.speed)
     : 0;
   /** One frame of the output, which is what a keyframe's position is rounded to. */
-  const frameUs =
-    (1_000_000 * project.timeline.frameRate.den) / Math.max(1, project.timeline.frameRate.num);
+  const frameUs = frameUsOf(project.timeline.frameRate);
 
   // The export owns the whole screen while it runs. It takes about as long as the video
   // is, the tab has to stay in front for it, and a progress bar tucked into a corner of a
