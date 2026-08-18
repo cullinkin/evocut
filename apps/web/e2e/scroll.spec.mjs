@@ -65,7 +65,7 @@ async function settleFilmstrips(page, quietMs = 1200, limitMs = 90_000) {
   let last = -1;
   let stableSince = Date.now();
   while (Date.now() - started < limitMs) {
-    const now = await page.locator('.clip-block img').count();
+    const now = await page.locator('.clip-thumbs .thumb').count();
     if (now !== last) {
       last = now;
       stableSince = Date.now();
@@ -255,7 +255,7 @@ for (let i = 0; i < 20 && !(await zoomIn.isDisabled()); i += 1) {
 await page.waitForTimeout(400);
 
 const built = await page.evaluate(() => ({
-  thumbnails: document.querySelectorAll('.clip-block img').length,
+  thumbnails: document.querySelectorAll('.clip-thumbs .thumb').length,
   worstClip: Math.max(
     ...[...document.querySelectorAll('.clip-block')].map((block) => block.querySelectorAll('img').length),
   ),

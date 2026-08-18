@@ -130,8 +130,7 @@ export function scaleDb(db: number, peakDb: number, medianDb: number): number {
 export function clipAt(clips: WaveClip[], outputUs: number): WaveClip | null {
   for (const clip of clips) {
     if (outputUs < clip.start) return null;
-    const length = Math.round((clip.sourceOut - clip.sourceIn) / clip.speed);
-    if (outputUs < clip.start + length) return clip;
+    if (outputUs < clip.start + outputLengthOf(clip)) return clip;
   }
   return null;
 }
@@ -158,10 +157,20 @@ export function waveColumns({ clips, audio, fromUs, usPerColumn, columns }: Wave
   const out = new Float32Array(Math.max(0, columns));
   if (usPerColumn <= 0) return out;
 
+  /*
+    A cursor rather than a search. Columns run left to right, so the clip under one is never
+    before the clip under the last — and `clipAt` starting from the beginning every time
+    made this O(columns x clips), which on a fifty-clip edit repainted every frame is forty
+    thousand iterations a frame for a picture four hundred pixels wide.
+  */
+  let index = 0;
   for (let column = 0; column < out.length; column += 1) {
     const at = fromUs + column * usPerColumn;
-    const clip = clipAt(clips, at);
-    if (!clip || !clip.enabled) continue;
+    while (index < clips.length && at >= clips[index]!.start + outputLengthOf(clips[index]!)) {
+      index += 1;
+    }
+    const clip = clips[index];
+    if (!clip || !clip.enabled || at < clip.start) continue;
 
     const source = audio.get(clip.sourceId);
     if (!source) continue;
@@ -172,4 +181,9 @@ export function waveColumns({ clips, audio, fromUs, usPerColumn, columns }: Wave
     out[column] = levelBetween(source, from, to);
   }
   return out;
+}
+
+/** How long a clip runs on the output timeline. */
+function outputLengthOf(clip: WaveClip): number {
+  return Math.round((clip.sourceOut - clip.sourceIn) / clip.speed);
 }

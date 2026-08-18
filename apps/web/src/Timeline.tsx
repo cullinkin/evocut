@@ -121,16 +121,8 @@ const MIN_PPS = 4;
 const MIN_VISIBLE_SECONDS = 1 / 3;
 /** Floor under the derived ceiling, for a viewport too narrow to have measured yet. */
 const MAX_PPS_FLOOR = 400;
-/**
- * How much ruler is built at once, in pixels.
- *
- * The ruler used to span the whole edit, which was fine at half-second steps and ruinous at
- * frame steps: a 73-second assembly at full zoom is 85,000 pixels wide and two thousand
- * marks, rebuilt on every scroll event because the ruler re-renders with the timeline. So it
- * is built a page at a time, three pages wide, and the page only changes when the playhead
- * crosses a boundary — which during a scrub is a few times a second rather than sixty.
- */
-const RULER_PAGE_PX = 1600;
+/** How far a finger may travel and still have meant a tap. */
+const TAP_SLOP_PX = 8;
 /** Bubbles closer together than this are drawn as one, with a count. */
 const BUBBLE_CLUSTER_PX = 30;
 
@@ -543,20 +535,11 @@ export function TimelineEditor({
   };
 
   /*
-    Which page of the ruler is on screen.
+    What the audio strip needs, reduced to plain data.
 
-    Deliberately coarse. The window has to follow the scroll, but recomputing it from the
-    playhead every frame would rebuild every tick sixty times a second, which is the cost
-    the ruler was windowed to avoid in the first place. A page is wider than the viewport,
-    three of them are drawn, and the number only changes when a boundary goes past.
-  */
-  const rulerPage = Math.floor(((playhead / 1_000_000) * pxPerSecond) / RULER_PAGE_PX);
-
-  /*
-    What the audio lane needs, reduced to plain data.
-
-    Pulled out of the clips and the signals cache here so `WaveLane` can be memoised on two
-    stable values instead of on the whole timeline and a map of everything ever measured.
+    Pulled out of the clips and the signals cache once rather than on every repaint, so the
+    painter reads two small values instead of walking the whole timeline sixty times a
+    second — and so a repaint can be forced by identity when either of them really changes.
   */
   const waveClips = useMemo(
     () =>
@@ -594,6 +577,172 @@ export function TimelineEditor({
     seekRef.current(us, true);
     scrollToTimeRef.current(us, true);
   }, []);
+
+  /**
+   * The strips' colours, read once.
+   *
+   * `getComputedStyle` is a style recalculation. Two of them inside a painter that runs on
+   * every frame of every scroll is a forced synchronous layout sixty times a second, for
+   * four values that never change.
+   */
+  const palette = useMemo(() => {
+    const read = (name: string, fallback: string) => {
+      if (typeof window === 'undefined') return fallback;
+      const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return value || fallback;
+    };
+    return {
+      strong: read('--tick-strong', '#8b8ba6'),
+      faint: read('--tick', '#55556a'),
+      bed: read('--wave-bed', '#241f3d'),
+      ink: read('--wave-ink', '#a794ff'),
+    };
+  }, []);
+
+  /** The level envelope's own resolution, so nothing is drawn finer than the data. */
+  const hopUs = useMemo(() => {
+    for (const source of waveAudio.values()) return source.hopUs;
+    return 10_000;
+  }, [waveAudio]);
+
+  /**
+   * The ruler, painted across the viewport.
+   *
+   * Same plan as before — `planRuler` decides the ladder, the labels and the frame grid —
+   * drawn straight onto a canvas instead of into a few hundred absolutely positioned spans.
+   */
+  const paintRuler = useCallback(
+    (ctx: CanvasRenderingContext2D, { scrollLeft, cssWidth }: StripView) => {
+      const timeAt = (px: number) => ((px - halfWidth) / pxPerSecond) * 1_000_000;
+      const plan = planRuler({
+        fromUs: timeAt(scrollLeft),
+        toUs: timeAt(scrollLeft + cssWidth),
+        totalUs: committedTotal,
+        pxPerSecond,
+        frameRate: timeline.frameRate,
+      });
+
+      const { strong, faint } = palette;
+      ctx.font = '10px -apple-system, system-ui, sans-serif';
+      ctx.textBaseline = 'top';
+
+      for (const tick of plan.ticks) {
+        const x = Math.round((tick.us / 1_000_000) * pxPerSecond + halfWidth - scrollLeft);
+        if (x < -40 || x > cssWidth + 40) continue;
+        if (tick.label === null) {
+          // One frame: short and a step down in weight, so the marks read as a scale to
+          // count along without competing with the numbers.
+          ctx.fillStyle = faint;
+          ctx.fillRect(x, 21, 1, RULER_HEIGHT_PX - 21);
+        } else {
+          ctx.fillStyle = strong;
+          ctx.fillRect(x, 12, 2, RULER_HEIGHT_PX - 12);
+          ctx.fillText(tick.label, x + 5, 12);
+        }
+      }
+    },
+    [committedTotal, halfWidth, palette, pxPerSecond, timeline.frameRate],
+  );
+
+  /**
+   * The audio, painted across the viewport.
+   *
+   * A column per device pixel, mirrored about the centre line — the shape reads as one
+   * object rather than as a bar chart, and the centre gives the eye something to follow
+   * through the quiet parts. Built as a single path and filled once.
+   */
+  const paintWave = useCallback(
+    (ctx: CanvasRenderingContext2D, { scrollLeft, cssWidth, dpr }: StripView) => {
+      const { bed, ink } = palette;
+
+      // The bed covers the edit and nothing else: the lane carries half a viewport of
+      // padding at each end so the first and last frame can reach the middle of the screen,
+      // and audio drawn across that padding reads as sound before the video starts.
+      const bedFrom = Math.max(0, halfWidth - scrollLeft);
+      const bedTo = Math.min(cssWidth, halfWidth + (committedTotal / 1_000_000) * pxPerSecond - scrollLeft);
+      if (bedTo > bedFrom) {
+        ctx.fillStyle = bed;
+        ctx.fillRect(bedFrom, 0, bedTo - bedFrom, WAVE_HEIGHT_PX);
+      }
+      if (waveAudio.size === 0) return;
+
+      /*
+        Never sample finer than the data. At full zoom one hop of the level envelope is a
+        dozen pixels wide, so drawing a column per device pixel computed the same answer
+        twelve times over; at fit a hop is a fraction of a pixel and the column is what
+        limits it. Taking whichever is coarser is a tenfold saving where it is needed and
+        identical output everywhere.
+      */
+      const hopPx = (hopUs / 1_000_000) * pxPerSecond;
+      const step = Math.max(1 / dpr, Math.min(hopPx / 2, 4));
+      const columns = Math.ceil(cssWidth / step);
+      const levels = waveColumns({
+        clips: waveClips,
+        audio: waveAudio,
+        fromUs: ((scrollLeft - halfWidth) / pxPerSecond) * 1_000_000,
+        usPerColumn: (step / pxPerSecond) * 1_000_000,
+        columns,
+      });
+
+      /*
+        One outline, not a rectangle per column.
+
+        A column-per-rectangle path is the obvious way to draw this and it was, by a wide
+        margin, the most expensive thing in the editor during a fast scrub: eight hundred
+        separate rectangles on fractional pixel boundaries, each anti-aliased on both edges,
+        rasterised every frame. Measured at four times the frame budget under throttling —
+        remove it and a flick's worst frame went from 383ms to 112ms.
+
+        Tracing the envelope instead — along the top left to right, back along the bottom —
+        is one polygon with the same number of points and a fraction of the rasterisation,
+        and it looks better: a continuous shape rather than a picket fence. Runs of silence
+        break it into separate sub-paths so a gap stays a gap.
+      */
+      const middle = WAVE_HEIGHT_PX / 2;
+      const path = new Path2D();
+      let run = -1;
+      const closeRun = (until: number) => {
+        if (run < 0) return;
+        for (let column = until - 1; column >= run; column -= 1) {
+          const half = Math.max(step / 2, levels[column]! * middle);
+          path.lineTo((column + 1) * step, middle + half);
+        }
+        path.closePath();
+        run = -1;
+      };
+      for (let column = 0; column < columns; column += 1) {
+        const level = levels[column]!;
+        if (level <= 0) {
+          closeRun(column);
+          continue;
+        }
+        const half = Math.max(step / 2, level * middle);
+        if (run < 0) {
+          run = column;
+          path.moveTo(column * step, middle - half);
+        }
+        path.lineTo(column * step, middle - half);
+        path.lineTo((column + 1) * step, middle - half);
+      }
+      closeRun(columns);
+      ctx.fillStyle = ink;
+      ctx.fill(path);
+    },
+    [committedTotal, halfWidth, hopUs, palette, pxPerSecond, waveAudio, waveClips],
+  );
+
+  // A new identity forces a repaint where the position alone would not: a zoom, an edit, a
+  // source finishing its measurement.
+  const rulerToken = useMemo(
+    () => ({}),
+    [committedTotal, halfWidth, pxPerSecond, timeline.frameRate],
+  );
+  const waveToken = useMemo(
+    () => ({}),
+    [committedTotal, halfWidth, pxPerSecond, waveAudio, waveClips],
+  );
+  const rulerRef = useStripCanvas(scrollerRef, RULER_HEIGHT_PX, paintRuler, rulerToken);
+  const waveRef = useStripCanvas(scrollerRef, WAVE_HEIGHT_PX, paintWave, waveToken);
 
   const selected = clips.find((c) => c.id === selectedClipId) ?? null;
   const selectedSource = selected ? sources.find((s) => s.id === selected.sourceId) ?? null : null;
@@ -697,6 +846,20 @@ export function TimelineEditor({
         than a child, or it moves with the footage — which is the one thing it must not do.
       */}
       <div className="timeline-viewport">
+      {/*
+        Outside the scroller, both of them. They are painted from `scrollLeft` rather than
+        moved by it — see `useStripCanvas` for what that bought.
+      */}
+      <canvas
+        className="ruler"
+        ref={rulerRef}
+        onClick={(event) => {
+          const scroller = scrollerRef.current;
+          const box = (scroller ?? event.currentTarget).getBoundingClientRect();
+          const at = event.clientX - box.left + (scroller?.scrollLeft ?? 0) - halfWidth;
+          onRulerTap(Math.max(0, Math.round((at / pxPerSecond) * 1_000_000)));
+        }}
+      />
       <div
         className={drag ? 'timeline-scroller dragging' : 'timeline-scroller'}
         ref={scrollerRef}
@@ -711,16 +874,6 @@ export function TimelineEditor({
         onPointerCancel={endDrag}
       >
         <div className="timeline-content" style={{ width: contentWidth }}>
-          <Ruler
-            total={committedTotal}
-            pxPerSecond={pxPerSecond}
-            offset={halfWidth}
-            page={rulerPage}
-            frameRateNum={timeline.frameRate.num}
-            frameRateDen={timeline.frameRate.den}
-            onTap={onRulerTap}
-          />
-
           {bubbles.length > 0 && (
             <div className="bubbles">
               {bubbles.map((bubble) => (
@@ -743,17 +896,10 @@ export function TimelineEditor({
 
           {lane}
 
-          <WaveLane
-            clips={waveClips}
-            audio={waveAudio}
-            total={committedTotal}
-            pxPerSecond={pxPerSecond}
-            offset={halfWidth}
-            page={rulerPage}
-          />
-
         </div>
       </div>
+
+      <canvas className="wave-lane" ref={waveRef} aria-hidden="true" />
 
       {/*
         Pinned to the middle of the viewport. The playhead is no longer a thing on the
@@ -784,196 +930,161 @@ export function TimelineEditor({
   );
 }
 
-/** How wide one canvas tile of waveform is, in CSS pixels. */
-const WAVE_TILE_PX = 512;
-/** The lane's height, which the stylesheet also knows as `--wave-height`. */
+/** Height of the ruler band, which the stylesheet also knows. */
+const RULER_HEIGHT_PX = 30;
+/** Height of the audio band, which the stylesheet knows as `--wave-height`. */
 const WAVE_HEIGHT_PX = 34;
 
 /**
- * The audio under the picture.
+ * The two strips that do not scroll.
  *
- * ## Tiles
+ * ## Why they stopped scrolling
  *
- * The obvious shape — one canvas per clip — falls over at the zoom this editor now reaches.
- * A clip a minute long at full zoom is seventy thousand pixels wide, which is past what a
- * canvas can be, and fifty of them would be an enormous amount of memory for something you
- * can see four hundred pixels of.
+ * The ruler and the audio used to live *inside* the scrolled content, positioned in
+ * timeline pixels, windowed to a few pages either side of the playhead so the DOM stayed
+ * bounded. That is a reasonable design and it was measured to be the single largest cost in
+ * the editor. Playing a twelve-clip edit at full zoom under six-times throttling:
  *
- * So the lane is tiled: fixed-width canvases, only near the viewport, positioned by `left`
- * so the browser scrolls them natively and a gesture costs nothing. Same page window as the
- * ruler, and the same reason — the tiles change when a page boundary goes past, a few times
- * a second, rather than on every frame of a scroll.
+ *     everything             median 37ms/frame, 20 hitches in five seconds
+ *     without the ruler      median 33ms,       16 hitches
+ *     without either strip   median 25ms,       10 hitches
  *
- * ## Drawn once per tile
+ * Two thirds of a frame budget, and half the visible stutter, spent painting decoration
+ * across a canvas over a million pixels wide — plus a burst of a hundred DOM operations
+ * every time the window slid a page, which is a hitch you can see and is exactly what
+ * "jumpy while playing zoomed in" describes. Auto-scrolling the lane, which was the obvious
+ * suspect, measured at zero.
  *
- * Each tile is painted in an effect when it mounts or its zoom changes, never on a scroll.
- * The drawing is a column per device pixel: cheap, and it does not touch React at all.
+ * ## What they are instead
+ *
+ * One canvas each, the size of the *viewport*, sitting outside the scroller and repainted
+ * from `scrollLeft` whenever the view moves. A repaint is a few hundred drawing operations
+ * over four hundred pixels rather than a repaint of a strip a million pixels long, there is
+ * no DOM to build or throw away, and there is no window to slide — so the periodic hitch
+ * has nowhere to come from.
+ *
+ * What is drawn is decided by the same two pure functions as before, `planRuler` and
+ * `waveColumns`, which are tested exactly. Only the surface changed.
  */
-const WaveLane = memo(function WaveLane({
-  clips,
-  audio,
-  total,
-  pxPerSecond,
-  offset,
-  page,
-}: {
-  clips: WaveClip[];
-  audio: Map<string, WaveSource>;
-  total: number;
-  pxPerSecond: number;
-  offset: number;
-  page: number;
-}) {
-  const tiles = useMemo(() => {
-    const contentPx = (total / 1_000_000) * pxPerSecond;
-    const first = Math.max(0, Math.floor(((page - 1) * RULER_PAGE_PX) / WAVE_TILE_PX));
-    const last = Math.floor(Math.min(contentPx, (page + 2) * RULER_PAGE_PX) / WAVE_TILE_PX);
-    const out: number[] = [];
-    for (let tile = first; tile <= last; tile += 1) out.push(tile);
-    return out;
-  }, [page, pxPerSecond, total]);
-
-  if (audio.size === 0) return null;
-
-  return (
-    // Inset to the edit itself rather than spanning the content box. The lane has half a
-    // viewport of padding at each end so the first and last frame can reach the middle of
-    // the screen, and a bed of audio drawn across that padding reads as sound before the
-    // video starts.
-    <div
-      className="wave-lane"
-      aria-hidden="true"
-      style={{ marginLeft: offset, width: Math.max(0, (total / 1_000_000) * pxPerSecond) }}
-    >
-      {tiles.map((tile) => (
-        <WaveTile
-          key={tile}
-          index={tile}
-          clips={clips}
-          audio={audio}
-          pxPerSecond={pxPerSecond}
-          left={tile * WAVE_TILE_PX}
-        />
-      ))}
-    </div>
-  );
-});
-
-function WaveTile({
-  index,
-  clips,
-  audio,
-  pxPerSecond,
-  left,
-}: {
-  index: number;
-  clips: WaveClip[];
-  audio: Map<string, WaveSource>;
-  pxPerSecond: number;
-  left: number;
-}) {
-  const ref = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas) return;
-
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const width = Math.max(1, Math.round(WAVE_TILE_PX * dpr));
-    const height = Math.max(1, Math.round(WAVE_HEIGHT_PX * dpr));
-    canvas.width = width;
-    canvas.height = height;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const usPerColumn = 1_000_000 / (pxPerSecond * dpr);
-    const levels = waveColumns({
-      clips,
-      audio,
-      fromUs: ((index * WAVE_TILE_PX) / pxPerSecond) * 1_000_000,
-      usPerColumn,
-      columns: width,
-    });
-
-    ctx.clearRect(0, 0, width, height);
-    // Mirrored about the centre line, the way every editor draws it — the shape reads as
-    // one object rather than as a bar chart, and the centre gives the eye something to
-    // follow through the quiet parts.
-    const middle = height / 2;
-    ctx.fillStyle = getComputedStyle(canvas).getPropertyValue('--wave-ink') || '#b6a8ff';
-    for (let column = 0; column < width; column += 1) {
-      const level = levels[column]!;
-      if (level <= 0) continue;
-      const half = Math.max(dpr, level * middle);
-      ctx.fillRect(column, middle - half, 1, half * 2);
-    }
-  }, [audio, clips, index, pxPerSecond]);
-
-  return <canvas ref={ref} className="wave-tile" style={{ left, width: WAVE_TILE_PX }} />;
+interface StripView {
+  scrollLeft: number;
+  cssWidth: number;
+  /** Device pixels per CSS pixel, so nothing is drawn finer than the screen can show. */
+  dpr: number;
 }
 
 /**
- * The ruler.
+ * How much canvas is painted beyond each edge of the viewport.
  *
- * Memoised on primitives — the frame rate arrives as two numbers rather than a `Rational`
- * because a fresh object in the props defeats `memo` entirely — and windowed to `page`, so
- * a scroll rebuilds its marks a few times a second instead of sixty. What it draws at each
- * zoom, and why the ladder is shaped the way it is, is in `ruler.ts`.
+ * The strips only ever *translate* as the view moves — the ruler at 0:04 is the same picture
+ * as the ruler at 0:03, shifted. Repainting the whole thing every frame therefore uploads a
+ * new texture sixty times a second to draw something that has barely changed, which measured
+ * as the largest remaining cost in the editor.
+ *
+ * So each canvas is painted wider than it needs to be and slid with a transform, which is
+ * compositor work and free. It is only repainted when the view has run past the margin —
+ * at playback speed, once every few frames instead of every one.
  */
-const Ruler = memo(function Ruler({
-  total,
-  pxPerSecond,
-  offset,
-  page,
-  frameRateNum,
-  frameRateDen,
-  onTap,
-}: {
-  total: number;
-  pxPerSecond: number;
-  offset: number;
-  page: number;
-  frameRateNum: number;
-  frameRateDen: number;
-  onTap(us: number): void;
-}) {
-  const plan = useMemo(() => {
-    const toUs = (px: number) => (px / pxPerSecond) * 1_000_000;
-    return planRuler({
-      // A page of slack on each side, so the marks are already there when the edge of the
-      // screen reaches them rather than appearing as you arrive.
-      fromUs: toUs((page - 1) * RULER_PAGE_PX),
-      toUs: toUs((page + 2) * RULER_PAGE_PX),
-      totalUs: total,
-      pxPerSecond,
-      frameRate: { num: frameRateNum, den: frameRateDen },
-    });
-  }, [frameRateDen, frameRateNum, page, pxPerSecond, total]);
+const STRIP_MARGIN_PX = 240;
 
-  return (
-    // Dragging the ruler pans the lane like everything else; a *tap* brings that instant
-    // to the middle. Both gestures land the playhead somewhere you pointed at, which is
-    // the only thing the old drag-the-grip version was really for.
-    <div
-      className="ruler"
-      onClick={(event) => {
-        const box = event.currentTarget.getBoundingClientRect();
-        onTap(Math.max(0, Math.round(((event.clientX - box.left - offset) / pxPerSecond) * 1_000_000)));
-      }}
-    >
-      {plan.ticks.map((tick) => (
-        <span
-          key={tick.frame}
-          className={tick.label === null ? 'tick minor' : 'tick'}
-          style={{ left: (tick.us / 1_000_000) * pxPerSecond + offset }}
-        >
-          {tick.label}
-        </span>
-      ))}
-    </div>
-  );
-});
+/**
+ * Paint a canvas whenever the view moves past what has already been painted.
+ *
+ * Driven by an animation frame reading `scrollLeft` rather than by scroll events, because
+ * the view also moves during *playback*, where there is no gesture and the scroll is issued
+ * by the app. One number compared per frame is cheaper than either of the alternatives, and
+ * it cannot miss a movement.
+ *
+ * `token` is whatever the drawing depends on besides position — zoom, clips, audio. A new
+ * identity forces a repaint where the position alone would not.
+ */
+function useStripCanvas(
+  scrollerRef: React.RefObject<HTMLDivElement | null>,
+  heightPx: number,
+  paint: (ctx: CanvasRenderingContext2D, view: StripView) => void,
+  token: object,
+) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const paintRef = useRef(paint);
+  paintRef.current = paint;
+
+  useEffect(() => {
+    const drawn = { at: Number.NaN, width: -1, shift: Number.NaN, seen: Number.NaN, margin: -1 };
+    let frame = requestAnimationFrame(function tick() {
+      frame = requestAnimationFrame(tick);
+      const canvas = canvasRef.current;
+      const scroller = scrollerRef.current;
+      if (!canvas || !scroller) return;
+
+      const cssWidth = scroller.clientWidth;
+      const scrollLeft = scroller.scrollLeft;
+      const shift = drawn.at - scrollLeft;
+
+      /*
+        How far the view moved since the last frame decides how much is worth painting.
+
+        Slow — playback, or a thumb dragging — moves a few dozen pixels a frame, so painting
+        a margin either side means most frames are a transform and nothing else. A flick
+        moves five hundred pixels a frame, runs off the margin every time, and repaints
+        regardless: there the margin is pure waste, two and a half viewports of texture
+        uploaded per frame to show one. So it is dropped while the view is travelling and
+        taken back the moment it slows, which is also the moment anyone can read it.
+      */
+      const velocity = Math.abs(scrollLeft - (Number.isNaN(drawn.seen) ? scrollLeft : drawn.seen));
+      drawn.seen = scrollLeft;
+      const travelling = velocity > STRIP_MARGIN_PX;
+      const margin = travelling ? 0 : STRIP_MARGIN_PX;
+
+      if (cssWidth === drawn.width && margin === drawn.margin && Math.abs(shift) <= margin) {
+        // Still inside what has been painted: slide it and do no drawing at all. Written
+        // only when it changed — assigning the same style string still costs a style
+        // invalidation, and this runs on every frame of every gesture.
+        if (shift !== drawn.shift) {
+          drawn.shift = shift;
+          canvas.style.transform = `translateX(${shift}px)`;
+        }
+        return;
+      }
+
+      drawn.at = scrollLeft;
+      drawn.width = cssWidth;
+      drawn.shift = 0;
+      drawn.margin = margin;
+      canvas.style.transform = 'translateX(0px)';
+      canvas.style.left = `${-margin}px`;
+
+      /*
+        And at screen resolution only when the picture is still enough to be read.
+
+        A flick repaints on every frame — it outruns any margin — and at two device pixels
+        per CSS pixel across two and a half viewports that is the largest texture upload in
+        the app, measured at four times the frame budget under throttling. Nobody reads a
+        frame number off a ruler travelling at five hundred pixels a frame; the moment it
+        slows, the next repaint is at full resolution.
+      */
+      const dpr = travelling ? 1 : Math.min(2, window.devicePixelRatio || 1);
+      const paintedWidth = cssWidth + margin * 2;
+      const width = Math.max(1, Math.round(paintedWidth * dpr));
+      const height = Math.max(1, Math.round(heightPx * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        canvas.style.width = `${paintedWidth}px`;
+      }
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, paintedWidth, heightPx);
+      // The painter is handed the wider view and knows nothing about the margin; the canvas
+      // is offset by it in the stylesheet.
+      paintRef.current(ctx, { scrollLeft: scrollLeft - margin, cssWidth: paintedWidth, dpr });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [heightPx, scrollerRef, token]);
+
+  return canvasRef;
+}
 
 /**
  * One clip on the lane.
@@ -1011,6 +1122,8 @@ const ClipBlock = memo(function ClipBlock({
   onSelect(clipId: string): void;
 }) {
   const geometry = { left, width };
+  /** Where a press landed, so a release can tell a tap from the start of a pan. */
+  const pressRef = useRef<{ x: number; y: number } | null>(null);
   const sourceIn = draft ? draft.sourceIn : clip.sourceIn;
   const sourceOut = draft ? draft.sourceOut : clip.sourceOut;
   const length = Math.round((sourceOut - sourceIn) / clip.speed);
@@ -1034,22 +1147,63 @@ const ClipBlock = memo(function ClipBlock({
     <div
       className={classes}
       style={{ left: geometry.left, width: geometry.width }}
+      /*
+        Selected on release, not on press.
+
+        Selecting on `pointerdown` re-renders the lane — the block gains its outline, the
+        trim handles mount — in the middle of the gesture that press began, and Chromium
+        drops the scroll it had just started. The effect is that the *first* drag on any clip
+        that is not already selected does nothing at all, and since most of the timeline's
+        surface is clips, most first drags do nothing. It reads as the timeline ignoring you.
+
+        Waiting for the release costs nothing — a tap still selects — and a press that turns
+        into a pan is a pan.
+      */
       onPointerDown={(event) => {
         event.stopPropagation();
-        onSelect(clip.id);
+        pressRef.current = { x: event.clientX, y: event.clientY };
+      }}
+      onPointerUp={(event) => {
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (!press) return;
+        const moved = Math.hypot(event.clientX - press.x, event.clientY - press.y);
+        if (moved <= TAP_SLOP_PX) onSelect(clip.id);
+      }}
+      onPointerCancel={() => {
+        pressRef.current = null;
       }}
       role="button"
       aria-pressed={selected}
       aria-label={`Clip ${index + 1}, ${formatTimecode(sourceOut - sourceIn, undefined, { compact: true })}`}
     >
       <div className="clip-thumbs">
-        {thumbs.map((frame, i) =>
-          frame ? (
-            <img key={i} src={frame.url} alt="" draggable={false} />
+        {thumbs.map((frame, i) => {
+          /*
+            Each frame covers its own share of the block, *tiled* rather than stretched.
+
+            Stretching is what a flex row did, and it falls apart once the zoom outruns the
+            filmstrip: a thirty-second clip at full zoom is thirty-five thousand pixels wide
+            and the strip holds two frames for it, so each 144-pixel JPEG was rasterised to
+            seventeen thousand pixels across and re-rasterised as it scrolled. Drawing them
+            at a fixed width instead left the lane mostly empty, which is worse to look at
+            and no more true.
+
+            A repeating background is one element either way, tiled by the compositor from a
+            texture the size the picture actually is.
+          */
+          const share = geometry.width / slots;
+          const style = { left: i * share, width: share };
+          return frame ? (
+            <span
+              key={i}
+              className="thumb"
+              style={{ ...style, backgroundImage: `url(${frame.url})` }}
+            />
           ) : (
-            <span key={i} className="thumb-placeholder" />
-          ),
-        )}
+            <span key={i} className="thumb-placeholder" style={style} />
+          );
+        })}
       </div>
       {/*
         Keyframes, on the clip they belong to.

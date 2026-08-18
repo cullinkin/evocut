@@ -303,17 +303,25 @@ button.play {
   font-size: 14px;
 }
 
+/* The bordered box is the viewport now, not the scroller: the ruler and the audio sit in
+   bands above and below the scrolled lane rather than inside it, and they have to look like
+   part of the same panel. */
 .timeline-viewport {
   position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  /* `clip` rather than `hidden`, for the same reason as `.clip-thumbs`: the strips are wider
+     than the viewport by design, and a scroll container that can move even slightly will
+     take a pan meant for the lane. */
+  overflow: clip;
+  padding: 30px 0 38px;
 }
 
 .timeline-scroller {
   position: relative;
   overflow-x: auto;
   overflow-y: hidden;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 12px;
   /* Horizontal panning only: a vertical swipe here must not scroll anything. */
   touch-action: pan-x;
   -webkit-overflow-scrolling: touch;
@@ -331,39 +339,24 @@ button.play {
 
 .timeline-content {
   position: relative;
-  height: calc(var(--lane-height) + var(--wave-height) + 34px);
+  height: var(--lane-height);
 }
 
+/* A canvas, painted from the scroll position rather than scrolled. Both strips sit outside
+   the scroller: painting a viewport's worth of decoration costs a few hundred operations,
+   where scrolling it across content a million pixels wide was two thirds of the frame
+   budget and every visible hitch. */
 .ruler {
-  position: relative;
+  position: absolute;
+  top: 0;
+  /* Painted wider than the viewport and slid with a transform — see `STRIP_MARGIN_PX`. The
+     offset is the margin, set from script because the margin is dropped while the view is
+     travelling fast. */
+  left: -240px;
   height: 30px;
   touch-action: none;
-}
-
-/* Labels sit low in the ruler so the playhead's grip, which lives at the top, does not
-   cover the tick it is parked on. The mark itself runs to the foot of the ruler, so it
-   reads as a rule the clip below is measured against rather than as a bullet by the text. */
-.tick {
-  position: absolute;
-  top: 12px;
-  bottom: 0;
-  font-size: 10px;
-  color: var(--tick-strong);
-  font-variant-numeric: tabular-nums;
-  padding-left: 5px;
-  border-left: 2px solid var(--tick-strong);
-  line-height: 13px;
-  pointer-events: none;
-  white-space: nowrap;
-}
-
-/* One frame. Shorter and a step down in weight, because at this zoom the numbers are for
-   orientation and *these* are the scale: they have to read as a row of marks you can count
-   along, without turning into a grey band or competing with the labels. */
-.ruler .tick.minor {
-  top: 21px;
-  padding: 0;
-  border-left: 1px solid var(--tick);
+  /* Its own layer, so sliding it is compositor work rather than a repaint of the panel. */
+  will-change: transform;
 }
 
 .timeline-lane {
@@ -373,24 +366,16 @@ button.play {
 
 /* --- The audio ------------------------------------------------------------------------
    A level envelope of the diegetic sound, drawn from the same measurement the signals pass
-   makes to find hits and dead air. Tiled canvases, positioned in content space, so a scroll
-   moves them natively and costs nothing. */
+   makes to find hits and dead air — onto one viewport-sized canvas, for the same reason the
+   ruler is one. */
 
 .wave-lane {
-  position: relative;
-  height: var(--wave-height);
-  margin-top: 4px;
-  border-radius: 6px;
-  background: var(--wave-bed);
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.wave-tile {
   position: absolute;
-  top: 0;
+  bottom: 0;
+  left: -240px;
   height: var(--wave-height);
-  --wave-ink: #a794ff;
+  pointer-events: none;
+  will-change: transform;
 }
 
 .clip-block {
@@ -398,7 +383,14 @@ button.play {
   top: 0;
   height: var(--lane-height);
   border-radius: 8px;
-  overflow: hidden;
+  /* `clip`, never `hidden`.
+
+     `overflow: hidden` makes a box a scroll container even with nothing to scroll, and a
+     sub-pixel of overflow — which absolutely positioned frames rounding against the block's
+     width will produce — is enough for Chromium to latch a pan onto it and never chain the
+     gesture up to the timeline. The symptom is absolute: dragging anywhere on a clip does
+     not move the lane at all, which is most of the surface of the timeline. */
+  overflow: clip;
   background: var(--surface-2);
   border: 2px solid transparent;
   cursor: pointer;
@@ -415,19 +407,42 @@ button.play {
   opacity: 0.35;
 }
 
+/* Laid out along the block rather than stretched across it.
+
+   A flex row divides the block evenly between however many frames there are, which is right
+   until the zoom outruns the filmstrip: a thirty-second clip at full zoom is thirty-five
+   thousand pixels wide and the strip holds two frames for it, so each 144-pixel JPEG was
+   being rasterised to seventeen thousand pixels across — and re-rasterised as it scrolled.
+   Fixed-width frames at the moment they were taken from cost the same at every zoom, and
+   say something true: this is where these pictures are, and there are no others. */
 .clip-thumbs {
-  display: flex;
+  position: relative;
   height: 100%;
   pointer-events: none;
+  /* `clip`, not `hidden`.
+
+     `overflow: hidden` makes an element a scroll container even when it has nothing to
+     scroll, and a fraction of a pixel of overflow — which absolutely positioned frames
+     rounding against a block's width will produce — is enough for Chromium to latch a pan
+     gesture onto it and never chain it up to the timeline. The symptom is total: dragging
+     anywhere on a clip does not move the lane at all. `overflow: clip` clips and creates no
+     scroll container, which is what was wanted in the first place. */
+  overflow: clip;
 }
 
-.clip-thumbs img,
+.clip-thumbs .thumb,
 .thumb-placeholder {
-  flex: 1 1 0;
-  min-width: 0;
+  position: absolute;
+  top: 0;
   height: 100%;
-  object-fit: cover;
   display: block;
+}
+
+/* Tiled at the size the picture is, rather than one copy stretched over the whole share. */
+.clip-thumbs .thumb {
+  background-repeat: repeat-x;
+  background-size: auto 100%;
+  background-position: left center;
 }
 
 .thumb-placeholder {
@@ -1249,9 +1264,15 @@ fieldset.duration legend {
    Word bubbles over the clips they touch. They sit in their own strip above the lane
    rather than on the clips, because a badge drawn on a clip competes with the clip's own
    tap target — and on a phone the clip is the thing you are most often trying to hit. */
+/* Over the top of the lane rather than above it, so the picture band is not shortened by
+   26px of reserved space for something that is only there during a review. */
 .bubbles {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
   height: 26px;
+  z-index: 3;
   pointer-events: none;
 }
 

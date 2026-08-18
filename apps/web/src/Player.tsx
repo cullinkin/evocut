@@ -209,6 +209,8 @@ export function Player({
   const stageRef = useRef<HTMLDivElement>(null);
   /** The stage's painted size, measured once per resize rather than once per frame. */
   const stageSizeRef = useRef({ width: 0, height: 0 });
+  /** What each element is currently wearing, so an unchanged look is not rewritten. */
+  const dressedRef = useRef(new WeakMap<HTMLVideoElement, { filter: string; framed: string }>());
   const playerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
   const lastResyncRef = useRef(0);
@@ -349,9 +351,7 @@ export function Player({
    */
   const dress = useCallback((video: HTMLVideoElement, layer: FrameLayer) => {
     const colour = previewColorRef.current;
-    video.style.filter = filterFor(
-      colour && colour.clipId === layer.clip.id ? colour.value : layer.color,
-    );
+    const filter = filterFor(colour && colour.clipId === layer.clip.id ? colour.value : layer.color);
 
     const framing = transformDraftRef.current;
     const transform =
@@ -364,7 +364,22 @@ export function Player({
     // Measured off the stage, not the element: `x` is a fraction of the *output frame*, and
     // the stage is the output frame. The element fills it, so the two agree — but reading
     // the element would start disagreeing the moment a transform scaled it.
-    video.style.transform = previewTransform(transform, stageSizeRef.current);
+    const framed = previewTransform(transform, stageSizeRef.current);
+
+    /*
+      Written only when they changed.
+
+      This runs on every animation frame of playback and of every scrub, and almost always
+      with the same two strings: a shot with no grade and no move produces one filter and
+      one transform for its whole length. Assigning an identical value to `style.filter`
+      still invalidates the element's style, and invalidating a *video* element's style is
+      not free — it is the one element on the page whose layer the compositor is already
+      updating sixty times a second.
+    */
+    const dressed = dressedRef.current.get(video);
+    if (dressed?.filter !== filter) video.style.filter = filter;
+    if (dressed?.framed !== framed) video.style.transform = framed;
+    dressedRef.current.set(video, { filter, framed });
   }, []);
 
   const seekTo = useCallback((video: HTMLVideoElement, sourceUs: number, approximate: boolean) => {

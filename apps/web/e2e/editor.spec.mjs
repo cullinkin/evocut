@@ -92,10 +92,14 @@ check(
   'video/webm',
 );
 
-await page.waitForFunction(() => document.querySelectorAll('.clip-thumbs img').length > 0, null, {
-  timeout: 25000,
-});
-set('thumbnailsRendered', await page.locator('.clip-thumbs img').count());
+// A frame is a tiled background rather than an `<img>` now: one element covers its share
+// of the block and repeats, instead of one picture stretched across the whole of it.
+await page.waitForFunction(
+  () => [...document.querySelectorAll('.clip-thumbs .thumb')].some((el) => el.style.backgroundImage),
+  null,
+  { timeout: 25000 },
+);
+set('thumbnailsRendered', await page.locator('.clip-thumbs .thumb').count());
 await page.screenshot({ path: artifact('iphone-editor.png') });
 
 // --- Scroll the lane to move the playhead ---------------------------------------

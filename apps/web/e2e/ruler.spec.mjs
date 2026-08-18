@@ -23,36 +23,57 @@ await page.setInputFiles('input[type=file]', clip);
 await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
 await page.waitForTimeout(600);
 
-/** Everything the ruler is currently saying, with where it says it. */
+/**
+ * Everything the ruler is currently saying, read off the pixels.
+ *
+ * The ruler is a canvas now — one the size of the viewport, painted from the scroll
+ * position rather than scrolled — so there are no elements to interrogate. That is the
+ * better thing to assert on anyway: a planner that was right and a painter that put the
+ * marks somewhere else would have passed the old DOM checks and looked wrong on the phone.
+ *
+ * A mark is a column of ink reaching the foot of the ruler. A *labelled* one also reaches
+ * the top of the band, since it is drawn taller; the number beside it does not reach the
+ * foot, which is what separates the two. What each label actually says is decided by
+ * `planRuler` and asserted exactly in `test/ruler.test.ts`.
+ */
 const readRuler = () =>
   page.evaluate(() => {
     const scroller = document.querySelector('.timeline-scroller');
-    const marks = [...document.querySelectorAll('.ruler .tick')].map((tick) => ({
-      label: tick.textContent ?? '',
-      left: Number.parseFloat(tick.style.left),
-      minor: tick.classList.contains('minor'),
-    }));
-    marks.sort((a, b) => a.left - b.left);
+    const canvas = document.querySelector('canvas.ruler');
+    const ctx = canvas.getContext('2d');
+    const dpr = canvas.width / Number.parseFloat(canvas.style.width);
+    const { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const alphaAt = (x, cssY) => data[((Math.round(cssY * dpr) * width) + x) * 4 + 3];
 
-    /*
-      The scale, read off the ruler itself rather than taken from the component.
+    // The canvas is painted wider than the viewport and slid with a transform; measured
+    // rather than parsed out of the styles, so the transform is already accounted for.
+    const canvasBox = canvas.getBoundingClientRect();
+    const scrollerBox = scroller.getBoundingClientRect();
+    const originCss = canvasBox.left - scrollerBox.left;
 
-      Two consecutive second labels are one second apart by definition, so the distance
-      between them *is* pixels-per-second — and measuring it this way means the frame-gap
-      check below is comparing the ruler against itself rather than against a number the
-      same code produced.
-    */
-    const seconds = marks.filter((mark) => /^\d+:\d\d$/.test(mark.label));
-    const pxPerSecond =
-      seconds.length > 1 ? (seconds.at(-1).left - seconds[0].left) / (seconds.length - 1) : 0;
+    const marks = [];
+    let previous = 0;
+    for (let x = 0; x < width; x += 1) {
+      const foot = alphaAt(x, 28);
+      if (!foot || previous) {
+        previous = foot;
+        continue;
+      }
+      previous = foot;
+      marks.push({ left: originCss + x / dpr, labelled: alphaAt(x, 13) > 0 });
+    }
 
     return {
       viewportPx: scroller.clientWidth,
-      pxPerSecond,
+      canvasCssWidth: Math.round(canvasBox.width),
       count: marks.length,
-      labels: marks.filter((mark) => !mark.minor).map((mark) => mark.label),
+      labelled: marks.filter((mark) => mark.labelled).length,
+      minors: marks.filter((mark) => !mark.labelled).map((mark) => mark.left),
       gaps: marks.slice(1).map((mark, index) => mark.left - marks[index].left),
-      minors: marks.filter((mark) => mark.minor).map((mark) => mark.left),
+      onScreen: marks.filter((mark) => mark.left >= 0 && mark.left <= scroller.clientWidth).length,
+      labelledOnScreen: marks.filter(
+        (mark) => mark.labelled && mark.left >= 0 && mark.left <= scroller.clientWidth,
+      ).length,
     };
   });
 
@@ -60,9 +81,9 @@ const readRuler = () =>
 await page.locator('button[aria-label="Fit timeline"]').click();
 await page.waitForTimeout(300);
 const fitted = await readRuler();
-set('fitted', { labels: fitted.labels, count: fitted.count });
-check('fittedRulerCountsSeconds', fitted.labels.every((label) => /^\d+:\d\d$/.test(label)), true);
-check('andHasNoFrameMarksToTripOver', fitted.minors.length, 0);
+set('fitted', { count: fitted.count, labelled: fitted.labelled });
+// Fitted, every mark is a second and every second is labelled: no frame grid to trip over.
+check('fittedRulerCountsSeconds', fitted.count > 0 && fitted.count === fitted.labelled, true);
 
 // --- All the way in ----------------------------------------------------------------------
 const zoomIn = page.locator('button[aria-label="Zoom in"]');
@@ -82,43 +103,45 @@ await page.evaluate(() => {
 await page.waitForTimeout(900);
 
 const deep = await readRuler();
-set('deep', { pxPerSecond: Math.round(deep.pxPerSecond), labels: deep.labels, count: deep.count });
+set('deep', { count: deep.count, labelled: deep.labelled, onScreen: deep.onScreen });
 
 /*
   As far in as it goes is a third of a second across the screen — ten frames on a phone at
-  30fps, which is far enough apart that a thumb can land on the one it meant. Stated as a
-  fraction of the viewport rather than as a pixel rate, because that is what it means.
+  30fps, which is far enough apart that a thumb can land on the one it meant. With a mark on
+  every frame, counting the marks on screen *is* counting the frames on screen.
 */
-const secondsOnScreen = deep.viewportPx / deep.pxPerSecond;
-set('secondsOnScreenAtFullZoom', Number(secondsOnScreen.toFixed(3)));
-check('aboutAThirdOfASecondFillsTheScreen', secondsOnScreen > 0.28 && secondsOnScreen < 0.4, true);
+const framesOnScreen = deep.onScreen;
+set('framesOnScreenAtFullZoom', framesOnScreen);
+check('aboutAThirdOfASecondFillsTheScreen', framesOnScreen >= 8 && framesOnScreen <= 13, true);
 
-// The whole complaint: at this zoom the old ruler had two labels, both of them timecode.
-check('theRulerCountsFrames', deep.labels.some((label) => /^\d+f$/.test(label)), true);
-check('andStillMarksTheSecond', deep.labels.some((label) => /^\d+:\d\d$/.test(label)), true);
+// The whole complaint: at this zoom the old ruler had two marks, a second apart.
 check('thereIsAFrameGrid', deep.minors.length > 5, true);
+check('andSomeOfThemAreNumbered', deep.labelled > 0 && deep.labelled < deep.count, true);
 
 /*
   Every mark is one frame from the next — labelled and unlabelled alike, since a label sits
-  on a frame too. Measured off the DOM rather than computed, because the point of this check
-  is that what is *painted* is a frame grid: a planner that was right and a stylesheet that
-  put the marks somewhere else would look exactly like a ruler that lies.
+  on a frame too. Measured off the painted pixels: the whole point is that what is *drawn*
+  is an even frame grid, and a planner that was right with a painter that was not would look
+  exactly like a ruler that lies.
 */
-const expectedGap = deep.pxPerSecond / 30;
-set('frameGapPx', {
-  smallest: Math.round(Math.min(...deep.gaps)),
-  largest: Math.round(Math.max(...deep.gaps)),
-  expected: Math.round(expectedGap),
-});
-check('theMarksAreOneFrameApart', deep.gaps.every((gap) => Math.abs(gap - expectedGap) < 1.5), true);
+const spacing = [...deep.gaps].sort((a, b) => a - b);
+const median = spacing[Math.floor(spacing.length / 2)];
+set('frameGapPx', { smallest: Math.round(Math.min(...deep.gaps)), largest: Math.round(Math.max(...deep.gaps)), median: Math.round(median) });
+check('theMarksAreEvenlySpaced', deep.gaps.every((gap) => Math.abs(gap - median) < 2), true);
+// Ten frames across a third of a second on a phone: a mark every few dozen pixels.
+check('andFarEnoughApartToAimAt', median > 20, true);
 
 /*
-  Windowed. A twelve-second clip at full zoom is fourteen thousand pixels of ruler, and a
-  ruler that built every frame of it would put four hundred nodes on the page and rebuild
-  them on every scroll event — which is the cost that made scrubbing unusable in the first
-  place. Only what is near the screen is built.
+  The ruler is the size of the screen, not the size of the edit.
+
+  It used to be positioned in timeline pixels inside the scrolled content, windowed to a few
+  pages so the DOM stayed bounded. Measured, that cost two thirds of a frame budget during
+  playback and produced a burst of a hundred DOM operations every time the window slid. Now
+  there is one canvas a little wider than the viewport, and nothing to slide.
 */
-check('theRulerIsWindowed', deep.count < 200, true);
+set('rulerSize', { canvasCssWidth: deep.canvasCssWidth, viewportPx: deep.viewportPx });
+check('theRulerIsTheSizeOfTheScreen', deep.canvasCssWidth < deep.viewportPx + 600, true);
+check('andHasNoElementsOfItsOwn', await page.locator('.ruler .tick').count(), 0);
 
 /*
   Enough numbers on screen to read without counting across the whole viewport.
@@ -128,26 +151,18 @@ check('theRulerIsWindowed', deep.count < 200, true);
   because a label spacing chosen for the zoom where frames *start* being counted is far too
   wide for the zoom where you are actually placing the cut.
 */
-const onScreen = await page.evaluate(() => {
-  const box = document.querySelector('.timeline-scroller').getBoundingClientRect();
-  return [...document.querySelectorAll('.ruler .tick:not(.minor)')].filter((tick) => {
-    const at = tick.getBoundingClientRect();
-    return at.left >= box.left && at.right <= box.right;
-  }).length;
-});
-set('labelsOnScreenAtFullZoom', onScreen);
-check('enoughNumbersToReadTheRulerBy', onScreen >= 2, true);
+set('labelsOnScreenAtFullZoom', deep.labelledOnScreen);
+check('enoughNumbersToReadTheRulerBy', deep.labelledOnScreen >= 2, true);
 await page.screenshot({ path: artifact('ruler-frames.png') });
 
 // --- It still takes you there ------------------------------------------------------------
 const before = await page.locator('.timeline-clock').innerText();
 await page.evaluate(() => {
-  const marks = [...document.querySelectorAll('.ruler .tick')].filter((tick) => /f$/.test(tick.textContent ?? ''));
-  const target = marks[marks.length - 1];
-  const box = target.getBoundingClientRect();
-  document
-    .querySelector('.ruler')
-    .dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box.left, clientY: box.top + 4 }));
+  const ruler = document.querySelector('canvas.ruler');
+  const box = document.querySelector('.timeline-scroller').getBoundingClientRect();
+  ruler.dispatchEvent(
+    new MouseEvent('click', { bubbles: true, clientX: box.left + box.width * 0.8, clientY: box.top - 10 }),
+  );
 });
 await page.waitForTimeout(700);
 const after = await page.locator('.timeline-clock').innerText();
@@ -156,8 +171,8 @@ check('tappingAFrameMarkGoesThere', before !== after, true);
 
 // --- And the lane did not lose its place --------------------------------------------------
 const settled = await readRuler();
-check('theRulerFollowedTheScroll', settled.labels.length > 0, true);
-check('andIsStillWindowed', settled.count < 200, true);
+check('theRulerFollowedTheScroll', settled.count > 0, true);
+check('andIsStillTheSizeOfTheScreen', settled.canvasCssWidth < settled.viewportPx + 600, true);
 
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();

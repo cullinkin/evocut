@@ -24,31 +24,81 @@ await page.setInputFiles('input[type=file]', clip);
 await page.locator('.clip-block').first().waitFor({ timeout: 20000 });
 
 // The lane is drawn from the signals pass, which decodes the audio in the background.
-await page.locator('.wave-tile').first().waitFor({ timeout: 60000 });
-await page.waitForTimeout(600);
+await page.locator('canvas.wave-lane').waitFor({ timeout: 60000 });
+/*
+  Wait for *level* pixels, not merely for pixels. The bed is drawn as soon as there is a
+  timeline; the levels arrive only when the signals pass has decoded the audio, which takes
+  seconds. Waiting for "something that is not the top-left colour" was satisfied by the bed
+  itself — so every reading below was taken before the audio existed.
+*/
+await page.waitForFunction(
+  () => {
+    const canvas = document.querySelector('canvas.wave-lane');
+    if (!canvas?.width) return false;
+    const hex = getComputedStyle(document.documentElement).getPropertyValue('--wave-ink').trim();
+    const want = [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+    const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+    for (let at = 0; at < data.length; at += 4) {
+      if (
+        data[at + 3] > 0 &&
+        Math.abs(data[at] - want[0]) < 24 &&
+        Math.abs(data[at + 1] - want[1]) < 24 &&
+        Math.abs(data[at + 2] - want[2]) < 24
+      ) {
+        return true;
+      }
+    }
+    return false;
+  },
+  { timeout: 60000 },
+);
+await page.waitForTimeout(400);
 
-/** How much ink is in the lane, and where. */
+/**
+ * How much ink is in the lane, and how tall it gets.
+ *
+ * One canvas the size of the viewport now, painted from the scroll position rather than
+ * tiled across the content — so this reads the pixels of what is on screen. Ink is anything
+ * that is not the bed colour, which the top-left corner is guaranteed to be at any scroll
+ * position where the edit has started.
+ */
 const readLane = () =>
   page.evaluate(() => {
-    const tiles = [...document.querySelectorAll('.wave-tile')];
-    const painted = tiles.map((canvas) => {
-      const ctx = canvas.getContext('2d');
-      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      let ink = 0;
-      let highest = 0;
-      for (let at = 3; at < data.length; at += 4) {
-        if (data[at] === 0) continue;
-        ink += 1;
-        const row = Math.floor(at / 4 / canvas.width);
-        highest = Math.max(highest, Math.abs(canvas.height / 2 - row));
-      }
-      return { ink, tallest: Math.round((highest / (canvas.height / 2)) * 100) / 100 };
-    });
-    const lane = document.querySelector('.wave-lane').getBoundingClientRect();
+    const canvas = document.querySelector('canvas.wave-lane');
+    const { data, width, height } = canvas
+      .getContext('2d')
+      .getImageData(0, 0, canvas.width, canvas.height);
+
+    /*
+      Ink is the level colour, taken from the stylesheet rather than guessed from the
+      picture. Guessing it as "the commonest colour" reads the *ink* as the bed wherever the
+      sound is loud enough to fill the lane, which is precisely where a waveform is doing
+      its job.
+    */
+    const hex = getComputedStyle(document.documentElement).getPropertyValue('--wave-ink').trim();
+    const want = [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+    const near = (at) =>
+      data[at + 3] > 0 &&
+      Math.abs(data[at] - want[0]) < 24 &&
+      Math.abs(data[at + 1] - want[1]) < 24 &&
+      Math.abs(data[at + 2] - want[2]) < 24;
+
+    let ink = 0;
+    let highest = 0;
+    for (let at = 0; at < data.length; at += 4) {
+      if (!near(at)) continue;
+      ink += 1;
+      const row = Math.floor(at / 4 / width);
+      highest = Math.max(highest, Math.abs(height / 2 - row));
+    }
+
+    const lane = canvas.getBoundingClientRect();
     const clips = document.querySelector('.clip-block').getBoundingClientRect();
     return {
-      tiles: tiles.length,
-      painted,
+      ink,
+      tallest: Math.round((highest / (height / 2)) * 100) / 100,
+      canvasCssWidth: Math.round(lane.width),
+      viewportPx: document.querySelector('.timeline-scroller').clientWidth,
       laneHeight: Math.round(lane.height),
       clipHeight: Math.round(clips.height),
       // The audio sits under the picture, not over it.
@@ -58,11 +108,10 @@ const readLane = () =>
 
 const lane = await readLane();
 set('lane', lane);
-check('theLaneIsThere', lane.tiles > 0, true);
-check('andItIsPainted', lane.painted.some((tile) => tile.ink > 200), true);
+check('theLaneIsPainted', lane.ink > 200, true);
 // Mirrored about the centre and reaching most of the way up somewhere: a lane drawn at a
 // constant tiny height would pass "is painted" while showing nothing you could read.
-check('withRealDynamicRange', Math.max(...lane.painted.map((tile) => tile.tallest)) > 0.5, true);
+check('withRealDynamicRange', lane.tallest > 0.5, true);
 check('theAudioSitsUnderThePicture', lane.below, true);
 // Compressed to make room, not stretched over it: the preview keeps its height.
 check('thePictureLaneMadeRoom', lane.clipHeight <= 52, true);
@@ -92,11 +141,10 @@ await page.locator('button[aria-label="Drop clip"]').click();
 await page.waitForTimeout(700);
 const after = await readLane();
 
-const ink = (lane) => lane.painted.reduce((sum, tile) => sum + tile.ink, 0);
-set('inkBeforeDrop', ink(before));
-set('inkAfterDrop', ink(after));
-check('droppingAClipTakesItsAudioWithIt', ink(after) < ink(before), true);
-check('andLeavesTheRestOfTheEditAlone', ink(after) > 0, true);
+set('inkBeforeDrop', before.ink);
+set('inkAfterDrop', after.ink);
+check('droppingAClipTakesItsAudioWithIt', after.ink < before.ink, true);
+check('andLeavesTheRestOfTheEditAlone', after.ink > 0, true);
 
 // --- Zoomed in, it tiles rather than growing without bound ------------------------------
 const zoomIn = page.locator('button[aria-label="Zoom in"]');
@@ -106,20 +154,22 @@ for (let i = 0; i < 20 && !(await zoomIn.isDisabled()); i += 1) {
 }
 await page.waitForTimeout(500);
 
-const deep = await page.evaluate(() => {
-  const tiles = [...document.querySelectorAll('.wave-tile')];
-  return {
-    tiles: tiles.length,
-    widest: Math.max(...tiles.map((canvas) => canvas.width)),
-    contentPx: Math.round(document.querySelector('.timeline-content').getBoundingClientRect().width),
-  };
-});
-set('zoomed', deep);
-// A canvas per clip would be tens of thousands of pixels wide here — past what a canvas can
-// be — so the lane is tiled and windowed instead.
-check('theLaneIsTiled', deep.widest <= 2048, true);
-check('andOnlyNearTheViewport', deep.tiles < 24, true);
-check('eventThoughTheContentIsEnormous', deep.contentPx > 4000, true);
+const deep = await readLane();
+const contentPx = await page.evaluate(() =>
+  Math.round(document.querySelector('.timeline-content').getBoundingClientRect().width),
+);
+set('zoomed', { canvasCssWidth: deep.canvasCssWidth, viewportPx: deep.viewportPx, contentPx });
+/*
+  The lane is the size of the screen, not the size of the edit.
+
+  It was tiled canvases positioned in content space, which scrolled natively and cost
+  nothing to move — except that painting them as they came into view was measured at eight
+  milliseconds a frame during playback, the largest single cost in the editor. One canvas a
+  little wider than the viewport, painted from the scroll position, has no such cost.
+*/
+check('theLaneIsTheSizeOfTheScreen', deep.canvasCssWidth < deep.viewportPx + 600, true);
+check('andHasNoTilesOfItsOwn', await page.locator('.wave-tile').count(), 0);
+check('evenThoughTheContentIsEnormous', contentPx > 4000, true);
 
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();
