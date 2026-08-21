@@ -19,7 +19,15 @@
  */
 
 const MEDIA_PREFIX = '__media/';
-const MEDIA_DIR = 'media';
+/*
+  The two directories this will serve from, and no others.
+
+  `media` is the recording as it was imported. `proxy` is the small copy the editor plays
+  against — see `renderProxy`. The name comes off the URL, so the set is an allowlist
+  rather than a parameter: a worker that will open any path it is handed is a worker that
+  will read anything in the origin's storage.
+*/
+const MEDIA_DIRS = { media: 'media', proxy: 'proxy' };
 
 self.addEventListener('install', () => {
   // Take over immediately: the page that registered this worker is the page that needs
@@ -40,14 +48,16 @@ self.addEventListener('fetch', (event) => {
 
   const name = decodeURIComponent(url.pathname.slice(at + MEDIA_PREFIX.length));
   const type = url.searchParams.get('type') || 'application/octet-stream';
-  event.respondWith(serveMedia(name, type, event.request));
+  const directory = MEDIA_DIRS[url.searchParams.get('from') ?? 'media'];
+  if (!directory) return;
+  event.respondWith(serveMedia(directory, name, type, event.request));
 });
 
-async function serveMedia(name, type, request) {
+async function serveMedia(dirName, name, type, request) {
   let file;
   try {
     const root = await self.navigator.storage.getDirectory();
-    const directory = await root.getDirectoryHandle(MEDIA_DIR);
+    const directory = await root.getDirectoryHandle(dirName);
     const handle = await directory.getFileHandle(name);
     file = await handle.getFile();
   } catch {

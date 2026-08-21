@@ -34,6 +34,11 @@ export const LOG_EVENT_TYPES = [
   // stack, no console, and a log that could not be exported because the app would not
   // stay up long enough to export it.
   'app.recovered',
+  // A small copy of a recording, made once so the editor has something a phone can seek.
+  // Its cost — how long, how big — is a property of the device and the footage, and is
+  // exactly the sort of thing that cannot be known any other way.
+  'proxy.complete',
+  'proxy.error',
   // What the analysis pass measured, and how long it took. The cost of measuring a
   // recording is a property of the phone doing it, and cannot be observed anywhere else.
   'signals.compute',

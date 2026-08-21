@@ -20,6 +20,7 @@ import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { SuggestionSheet } from './Suggestion.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
+import { proxyEstimateMs } from '@evocut/renderer';
 import { frameUsOf } from './frames.ts';
 import { usePlayhead } from './playhead.ts';
 import { downloadLog, downloadProject, useSession, type RefineProgress } from './session.ts';
@@ -62,6 +63,8 @@ export function App() {
   const [showClipMenu, setShowClipMenu] = useState(false);
   /** Index of the suggestion whose sheet is open, or null. */
   const [openSuggestion, setOpenSuggestion] = useState<number | null>(null);
+  /** The proxy offer, waved away for this session. */
+  const [proxyDismissed, setProxyDismissed] = useState(false);
 
   const onTime = useCallback((t: number) => session.seek(t, false), [session]);
   const onEnded = useCallback(() => setPlaying(false), []);
@@ -368,53 +371,68 @@ export function App() {
       )}
 
       {/*
-        The last open of this project killed the tab.
+        The strips float over the picture rather than sitting above it.
 
-        Said plainly, and with the way back on it. A phone can end a process for using too
-        much memory with no warning and nothing to catch, and the work that risks it here
-        is the analysis — so this session skips it and stays up. Everything that matters is
-        still reachable: the edit, the log, and the EDL.
+        The editor is a fixed-height column on a phone with a floor under the preview, so a
+        strip added *in flow* has to take its height from something — and what it took was
+        the toolbar, straight off the bottom of the screen. Over the picture it costs
+        nothing, which is the only budget there is.
       */}
-      {session.recovered && (
-        <div className="banner recovered" role="status">
-          <div>
-            <strong>Opened without analysis</strong>
-            <small>
-              Last time this project was opened the tab stopped, {session.recovered.stage === 'measure'
-                ? 'while measuring the footage'
-                : `during ${session.recovered.stage}`}
-              . The waveform and the suggestions are off for this session; editing, export and the
-              log all work.
-            </small>
+      <div className="stage-wrap">
+        <div className="banners">
+        {/*
+          The last open of this project killed the tab.
+
+          Said plainly, and with the way back on it. A phone can end a process for using too
+          much memory with no warning and nothing to catch, and the work that risks it here
+          is the analysis — so this session skips it and stays up. Everything that matters is
+          still reachable: the edit, the log, and the EDL.
+        */}
+        {session.recovered && (
+          <div className="banner recovered" role="status">
+            <div>
+              <strong>Opened without analysis</strong>
+              <small>
+                Last time this project was opened the tab stopped, {session.recovered.stage === 'measure'
+                  ? 'while measuring the footage'
+                  : `during ${session.recovered.stage}`}
+                . The waveform and the suggestions are off for this session; editing, export and the
+                log all work.
+              </small>
+            </div>
+            <button className="ghost small" onClick={session.retryOpen}>
+              Try again
+            </button>
           </div>
-          <button className="ghost small" onClick={session.retryOpen}>
-            Try again
-          </button>
+        )}
+
+        <ProxyBanner session={session} dismissed={proxyDismissed} onDismiss={() => setProxyDismissed(true)} />
+
+        {session.missingMedia.length > 0 && (
+          <RelinkPrompt
+            missing={session.missingMedia}
+            busy={session.busy}
+            onRelink={(sourceId, file) => void session.relinkMedia(sourceId, file)}
+          />
+        )}
         </div>
-      )}
 
-      {session.missingMedia.length > 0 && (
-        <RelinkPrompt
-          missing={session.missingMedia}
-          busy={session.busy}
-          onRelink={(sourceId, file) => void session.relinkMedia(sourceId, file)}
-        />
-      )}
+        {mediaUrl && (
+          <Player
+            objectUrl={mediaUrl}
+            timeline={project.timeline}
+            playing={playing}
+            scrubbing={drag !== null}
+            scrubSourceTime={drag?.scrubSourceTime ?? null}
+            previewColor={adjusting}
+            previewTransform={framing ? { clipId: framing.clipId, keys: framing.keys } : null}
+            onTime={onTime}
+            onEnded={onEnded}
+            onDiagnostics={session.reportMediaDiagnostics}
+          />
+        )}
+      </div>
 
-      {mediaUrl && (
-        <Player
-          objectUrl={mediaUrl}
-          timeline={project.timeline}
-          playing={playing}
-          scrubbing={drag !== null}
-          scrubSourceTime={drag?.scrubSourceTime ?? null}
-          previewColor={adjusting}
-          previewTransform={framing ? { clipId: framing.clipId, keys: framing.keys } : null}
-          onTime={onTime}
-          onEnded={onEnded}
-          onDiagnostics={session.reportMediaDiagnostics}
-        />
-      )}
 
       {session.seekingUnsupported && (
         <p className="warning">
@@ -737,6 +755,101 @@ function TransportClock({ totalUs }: { totalUs: number }) {
       <em> / {formatTimecode(totalUs, undefined, { compact: true })}</em>
     </span>
   );
+}
+
+/**
+ * Offer, and then show, the small copy of the recording.
+ *
+ * ## Why it is an offer
+ *
+ * Making a proxy takes about as long as the recording — half an hour of footage is half an
+ * hour — because capture runs at playback speed and no amount of asking makes a decoder
+ * present frames faster than a screen shows them. Work of that size, started unbidden on a
+ * phone, is both rude and the exact shape of the thing that has got a tab killed here
+ * before. So the app says what it would cost and what it would buy, and waits.
+ *
+ * ## And why it is worth offering
+ *
+ * Every seek in the editor — every scrub, every cut, every filmstrip frame — is a decode
+ * of a 4K HEVC frame out of a multi-gigabyte file, which on a phone is most of a second.
+ * That is the whole of the lag. The proxy is a twelfth of the pixels with keyframes twice
+ * as dense, and once it exists nothing has to know: the preview, the filmstrip and the
+ * analysis all read the same URL map, and only the export goes back to the original.
+ */
+function ProxyBanner({
+  session,
+  dismissed,
+  onDismiss,
+}: {
+  session: ReturnType<typeof useSession>;
+  dismissed: boolean;
+  onDismiss(): void;
+}) {
+  const { proxies, project } = session;
+  const job = proxies.job;
+
+  if (!project || !proxies.supported) return null;
+
+  if (job) {
+    /*
+      One line, because this is up for as long as the recording is and it is sitting over
+      the picture. What it has to carry is: it is working, how far it has got, and how to
+      make it stop.
+    */
+    const percent = Math.round(job.progress * 100);
+    return (
+      <div className="banner proxy running" role="status">
+        <div>
+          <strong>
+            Proxy {percent}%
+            <em>
+              {job.stage === 'finishing' ? 'writing the index' : formatBytes(job.byteLength)}
+            </em>
+          </strong>
+          <div className="proxy-bar" aria-hidden="true">
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        </div>
+        <button className="ghost small" onClick={proxies.cancel}>
+          Stop
+        </button>
+      </div>
+    );
+  }
+
+  const waiting = project.sources.filter((source) => !proxies.ready.has(source.id));
+  if (dismissed || waiting.length === 0) return null;
+
+  const longest = Math.max(...waiting.map((source) => source.duration));
+  return (
+    <div className="banner proxy" role="status">
+      <div>
+        <strong>Editing straight off the recording</strong>
+        <small>
+          Every scrub is decoding the full-size footage, which is why it stutters. A proxy —
+          a small copy, used only for editing — takes about {formatMinutes(longest)} to make,
+          once. The export still uses the original.
+        </small>
+      </div>
+      <button className="primary small" onClick={() => proxies.make(waiting[0]!.id)}>
+        Make one
+      </button>
+      <button className="ghost small" onClick={onDismiss} aria-label="Not now">
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_048_576) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1_048_576).toFixed(bytes < 104_857_600 ? 1 : 0)} MB`;
+}
+
+function formatMinutes(durationUs: number): string {
+  const minutes = Math.round(proxyEstimateMs(durationUs) / 60_000);
+  if (minutes < 1) return 'under a minute';
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 /** A clip's framing keyframes, or an empty list. */

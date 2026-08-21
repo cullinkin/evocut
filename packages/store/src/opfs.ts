@@ -1,6 +1,6 @@
 import { fingerprintFile, mediaPath } from './fingerprint.js';
 import { fingerprintFromPath, mimeOf, restoreFile } from './media-file.js';
-import type { MediaRecord, MediaStore } from './types.js';
+import type { MediaRecord, MediaSink, MediaStore } from './types.js';
 
 /**
  * Media storage backed by the origin-private file system.
@@ -103,6 +103,42 @@ export class OpfsMediaStore implements MediaStore {
   async usage(): Promise<number> {
     const records = await this.#index.list();
     return records.reduce((total, record) => total + record.sizeBytes, 0);
+  }
+
+  /**
+   * Stream bytes into a path, without ever holding the file.
+   *
+   * `createWritable` gives a random-access stream, which is what makes the one backwards
+   * write the muxer needs possible — an `mdat` whose length is not known until the last
+   * sample has gone past. See `Mp4Stream`.
+   */
+  async openWrite(path: string): Promise<MediaSink | null> {
+    const handle = await this.#fileHandle(path, true);
+    if (!handle) return null;
+
+    const writable = await handle.createWritable().catch(() => null);
+    if (!writable) return null;
+
+    let at = 0;
+    return {
+      async write(bytes) {
+        await writable.write({ type: 'write', position: at, data: bytes as unknown as BufferSource });
+        at += bytes.byteLength;
+      },
+      async patch(position, bytes) {
+        await writable.write({ type: 'write', position, data: bytes as unknown as BufferSource });
+      },
+      async close() {
+        await writable.close();
+        return at;
+      },
+      abort: async () => {
+        await writable.abort().catch(() => {});
+        // Nothing half-written is worth keeping: a truncated proxy is a file the editor
+        // would try to play.
+        await this.delete(path).catch(() => {});
+      },
+    };
   }
 
   async #root_(): Promise<FileSystemDirectoryHandle> {

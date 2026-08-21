@@ -42,6 +42,7 @@ import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } f
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
 import { setFilmstripExtraction } from './filmstrip.ts';
 import { noteInteraction } from './quiet.ts';
+import { proxyPathFor, useProxies, type Proxies } from './proxy.ts';
 import { frameUsOf, snapToFrame } from './frames.ts';
 import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
 import { beginOpen, clearOnExit, finishOpen, noteStage } from './recover.ts';
@@ -166,6 +167,11 @@ export interface Session {
   recovered: { stage: string } | null;
   /** Clear the breadcrumb and reload, to try a full open again. */
   retryOpen(): void;
+  /**
+   * The small copies of each recording — what exists, what is being made, and how to make
+   * one. The editor plays these; the export never does.
+   */
+  proxies: Proxies;
   selectedClipId: string | null;
   canUndo: boolean;
   /** Object URLs by source id. */
@@ -313,6 +319,7 @@ export function useSession(): Session {
   // would have closed over a fresh copy.
   const mediaUrlsRef = useRef(mediaUrls);
   mediaUrlsRef.current = mediaUrls;
+  const [sourceUrls, setSourceUrls] = useState<Map<string, string>>(new Map());
   const [missingMedia, setMissingMedia] = useState<MissingMedia[]>([]);
   const [recentProjects, setRecentProjects] = useState<ProjectSummary[]>([]);
   const [playhead, setPlayhead] = useState(0);
@@ -329,7 +336,20 @@ export function useSession(): Session {
 
   const loggerRef = useRef<ReturnType<typeof makeLogger> | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /*
+    Two maps, and the difference between them is the whole point of a proxy.
+
+    `urlsRef` holds the **originals**. It is what the export renders from, and it must stay
+    that way whatever the editor is showing — a proxy is a thing to work against, never a
+    thing to ship.
+
+    `mediaUrls` holds what the editor *plays*: the proxy where one exists, the original
+    where it does not. Every display consumer reads it — the preview, the filmstrip, the
+    analysis pass — so making a proxy makes all of them cheap at once, and nothing has to
+    know which it got.
+  */
   const urlsRef = useRef<Map<string, string>>(new Map());
+  const previewUrlsRef = useRef<Map<string, string>>(new Map());
   const lastScrubLogRef = useRef(0);
   /*
     One frame of the output, kept in a ref so `seek` does not have to be rebuilt — and
@@ -343,7 +363,9 @@ export function useSession(): Session {
 
   const releaseUrls = useCallback(() => {
     for (const url of urlsRef.current.values()) releaseMediaUrl(url);
+    for (const url of previewUrlsRef.current.values()) releaseMediaUrl(url);
     urlsRef.current = new Map();
+    previewUrlsRef.current = new Map();
   }, []);
 
   const refreshRecents = useCallback(async () => {
@@ -377,10 +399,32 @@ export function useSession(): Session {
       await startMediaServer();
       const bound = await bindProjectMedia(next, stores.media, { createUrl: (file, source) => mediaUrlFor(source, file).url });
       urlsRef.current = bound.urls;
-      setMediaUrls(bound.urls);
+      previewUrlsRef.current = await bindPreviews(next, bound.urls);
+      setSourceUrls(bound.urls);
+      setMediaUrls(previewUrlsRef.current);
       setMissingMedia(bound.missing);
     },
     [releaseUrls],
+  );
+
+  /**
+   * Point the editor at proxies, where there are any.
+   *
+   * Falls back per source rather than all-or-nothing: a project with two recordings and one
+   * proxy should be fast for half of itself rather than slow for all of it.
+   */
+  const bindPreviews = useCallback(
+    async (next: Project, originals: Map<string, string>): Promise<Map<string, string>> => {
+      const out = new Map(originals);
+      for (const source of next.sources) {
+        const path = proxyPathFor(source);
+        if (!path) continue;
+        const file = await stores.media.get(path).catch(() => null);
+        if (file) out.set(source.id, mediaUrlFor(source, file, { variant: 'proxy' }).url);
+      }
+      return out;
+    },
+    [],
   );
 
   const adopt = useCallback(
@@ -755,6 +799,29 @@ export function useSession(): Session {
     const timer = setTimeout(finishOpen, SETTLED_MS);
     return () => clearTimeout(timer);
   }, [status, measuring.length]);
+
+  /**
+   * The small copies, and the making of them.
+   *
+   * Fed the **originals**, because a proxy is made from the recording — and when one lands
+   * the media is rebound so the editor starts playing it without a reload.
+   */
+  const proxies = useProxies(
+    stores,
+    project,
+    sourceUrls,
+    useCallback(
+      (report: Record<string, unknown>) => {
+        record('proxy.complete', { payload: report });
+        if (project) void bind(project);
+      },
+      [bind, project, record],
+    ),
+  );
+
+  useEffect(() => {
+    if (proxies.error) record('proxy.error', { payload: { message: proxies.error } });
+  }, [proxies.error, record]);
 
   /*
     And leaving on purpose is not crashing. Without this the mechanism is a nuisance rather
@@ -1416,6 +1483,7 @@ export function useSession(): Session {
     /** Set when the previous open of this project killed the tab. Analysis is off. */
     recovered,
     retryOpen,
+    proxies,
     selectedClipId,
     canUndo: history.length > 0,
     mediaUrls,

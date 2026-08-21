@@ -60,12 +60,22 @@ export interface AudioTrackInit {
   channels: number;
 }
 
+/** A sample as the index knows it: the bytes are optional, the length never is. */
+interface IndexedSample {
+  timestampUs: number;
+  durationUs?: number | undefined;
+  key?: boolean | undefined;
+  byteLength: number;
+  /** Held only while the file is being assembled in memory; a streamed sample has none. */
+  data?: Uint8Array | undefined;
+}
+
 interface TrackState {
   id: number;
   kind: 'video' | 'audio';
   codec: string;
   timescale: number;
-  samples: Mp4Sample[];
+  samples: IndexedSample[];
   description: Uint8Array;
   width: number;
   height: number;
@@ -78,44 +88,52 @@ const MOVIE_TIMESCALE = 1000;
 /** Video runs on a microsecond timebase, so WebCodecs timestamps land exactly. */
 const VIDEO_TIMESCALE = 1_000_000;
 
+function videoTrackState(init: VideoTrackInit): Omit<TrackState, 'id' | 'samples'> {
+  if (isAvc(init.codec) && !init.description) {
+    throw new Error('An AVC track needs the avcC description from the encoder.');
+  }
+  return {
+    kind: 'video',
+    codec: init.codec,
+    timescale: VIDEO_TIMESCALE,
+    description: init.description ?? new Uint8Array(0),
+    width: init.width,
+    height: init.height,
+    sampleRate: 0,
+    channels: 0,
+  };
+}
+
+function audioTrackState(init: AudioTrackInit): Omit<TrackState, 'id' | 'samples'> {
+  if (isOpus(init.codec) && !init.description) {
+    throw new Error('An Opus track needs the OpusHead description from the encoder.');
+  }
+  return {
+    kind: 'audio',
+    codec: init.codec,
+    // The audio timebase is the sample rate, so a frame of 1024 samples has an exact
+    // integer duration. At a microsecond timebase it would not, and the rounding error
+    // would accumulate into audible drift over a few minutes.
+    timescale: init.sampleRate,
+    // AAC is the one codec whose configuration is fully derivable from the rate and
+    // channel count, so an encoder that supplies no description is not a problem.
+    description: init.description ?? audioSpecificConfig(init.sampleRate, init.channels),
+    width: 0,
+    height: 0,
+    sampleRate: init.sampleRate,
+    channels: init.channels,
+  };
+}
+
 export class Mp4Writer {
   #tracks: TrackState[] = [];
 
   addVideoTrack(init: VideoTrackInit): number {
-    if (isAvc(init.codec) && !init.description) {
-      throw new Error('An AVC track needs the avcC description from the encoder.');
-    }
-    return this.#addTrack({
-      kind: 'video',
-      codec: init.codec,
-      timescale: VIDEO_TIMESCALE,
-      description: init.description ?? new Uint8Array(0),
-      width: init.width,
-      height: init.height,
-      sampleRate: 0,
-      channels: 0,
-    });
+    return this.#addTrack(videoTrackState(init));
   }
 
   addAudioTrack(init: AudioTrackInit): number {
-    if (isOpus(init.codec) && !init.description) {
-      throw new Error('An Opus track needs the OpusHead description from the encoder.');
-    }
-    return this.#addTrack({
-      kind: 'audio',
-      codec: init.codec,
-      // The audio timebase is the sample rate, so a frame of 1024 samples has an exact
-      // integer duration. At a microsecond timebase it would not, and the rounding error
-      // would accumulate into audible drift over a few minutes.
-      timescale: init.sampleRate,
-      // AAC is the one codec whose configuration is fully derivable from the rate and
-      // channel count, so an encoder that supplies no description is not a problem.
-      description: init.description ?? audioSpecificConfig(init.sampleRate, init.channels),
-      width: 0,
-      height: 0,
-      sampleRate: init.sampleRate,
-      channels: init.channels,
-    });
+    return this.#addTrack(audioTrackState(init));
   }
 
   #addTrack(state: Omit<TrackState, 'id' | 'samples'>): number {
@@ -126,7 +144,7 @@ export class Mp4Writer {
   addSample(track: number, sample: Mp4Sample): void {
     const state = this.#tracks[track];
     if (!state) throw new Error(`No such track: ${track}`);
-    state.samples.push(sample);
+    state.samples.push({ ...sample, byteLength: sample.data.byteLength });
   }
 
   sampleCount(track: number): number {
@@ -172,7 +190,7 @@ export class Mp4Writer {
     let cursor = mediaStart;
     for (const entry of order) {
       offsets[entry.trackIndex]![entry.sampleIndex] = cursor;
-      cursor += tracks[entry.trackIndex]!.samples[entry.sampleIndex]!.data.byteLength;
+      cursor += tracks[entry.trackIndex]!.samples[entry.sampleIndex]!.byteLength;
     }
     const mediaLength = cursor - mediaStart;
     if (cursor > 0xffff_ffff) {
@@ -188,10 +206,152 @@ export class Mp4Writer {
       toPart(ftyp),
       toPart(moov),
       toPart(concat([u32(mediaLength + 8), ascii.encode('mdat')])),
-      ...order.map((entry) => toPart(tracks[entry.trackIndex]!.samples[entry.sampleIndex]!.data)),
+      ...order.map((entry) => toPart(tracks[entry.trackIndex]!.samples[entry.sampleIndex]!.data!)),
     ];
 
     return { blob: new Blob(parts, { type: 'video/mp4' }), durationUs };
+  }
+}
+
+/**
+ * Somewhere to put a file that is too big to hold.
+ *
+ * `write` appends; `patch` overwrites bytes already written, which is needed exactly once —
+ * see `Mp4Stream`.
+ */
+export interface Mp4Sink {
+  write(bytes: Uint8Array): Promise<void>;
+  patch(position: number, bytes: Uint8Array): Promise<void>;
+}
+
+/** Size of the `mdat` header this writes: a 64-bit length, so a proxy may exceed 4GB. */
+const MDAT_HEADER = 16;
+
+/**
+ * The same file, written as it is made.
+ *
+ * ## Why there are two writers
+ *
+ * `Mp4Writer` keeps every sample in memory until `finalize`, which is right for an export:
+ * a finished cut is a couple of minutes long, the bytes are wanted as a `Blob` anyway, and
+ * holding them costs less than the machinery to avoid it.
+ *
+ * A proxy is a different shape of problem. It covers the *whole recording* — twenty-seven
+ * minutes, in the session this was built for — and at a proxy's bitrate that is several
+ * hundred megabytes. Holding that on a phone, while a 4K decoder and an encoder are both
+ * running, is how a tab gets killed. So the bytes go straight to storage as they are
+ * encoded and only the index stays in memory: about forty bytes per frame, a few megabytes
+ * for half an hour.
+ *
+ * ## Layout
+ *
+ * `ftyp`, then `mdat`, then `moov` — the index last, because its size cannot be known until
+ * the last sample has been written and rewriting the whole file to make room for it would
+ * defeat the point. A player has to seek to the end to find it, which for a file read off
+ * local storage through a range server costs one request.
+ *
+ * The `mdat` header is written first with a placeholder length and patched once at the end.
+ * That is the only backwards write, and it is sixteen bytes.
+ */
+export class Mp4Stream {
+  #tracks: TrackState[] = [];
+  #offsets: number[][] = [];
+  #cursor = 0;
+  #mediaStart = 0;
+  #open = false;
+
+  private constructor(private readonly sink: Mp4Sink) {}
+
+  static async open(sink: Mp4Sink): Promise<Mp4Stream> {
+    const stream = new Mp4Stream(sink);
+    const ftyp = buildFtyp();
+    // A 64-bit `mdat`: size 1 in the 32-bit field, with the real length in the eight bytes
+    // that follow. Patched at the end, when it is known.
+    const header = concat([u32(1), ascii.encode('mdat'), u32(0), u32(0)]);
+    await sink.write(ftyp);
+    await sink.write(header);
+    stream.#mediaStart = ftyp.length + MDAT_HEADER;
+    stream.#cursor = stream.#mediaStart;
+    stream.#open = true;
+    return stream;
+  }
+
+  addVideoTrack(init: VideoTrackInit): number {
+    return this.#addTrack(videoTrackState(init));
+  }
+
+  addAudioTrack(init: AudioTrackInit): number {
+    return this.#addTrack(audioTrackState(init));
+  }
+
+  #addTrack(state: Omit<TrackState, 'id' | 'samples'>): number {
+    this.#tracks.push({ ...state, id: this.#tracks.length + 1, samples: [] });
+    this.#offsets.push([]);
+    return this.#tracks.length - 1;
+  }
+
+  /**
+   * Write one sample through to storage and remember where it landed.
+   *
+   * Interleaving is whatever order the caller writes in, rather than sorted at the end as
+   * the buffered writer does — there is nothing to sort, the bytes are already on disk. A
+   * caller that wants a player to read forward without seeking should hand over audio and
+   * video roughly in step.
+   */
+  async writeSample(track: number, sample: Mp4Sample): Promise<void> {
+    const state = this.#tracks[track];
+    if (!state || !this.#open) throw new Error(`No such track: ${track}`);
+
+    this.#offsets[track]!.push(this.#cursor);
+    state.samples.push({
+      timestampUs: sample.timestampUs,
+      durationUs: sample.durationUs,
+      key: sample.key,
+      byteLength: sample.data.byteLength,
+    });
+    await this.sink.write(sample.data);
+    this.#cursor += sample.data.byteLength;
+  }
+
+  /**
+   * Attach the codec description once the encoder has produced it.
+   *
+   * An AVC encoder hands back its `avcC` with the *first* chunk, not at configure time, and
+   * a streaming writer has to have declared the track before then. The index is not written
+   * until `finish`, so filling this in late costs nothing.
+   */
+  describeTrack(track: number, description: Uint8Array): void {
+    const state = this.#tracks[track];
+    if (state) state.description = description;
+  }
+
+  sampleCount(track: number): number {
+    return this.#tracks[track]?.samples.length ?? 0;
+  }
+
+  get byteLength(): number {
+    return this.#cursor;
+  }
+
+  /** Write the index and close the `mdat`. */
+  async finish(): Promise<{ durationUs: number; byteLength: number }> {
+    const kept = this.#tracks.filter((track) => track.samples.length > 0);
+    if (kept.length === 0) throw new Error('Nothing to write: no samples were added.');
+
+    const offsets = this.#tracks.flatMap((track, index) => (track.samples.length > 0 ? [this.#offsets[index]!] : []));
+    const timings = kept.map((track) => timeTrack(track));
+    const durationUs = Math.max(...timings.map((timing) => timing.durationUs));
+
+    const mediaLength = this.#cursor - this.#mediaStart;
+    await this.sink.patch(
+      // Past the 32-bit size and the four-character type, where the 64-bit length lives.
+      this.#mediaStart - MDAT_HEADER + 8,
+      concat([u32(Math.floor((mediaLength + MDAT_HEADER) / 0x1_0000_0000)), u32((mediaLength + MDAT_HEADER) >>> 0)]),
+    );
+    await this.sink.write(buildMoov(kept, timings, offsets, durationUs));
+
+    this.#open = false;
+    return { durationUs, byteLength: this.#cursor };
   }
 }
 
@@ -375,7 +535,7 @@ function buildStbl(track: TrackState, timing: TrackTiming, offsets: number[]): U
       'stsz',
       0,
       0,
-      u32Array([0, track.samples.length, ...track.samples.map((sample) => sample.data.byteLength)]),
+      u32Array([0, track.samples.length, ...track.samples.map((sample) => sample.byteLength)]),
     ),
     fullBox('stco', 0, 0, u32Array([offsets.length, ...offsets])),
   );

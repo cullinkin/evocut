@@ -28,4 +28,6 @@ export * from './audio.js';
 export * from './demux.js';
 export * from './decode-audio.js';
 export * from './mp4.js';
+export * from './encode.js';
+export * from './proxy.js';
 export * from './render.js';

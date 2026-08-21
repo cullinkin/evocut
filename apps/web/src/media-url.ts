@@ -74,13 +74,34 @@ export function isMediaServerActive(): boolean {
  * directory that does not record one — media is stored under its fingerprint, with no
  * extension for anything to infer from.
  */
-export function mediaUrlFor(source: Source, file: File): { url: string; kind: MediaUrlKind } {
+/**
+ * `variant: 'proxy'` serves the small copy instead of the recording.
+ *
+ * Both live under the same fingerprint, in different directories, so the name is the same
+ * and only the directory changes — which keeps the worker's allowlist to two entries and
+ * means a proxy cannot be confused with an original by anything downstream.
+ */
+export function mediaUrlFor(
+  source: Source,
+  file: File,
+  options: { variant?: 'source' | 'proxy' } = {},
+): { url: string; kind: MediaUrlKind } {
   if (source.locator.kind === 'opfs' && isMediaServerActive()) {
     const name = source.locator.path.split('/').filter(Boolean).at(-1);
     if (name) {
-      const type = file.type || 'video/mp4';
+      /*
+        A proxy is always an MP4, whatever the recording was.
+
+        It shares the recording's fingerprint, so the store hands it back wearing the
+        original's identity — `video/webm` for a WebM source, say. Chromium sniffs the
+        container and plays it anyway; **Safari does not**, and a `<video>` pointed at a
+        mistyped URL fails with a decode error. That is the same failure `restoreFile`
+        exists to prevent, arriving by a different door.
+      */
+      const type = options.variant === 'proxy' ? 'video/mp4' : file.type || 'video/mp4';
       const url = new URL(`${MEDIA_PREFIX}${encodeURIComponent(name)}`, document.baseURI);
       url.searchParams.set('type', type);
+      if (options.variant === 'proxy') url.searchParams.set('from', 'proxy');
       return { url: url.toString(), kind: 'range-server' };
     }
   }

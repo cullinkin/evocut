@@ -95,6 +95,34 @@ body {
   overflow: hidden;
 }
 
+/* The preview and whatever is floating over it. The sizing moved here from `.player` so a
+   strip can overlay the picture without taking a pixel of the column — on a phone the
+   column is the whole screen, and what a strip in flow takes is the toolbar. */
+.stage-wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 26vh;
+  min-width: 0;
+}
+
+.banners {
+  position: absolute;
+  inset: 6px 6px auto;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Only the strips themselves take taps; the picture behind them is still the picture. */
+  pointer-events: none;
+}
+
+.banners > * {
+  pointer-events: auto;
+  margin: 0;
+  backdrop-filter: blur(12px);
+}
+
 h1 {
   margin: 0;
   font-size: 18px;
@@ -195,9 +223,7 @@ button.danger {
 
 .player {
   flex: 1 1 auto;
-  /* A floor, so a tool panel can never take the picture down to a strip. Before this the
-     transform panel left 53px of preview on an iPhone. */
-  min-height: 26vh;
+  min-width: 0;
   background: #000;
   border-radius: 12px;
   overflow: hidden;
@@ -713,10 +739,9 @@ footer button {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 0 12px 8px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: rgba(255, 176, 74, 0.12);
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(52, 38, 18, 0.86);
   border: 1px solid rgba(255, 176, 74, 0.4);
   flex: 0 0 auto;
 }
@@ -741,6 +766,70 @@ footer button {
 .banner.recovered button {
   margin-left: auto;
   flex: 0 0 auto;
+}
+
+/* The proxy offer, and its progress. Blue rather than amber: nothing is wrong, there is
+   simply something worth doing. */
+.banner.proxy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(20, 26, 52, 0.86);
+  border: 1px solid rgba(108, 140, 255, 0.35);
+  flex: 0 0 auto;
+}
+
+.banner.proxy div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.banner.proxy strong {
+  font-size: 13px;
+}
+
+.banner.proxy small {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.banner.proxy button {
+  flex: 0 0 auto;
+}
+
+/* Running, it is one line and a hairline: it is up for as long as the recording is. */
+.banner.proxy.running strong {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.banner.proxy.running em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.proxy-bar {
+  height: 3px;
+  margin-top: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.proxy-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
 }
 
 .relink,

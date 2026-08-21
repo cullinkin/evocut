@@ -5,6 +5,7 @@ import { mimeOf, restoreFile } from './media-file.js';
 import type {
   DerivedCache,
   MediaRecord,
+  MediaSink,
   MediaStore,
   ProjectStore,
   ProjectSummary,
@@ -72,6 +73,36 @@ export class MemoryMediaStore implements MediaStore {
 
   async usage(): Promise<number> {
     return [...this.#records.values()].reduce((total, record) => total + record.sizeBytes, 0);
+  }
+
+  /** Buffered, because a test's files are small and the point here is the interface. */
+  async openWrite(path: string): Promise<MediaSink> {
+    let bytes = new Uint8Array(0);
+    const grow = (size: number) => {
+      if (size <= bytes.length) return;
+      const next = new Uint8Array(size);
+      next.set(bytes);
+      bytes = next;
+    };
+    const files = this.#files;
+    return {
+      async write(part) {
+        const at = bytes.length;
+        grow(at + part.byteLength);
+        bytes.set(part, at);
+      },
+      async patch(position, part) {
+        grow(position + part.byteLength);
+        bytes.set(part, position);
+      },
+      async close() {
+        files.set(path, new File([bytes as unknown as BlobPart], path, { type: 'video/mp4' }));
+        return bytes.length;
+      },
+      async abort() {
+        bytes = new Uint8Array(0);
+      },
+    };
   }
 }
 

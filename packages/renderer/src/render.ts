@@ -14,6 +14,21 @@ import {
   isAudioDecodeSupported,
 } from './decode-audio.js';
 import { readAudioTrack } from './demux.js';
+import {
+  FRAME_TIMEOUT_MS,
+  SEEK_TIMEOUT_MS,
+  MAX_ENCODE_QUEUE,
+  bitrateFor,
+  chunkToSample,
+  even,
+  nextPresentedFrame,
+  onceEvent,
+  pickVideoCodec,
+  seekTo,
+  throwIfAborted,
+  tick,
+  toBytes,
+} from './encode.js';
 import { Mp4Writer, type Mp4Sample } from './mp4.js';
 import { planDecode, sampleClip, type DecodeSegment } from './sample.js';
 
@@ -108,23 +123,18 @@ export interface Renderer {
 }
 
 /**
- * Codecs to try, best first.
+ * Sound codecs to try, best first. The picture's ladder lives in `encode.ts`, with the
+ * rest of what both the export and the proxy need.
  *
- * AVC and AAC lead because the export's destination is an iPhone's camera roll, and that
- * is what it accepts. VP9 and Opus follow so that a browser without the licensed pair
- * still produces a file — including the Chromium the export's own end-to-end check runs
- * in, which is the only way any of this gets exercised outside a phone.
+ * AAC leads because the export's destination is an iPhone's camera roll, and that is what
+ * it accepts. Opus follows so that a browser without the licensed pair still produces a
+ * file — including the Chromium the export's own end-to-end check runs in, which is the
+ * only way any of this gets exercised outside a phone.
  */
-const VIDEO_CODECS = ['avc1', 'vp09.00.41.08', 'vp09.00.10.08'] as const;
 const AUDIO_CODECS = ['mp4a.40.2', 'opus'] as const;
 
 /** Keyframe interval. Two seconds is the usual compromise between size and seekability. */
 const KEYFRAME_SECONDS = 2;
-/** How many frames may be in flight before capture waits for the encoder. */
-const MAX_ENCODE_QUEUE = 8;
-const SEEK_TIMEOUT_MS = 5000;
-/** A presented frame should arrive within a frame or two; this is generous by design. */
-const FRAME_TIMEOUT_MS = 2000;
 
 export function isRenderSupported(): boolean {
   return (
@@ -606,21 +616,6 @@ async function decodeClipAudio(
   return decoded;
 }
 
-async function pickVideoCodec(out: FrameSize): Promise<string | null> {
-  for (const candidate of VIDEO_CODECS) {
-    const codec = candidate === 'avc1' ? avcCodecString(out) : candidate;
-    const config: VideoEncoderConfig = {
-      codec,
-      width: out.width,
-      height: out.height,
-      bitrate: bitrateFor(out),
-      ...(codec.startsWith('avc') ? { avc: { format: 'avc' as const } } : {}),
-    };
-    const supported = await VideoEncoder.isConfigSupported(config).catch(() => null);
-    if (supported?.supported) return codec;
-  }
-  return null;
-}
 
 async function pickAudioCodec(sampleRate: number, channels: number): Promise<string | null> {
   for (const codec of AUDIO_CODECS) {
@@ -635,24 +630,7 @@ async function pickAudioCodec(sampleRate: number, channels: number): Promise<str
   return null;
 }
 
-/**
- * Constrained baseline AVC at a level that covers the output size.
- *
- * Constrained baseline (`42E0…`) rather than main or high, because it forbids B-frames —
- * and this project's muxer writes no `ctts` table, so a stream whose presentation order
- * differed from its decode order would play back with its frames shuffled. Declaring too
- * low a level is the other way to get a file a decoder refuses, hence the size ladder.
- */
-function avcCodecString(out: FrameSize): string {
-  const pixels = out.width * out.height;
-  const level = pixels <= 921_600 ? 0x1f : pixels <= 2_073_600 ? 0x29 : pixels <= 8_912_896 ? 0x33 : 0x3e;
-  return `avc1.42E0${level.toString(16).toUpperCase().padStart(2, '0')}`;
-}
 
-/** Roughly 0.1 bits per pixel per frame at 30fps, floored at something watchable. */
-function bitrateFor(out: FrameSize): number {
-  return Math.max(2_000_000, Math.round(out.width * out.height * 0.1 * 30));
-}
 
 function outputSize(timeline: Timeline, maxDimension: number): FrameSize {
   const { width, height } = timeline.resolution;
@@ -663,97 +641,13 @@ function outputSize(timeline: Timeline, maxDimension: number): FrameSize {
   return { width: even(width * scale), height: even(height * scale) };
 }
 
-function even(value: number): number {
-  return Math.max(2, Math.round(value / 2) * 2);
-}
 
-/** The next presented frame's position in the source, in seconds. Null if none arrived. */
-function nextPresentedFrame(video: HTMLVideoElement, timeoutMs: number): Promise<number | null> {
-  const request = video.requestVideoFrameCallback?.bind(video);
-  if (!request) return Promise.resolve(null);
 
-  return new Promise((resolve) => {
-    let settled = false;
-    const handle = request((_now, metadata) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(metadata.mediaTime);
-    });
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      video.cancelVideoFrameCallback?.(handle);
-      resolve(null);
-    }, timeoutMs);
-  });
-}
 
-async function seekTo(video: HTMLVideoElement, sourceUs: number): Promise<void> {
-  const target = Math.max(0, microsToSeconds(sourceUs));
-  if (Math.abs(video.currentTime - target) < 1e-4) return;
-  video.currentTime = target;
-  await onceEvent(video, 'seeked', SEEK_TIMEOUT_MS).catch(() => {
-    // A seek that never reports back is not fatal: the next frame drawn is simply
-    // whatever the element is showing, and the output frame still lands on the grid.
-  });
-}
 
-function onceEvent(target: HTMLVideoElement, event: string, timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const done = () => {
-      cleanup();
-      resolve();
-    };
-    const failed = () => {
-      cleanup();
-      reject(new Error(`The video reported an error while waiting for ${event}.`));
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Timed out waiting for ${event}.`));
-    }, timeoutMs);
-    const cleanup = () => {
-      clearTimeout(timer);
-      target.removeEventListener(event, done);
-      target.removeEventListener('error', failed);
-    };
 
-    target.addEventListener(event, done, { once: true });
-    target.addEventListener('error', failed, { once: true });
-  });
-}
 
-/** Yield to the event loop so the encoder can drain and the UI can paint. */
-function tick(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 4));
-}
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  const error = new Error('The export was cancelled.');
-  error.name = 'AbortError';
-  throw error;
-}
-
-function chunkToSample(chunk: EncodedVideoChunk | EncodedAudioChunk): Mp4Sample {
-  const data = new Uint8Array(chunk.byteLength);
-  chunk.copyTo(data);
-  return {
-    data,
-    timestampUs: chunk.timestamp,
-    ...(chunk.duration === null ? {} : { durationUs: chunk.duration }),
-    key: chunk.type === 'key',
-  };
-}
-
-/** A private copy of a codec description: the encoder may reuse the buffer it handed us. */
-function toBytes(source: AllowSharedBufferSource): Uint8Array {
-  const view = ArrayBuffer.isView(source)
-    ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
-    : new Uint8Array(source);
-  return new Uint8Array(view);
-}
 
 /** Clips grouped by the source they decode from, for callers planning their own passes. */
 export function sourcesInTimeline(timeline: Timeline): string[] {

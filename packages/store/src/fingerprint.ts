@@ -45,3 +45,13 @@ export async function fingerprintFile(file: Blob): Promise<MediaFingerprint> {
 export function mediaPath(fingerprint: MediaFingerprint): string {
   return `media/${fingerprint}`;
 }
+
+/**
+ * Where the small copy of it lives.
+ *
+ * Beside the original rather than derived from it, so deleting a recording takes its proxy
+ * with it and a proxy can be thrown away on its own when storage runs short.
+ */
+export function proxyPath(fingerprint: MediaFingerprint): string {
+  return `proxy/${fingerprint}`;
+}

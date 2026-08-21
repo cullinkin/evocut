@@ -21,6 +21,25 @@ export interface MediaRecord {
   importedAt: string;
 }
 
+/**
+ * Somewhere to put a file that is too big to hold in memory.
+ *
+ * The proxy is the reason this exists: it covers a whole recording, which for the session
+ * this was built for is twenty-seven minutes and several hundred megabytes. Assembling
+ * that as a `Blob` on a phone, while a decoder and an encoder are both running, is how a
+ * tab gets killed.
+ */
+export interface MediaSink {
+  /** Append. */
+  write(bytes: Uint8Array): Promise<void>;
+  /** Overwrite bytes already written. Needed once, to close a box whose length was unknown. */
+  patch(position: number, bytes: Uint8Array): Promise<void>;
+  /** Commit, and say how big it came out. */
+  close(): Promise<number>;
+  /** Give up, leaving nothing behind. */
+  abort(): Promise<void>;
+}
+
 export interface MediaStore {
   /**
    * Copy a picked file into storage, or return the existing record if its fingerprint is
@@ -34,6 +53,14 @@ export interface MediaStore {
   list(): Promise<MediaRecord[]>;
   /** Total bytes held, for the storage screen. */
   usage(): Promise<number>;
+  /**
+   * Stream bytes into a stored path.
+   *
+   * Null where the backend cannot do it — the IndexedDB fallback holds blobs whole, and a
+   * proxy is exactly the thing that must not be held whole, so there it is better to have
+   * no proxy than a crash.
+   */
+  openWrite(path: string): Promise<MediaSink | null>;
 }
 
 export interface ProjectSummary {

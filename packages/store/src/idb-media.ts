@@ -80,6 +80,17 @@ export class IdbMediaStore implements MediaStore {
     return this.#index.list();
   }
 
+  /**
+   * Declines.
+   *
+   * This backend keeps blobs whole, and a proxy is precisely the thing that must not be
+   * held whole. No proxy is a slower editor; a proxy assembled in memory on a device
+   * without OPFS is a dead tab.
+   */
+  async openWrite(): Promise<null> {
+    return null;
+  }
+
   async usage(): Promise<number> {
     return (await this.#index.list()).reduce((total, record) => total + record.sizeBytes, 0);
   }
