@@ -104,8 +104,19 @@ export function useProxies(
         // look for, and stamping a stage for work that is not happening overwrites the
         // breadcrumb of the open that actually died.
         noteStage('measure:proxies');
-        const path = proxyPathFor(source);
-        if (path && (await stores.media.has(path).catch(() => false))) found.add(source.id);
+        if (await finishedProxy(source, stores.media)) {
+          found.add(source.id);
+          continue;
+        }
+        /*
+          A proxy file with no marker beside it is what a killed tab leaves behind: written
+          as far as it got, indexed not at all, unplayable. It cannot be used and it is
+          holding storage, so it goes.
+        */
+        const paths = pathsFor(source);
+        if (paths && (await stores.media.has(paths.proxy).catch(() => false))) {
+          await stores.media.delete(paths.proxy).catch(() => {});
+        }
       }
       if (live) setReady(found);
     })();
@@ -162,6 +173,8 @@ export function useProxies(
             width: result.width,
             height: result.height,
             framesEncoded: result.framesEncoded,
+            framesSkipped: result.framesSkipped,
+            from: result.from,
             bytes,
             videoCodec: result.videoCodec,
             audio: result.audio,

@@ -461,6 +461,7 @@ export function App() {
         selectedClipId={session.selectedClipId}
         draftKeys={framing}
         signals={session.signals}
+        pictures={session.pictures}
         previews={previews}
         accepted={review?.accepted ?? []}
         onSeek={session.seek}

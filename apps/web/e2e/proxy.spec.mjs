@@ -1,4 +1,5 @@
-import { APP_URL, ensureClip, exportEdl, exportLog, launch, makeReport, scrubTo } from './harness.mjs';
+import { writeFileSync } from 'node:fs';
+import { APP_URL, artifact, ensureClip, exportEdl, exportLog, launch, makeReport, scrubTo } from './harness.mjs';
 
 /**
  * The small copy, and what is allowed to use it.
@@ -77,6 +78,44 @@ check('theProxySeeks', decoded.seekable, true);
 check('andHasAFrameDecodedThere', decoded.readyState >= 2, true);
 check('andLandedWhereItWasPut', decoded.at > 5, true);
 
+// --- And the motion line, which the proxy's index makes possible --------------------------
+/**
+ * Per-frame movement, drawn over the sound.
+ *
+ * Asked for after a session spent framing a knife going into a box seal: "While the audio
+ * is good, it isn't perfect for making these keyframe decisions. I really need to key off
+ * of motion." The numbers are the encoded size of each frame — an inter-coded frame is
+ * already a description of what changed since the last one — read out of the container's
+ * index without decoding anything.
+ *
+ * The fixture is a WebM, whose index cannot be read at all. The proxy's can: it is an MP4
+ * this app wrote, constant frame rate, one keyframe a second. So making a proxy is what
+ * gives a WebM a motion line, and this is the check that it does.
+ */
+await page.waitForFunction(
+  () => {
+    const canvas = document.querySelector('canvas.wave-lane');
+    if (!canvas?.width) return false;
+    const hex = getComputedStyle(document.documentElement).getPropertyValue('--motion-ink').trim();
+    const want = [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+    const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+    for (let at = 0; at < data.length; at += 4) {
+      if (
+        data[at + 3] > 0 &&
+        Math.abs(data[at] - want[0]) < 40 &&
+        Math.abs(data[at + 1] - want[1]) < 40 &&
+        Math.abs(data[at + 2] - want[2]) < 40
+      ) {
+        return true;
+      }
+    }
+    return false;
+  },
+  null,
+  { timeout: 60_000 },
+);
+check('theLaneDrawsTheMotion', true, true);
+
 // --- The edit is unchanged ---------------------------------------------------------------
 const after = await exportEdl(page, 'proxy-after.json');
 // A proxy is not an edit. The EDL still points at the recording, at the same duration, so
@@ -114,6 +153,70 @@ check(
   exported?.resolution,
   `${before.timeline.resolution.width}x${before.timeline.resolution.height}`,
 );
+
+// --- The fast way, on a container this can read ------------------------------------------
+/**
+ * Fed straight to a `VideoDecoder`, a proxy is made several times faster than the recording
+ * is long — because a media element presents frames when a screen would show them, and a
+ * decoder does not wait for anything.
+ *
+ * The fixture is a WebM, which cannot be demuxed here, so the run above took the slow path.
+ * The *proxy* it produced is an MP4 this app wrote — so re-importing it and making a proxy
+ * of that exercises the fast path, and proves in passing that what we write is a file our
+ * own demuxer and the platform's decoder both accept.
+ */
+const proxyFile = artifact('proxy-of-proxy-input.mp4');
+writeFileSync(
+  proxyFile,
+  Buffer.from(
+    await page.evaluate(async (url) => {
+      const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary);
+    }, liveUrl),
+    'base64',
+  ),
+);
+
+const second = await browser.newContext({ acceptDownloads: true });
+const fast = await second.newPage();
+const fastErrors = [];
+fast.on('pageerror', (error) => fastErrors.push(String(error)));
+
+await fast.goto(APP_URL);
+await fast.locator('text=Choose a video').waitFor();
+await fast.setInputFiles('input[type=file]', proxyFile);
+await fast.locator('.clip-block').first().waitFor({ timeout: 30000 });
+
+const secondBanner = fast.locator('.banner.proxy');
+await secondBanner.waitFor({ timeout: 20000 });
+set('offerForADecodableFile', await secondBanner.innerText());
+
+const startedAt = Date.now();
+await fast.locator('.banner.proxy button:has-text("Make one")').click();
+await fast.waitForFunction(() => !document.querySelector('.banner.proxy'), null, { timeout: 180_000 });
+const tookMs = Date.now() - startedAt;
+await fast.waitForTimeout(1000);
+
+const fastMade = (await exportLog(fast, 'proxy-fast-log.jsonl')).events
+  .filter((event) => event.type === 'proxy.complete')
+  .at(-1)?.payload;
+set('fastProxy', { ...fastMade, tookMs, recordingMs: Math.round(before.sources[0].duration / 1000) });
+
+check('itWentThroughTheDecoder', fastMade?.from, 'decoder');
+// Every frame of the input, and none of them placed at a time it could not hold. A decoder
+// hands over what the file contains, where a media element hands over what a screen had
+// time to show.
+check('andGotEveryFrameOfIt', fastMade?.framesEncoded, made?.framesEncoded);
+check('andPlacedThemAll', fastMade?.framesSkipped, 0);
+/*
+  The point of the exercise. Playing the recording takes at least as long as the recording;
+  this has to be plainly faster than that, or the decoder path is not earning its keep.
+*/
+check('andBeatPlayingItThrough', tookMs < Math.round(before.sources[0].duration / 1000), true);
+
+errors.push(...fastErrors);
 
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();

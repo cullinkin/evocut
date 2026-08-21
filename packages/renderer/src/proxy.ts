@@ -1,6 +1,12 @@
 import { microsToSeconds, secondsToMicros } from '@evocut/edl';
 import type { FrameSize } from './compose.js';
-import { readAudioTrack, type AudioSampleRef, type SourceAudioTrack } from './demux.js';
+import {
+  readAudioTrack,
+  readVideoTrack,
+  type AudioSampleRef,
+  type SourceAudioTrack,
+  type SourceVideoTrack,
+} from './demux.js';
 import {
   FRAME_TIMEOUT_MS,
   MAX_ENCODE_QUEUE,
@@ -14,7 +20,7 @@ import {
   tick,
   toBytes,
 } from './encode.js';
-import { Mp4Stream, type Mp4Sink } from './mp4.js';
+import { Mp4Stream, type Mp4Sample, type Mp4Sink } from './mp4.js';
 
 /**
  * A small copy of a recording, to edit against.
@@ -80,10 +86,27 @@ export interface ProxyResult {
   width: number;
   height: number;
   framesEncoded: number;
+  /**
+   * Pictures the decoder produced that could not be placed.
+   *
+   * A frame whose presentation time is not after the last one's is not a frame of the
+   * recording — a repeat the element presented twice, or a sample table that disagrees with
+   * itself. Counted rather than silently dropped, because "the proxy is short" and "the
+   * proxy is wrong" look identical from outside and want different fixes.
+   */
+  framesSkipped: number;
   byteLength: number;
   videoCodec: string;
   /** `copied` when the original's audio was passed through untouched. */
   audio: 'copied' | 'none';
+  /**
+   * Which way the frames arrived.
+   *
+   * Worth recording, because it is the difference between a proxy that takes five minutes
+   * and one that takes thirty, and it is decided by what the container and the browser
+   * turn out to support rather than by anything visible from here.
+   */
+  from: 'decoder' | 'playback';
   warnings: string[];
 }
 
@@ -112,13 +135,29 @@ const BITRATE_SHARE = 0.5;
 /** Audio frames read from the original in one go, rather than one slice per frame. */
 const AUDIO_BATCH = 256;
 
+/** Picture frames read in one slice. Larger than the audio's: the frames are much bigger. */
+const SAMPLE_BATCH = 64;
+
+/**
+ * How far the decoder may run ahead.
+ *
+ * Both bounds are about memory rather than speed. A decoded 4K frame is several megabytes,
+ * and a decoder given a whole file and no backpressure will happily produce a hundred of
+ * them — which on a phone is the tab.
+ */
+const MAX_DECODE_QUEUE = 8;
+const MAX_HELD_FRAMES = 4;
+
 export function isProxySupported(): boolean {
   return (
     typeof globalThis.VideoEncoder === 'function' &&
     typeof globalThis.VideoFrame === 'function' &&
     typeof globalThis.OffscreenCanvas !== 'undefined' &&
     typeof HTMLVideoElement !== 'undefined' &&
-    typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function'
+    // Only the fallback needs a frame callback, but a browser without one and without
+    // `VideoDecoder` has no way to make a proxy at all, and offering is worse than not.
+    (typeof globalThis.VideoDecoder === 'function' ||
+      typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function')
   );
 }
 
@@ -127,16 +166,31 @@ export async function renderProxy(
   onProgress?: (progress: ProxyProgress) => void,
 ): Promise<ProxyResult> {
   const warnings: string[] = [];
-  const report = (stage: ProxyProgress['stage'], progress: number, frames: number, bytes: number) =>
-    onProgress?.({ stage, progress, framesEncoded: frames, byteLength: bytes });
+  let framesEncoded = 0;
+  let framesSkipped = 0;
+  let bytesWritten = 0;
+  const report = (stage: ProxyProgress['stage'], progress: number) =>
+    onProgress?.({ stage, progress, framesEncoded, byteLength: bytesWritten });
 
-  report('preparing', 0, 0, 0);
+  report('preparing', 0);
   throwIfAborted(request.signal);
 
-  const video = await openVideo(request.url);
+  /*
+    Which way the frames will come.
+
+    Straight out of a `VideoDecoder` where the container can be read and the codec is
+    supported, because that runs as fast as the hardware allows rather than at the speed a
+    screen would show the picture — several times quicker on a phone, which for a
+    half-hour recording is the difference between five minutes and thirty. A `<video>`
+    element is the fallback, and it is what WebM and anything else unindexable gets.
+  */
+  const decodable = await openDecodable(request.file);
+  const video = decodable ? null : await openVideo(request.url);
+
   try {
-    const durationUs = secondsToMicros(video.duration);
-    const out = proxySize(video, request.maxDimension ?? PROXY_MAX_DIMENSION);
+    const durationUs = decodable ? decodable.track.durationUs : secondsToMicros(video!.duration);
+    const display = decodable ? displaySize(decodable.track) : { width: video!.videoWidth, height: video!.videoHeight };
+    const out = fitWithin(display, request.maxDimension ?? PROXY_MAX_DIMENSION);
 
     const codec = await pickVideoCodec(out);
     if (!codec) throw new Error('This browser will not encode video, so it cannot make a proxy.');
@@ -165,7 +219,7 @@ export async function renderProxy(
 
     let described = false;
     let encodeError: Error | null = null;
-    const pending: Array<{ sample: ReturnType<typeof chunkToSample> }> = [];
+    const pending: Mp4Sample[] = [];
 
     const encoder = new VideoEncoder({
       output: (chunk, metadata) => {
@@ -174,7 +228,7 @@ export async function renderProxy(
           file.describeTrack(videoTrack, toBytes(description));
           described = true;
         }
-        pending.push({ sample: chunkToSample(chunk) });
+        pending.push(chunkToSample(chunk));
       },
       error: (error) => {
         encodeError = error;
@@ -190,49 +244,39 @@ export async function renderProxy(
     });
 
     const sound = audio ? new AudioCopier(request.file, audio) : null;
-    let framesEncoded = 0;
     let lastAt = -1;
     let keyAt = -Infinity;
 
     /** Drain whatever the encoder has finished, and the sound that belongs beside it. */
-    const flush = async (upToUs: number): Promise<void> => {
+    const drain = async (upToUs: number): Promise<void> => {
       while (pending.length > 0) {
-        const next = pending.shift()!;
-        await file.writeSample(videoTrack, next.sample);
+        await file.writeSample(videoTrack, pending.shift()!);
         framesEncoded += 1;
       }
       if (sound && audioTrack !== null) {
-        for (const frame of await sound.upTo(upToUs)) {
-          await file.writeSample(audioTrack, frame);
-        }
+        for (const frame of await sound.upTo(upToUs)) await file.writeSample(audioTrack, frame);
       }
+      bytesWritten = file.byteLength;
     };
 
-    video.playbackRate = 1;
-    video.muted = true;
-    await video.play().catch(() => {
-      warnings.push('The browser would not start playback, so the proxy may be short.');
-    });
-
-    report('encoding', 0, 0, 0);
-
-    for (;;) {
-      throwIfAborted(request.signal);
-      if (encodeError) throw encodeError;
-
-      const presented = await nextPresentedFrame(video, FRAME_TIMEOUT_MS);
-      if (presented === null) break;
-
-      const at = secondsToMicros(presented);
-      // An encoder requires timestamps that only go forward. A repeat means the element
-      // presented the same picture twice, which is not a frame of the recording.
+    /**
+     * One picture becomes one frame of the proxy.
+     *
+     * Both strategies come through here, so the rotation, the keyframe rhythm and the
+     * "timestamps only go forward" rule are stated once and cannot drift apart.
+     */
+    const emit = async (source: CanvasImageSource, at: number): Promise<boolean> => {
       if (at <= lastAt) {
-        if (video.ended) break;
-        continue;
+        framesSkipped += 1;
+        return false;
       }
       lastAt = at;
 
-      ctx.drawImage(video, 0, 0, out.width, out.height);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (decodable) applyRotation(ctx, decodable.track.rotation, out);
+      const sideways = decodable ? decodable.track.rotation % 180 !== 0 : false;
+      ctx.drawImage(source, 0, 0, sideways ? out.height : out.width, sideways ? out.width : out.height);
+
       const key = at - keyAt >= KEYFRAME_SECONDS * 1_000_000;
       if (key) keyAt = at;
 
@@ -242,54 +286,253 @@ export async function renderProxy(
       } finally {
         frame.close();
       }
+      await drain(at);
+      report('encoding', durationUs > 0 ? Math.min(1, at / durationUs) : 0);
+      return true;
+    };
 
-      await flush(at);
-      report('encoding', durationUs > 0 ? Math.min(1, at / durationUs) : 0, framesEncoded, file.byteLength);
-
-      /*
-        Backpressure, and it is not optional. Without it a phone builds a queue of frames it
-        has no memory for — the same failure the export hit, and the reason both pause the
-        element rather than merely waiting.
-      */
-      if (encoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
-        video.pause();
-        while (encoder.encodeQueueSize > MAX_ENCODE_QUEUE / 2) {
-          throwIfAborted(request.signal);
-          await tick();
-        }
-        await video.play().catch(() => {});
-      }
-
-      if (video.ended) break;
+    report('encoding', 0);
+    if (decodable) {
+      await pumpByDecoding(decodable, request, emit, () => encodeError);
+    } else {
+      await pumpByPlayback(video!, request, emit, () => encodeError, warnings);
     }
 
-    video.pause();
-    report('finishing', 1, framesEncoded, file.byteLength);
-
+    report('finishing', 1);
     await encoder.flush();
     if (encodeError) throw encodeError;
     encoder.close();
-    await flush(Number.MAX_SAFE_INTEGER);
+    await drain(Number.MAX_SAFE_INTEGER);
 
     const done = await file.finish();
-    report('done', 1, framesEncoded, done.byteLength);
+    bytesWritten = done.byteLength;
+    report('done', 1);
 
     return {
       durationUs: done.durationUs,
       width: out.width,
       height: out.height,
       framesEncoded,
+      framesSkipped,
       byteLength: done.byteLength,
       videoCodec: codec,
       audio: audioTrack === null ? 'none' : 'copied',
+      from: decodable ? 'decoder' : 'playback',
       warnings,
     };
   } finally {
-    video.pause();
-    video.removeAttribute('src');
-    video.load();
-    video.remove();
+    decodable?.decoder.close();
+    if (video) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+      video.remove();
+    }
   }
+}
+
+interface Decodable {
+  track: SourceVideoTrack;
+  decoder: VideoDecoder;
+  frames: VideoFrame[];
+  failure: Error | null;
+}
+
+/**
+ * A decoder configured for this recording, or null to fall back to playing it.
+ *
+ * Null covers a great deal of ordinary reality — WebM, a fragmented MP4, a codec this
+ * browser will not decode through WebCodecs even though it will play it — and none of it
+ * is an error. The slow path still works; it is only slow.
+ */
+async function openDecodable(file: Blob): Promise<Decodable | null> {
+  const ready = await decoderFor(file);
+  if (!ready) return null;
+
+  const { track, config } = ready;
+  const state: Decodable = { track, decoder: null as unknown as VideoDecoder, frames: [], failure: null };
+  state.decoder = new VideoDecoder({
+    output: (frame) => state.frames.push(frame),
+    error: (error) => {
+      state.failure = error;
+    },
+  });
+  try {
+    state.decoder.configure(config);
+  } catch {
+    state.decoder.close();
+    return null;
+  }
+  return state;
+}
+
+/**
+ * Whether this recording can be read and decoded without playing it.
+ *
+ * Shared, so the estimate a person is shown before they commit to waiting is produced by
+ * exactly the check that will decide what happens.
+ */
+async function decoderFor(
+  file: Blob,
+): Promise<{ track: SourceVideoTrack; config: VideoDecoderConfig } | null> {
+  const track = await readVideoTrack(file).catch(() => null);
+  if (!track) return null;
+  const config = decoderConfig(track);
+  return config && (await canDecode(track)) ? { track, config } : null;
+}
+
+function decoderConfig(track: SourceVideoTrack): VideoDecoderConfig | null {
+  if (typeof VideoDecoder !== 'function' || track.count === 0) return null;
+  return {
+    codec: track.codec,
+    codedWidth: track.codedWidth,
+    codedHeight: track.codedHeight,
+    ...(track.description ? { description: track.description as unknown as BufferSource } : {}),
+    optimizeForLatency: false,
+  };
+}
+
+/**
+ * Whether this recording could be decoded without playing it.
+ *
+ * Takes a track rather than a file, so the answer can be had from an index that has already
+ * been read. Reading it twice is what a phone cannot afford — see `SourceVideoTrack`.
+ */
+export async function canDecode(track: SourceVideoTrack): Promise<boolean> {
+  const config = decoderConfig(track);
+  if (!config) return false;
+  const supported = await VideoDecoder.isConfigSupported(config).catch(() => null);
+  return Boolean(supported?.supported);
+}
+
+/**
+ * Feed the decoder the file, as fast as it will take it.
+ *
+ * The two queues are what keep this inside a phone's memory: the decoder is not allowed to
+ * run far ahead of the encoder, and decoded frames — which at 4K are megabytes each — are
+ * drawn and closed the moment they arrive rather than piling up.
+ */
+async function pumpByDecoding(
+  state: Decodable,
+  request: ProxyRequest,
+  emit: (source: CanvasImageSource, at: number) => Promise<boolean>,
+  encodeError: () => Error | null,
+): Promise<void> {
+  const { track, decoder } = state;
+
+  const take = async (): Promise<void> => {
+    while (state.frames.length > 0) {
+      const frame = state.frames.shift()!;
+      try {
+        await emit(frame, frame.timestamp);
+      } finally {
+        frame.close();
+      }
+    }
+  };
+
+  for (let first = 0; first < track.count; first += SAMPLE_BATCH) {
+    throwIfAborted(request.signal);
+    const error = encodeError() ?? state.failure;
+    if (error) throw error;
+
+    // One read for a run of frames. They are laid down in order, so the run is contiguous
+    // and this is a single slice rather than sixty-four.
+    const last = Math.min(track.count, first + SAMPLE_BATCH);
+    let from = Infinity;
+    let to = 0;
+    for (let index = first; index < last; index += 1) {
+      from = Math.min(from, track.offsets[index]!);
+      to = Math.max(to, track.offsets[index]! + track.sizes[index]!);
+    }
+    const bytes = new Uint8Array(await request.file.slice(from, to).arrayBuffer());
+
+    for (let index = first; index < last; index += 1) {
+      const at = track.offsets[index]! - from;
+      decoder.decode(
+        new EncodedVideoChunk({
+          type: track.keys[index] ? 'key' : 'delta',
+          timestamp: track.timesUs[index]!,
+          duration: track.durationsUs[index]!,
+          data: bytes.subarray(at, at + track.sizes[index]!),
+        }),
+      );
+
+      await take();
+      while (decoder.decodeQueueSize > MAX_DECODE_QUEUE || state.frames.length > MAX_HELD_FRAMES) {
+        throwIfAborted(request.signal);
+        await tick();
+        await take();
+      }
+    }
+  }
+
+  await decoder.flush();
+  await take();
+  if (state.failure) throw state.failure;
+}
+
+/**
+ * Play the recording and take whatever the element presents.
+ *
+ * The old way, kept for everything the decoder path cannot open. It runs at playback speed
+ * by construction — presentation is locked to the display — and a frame the element skips
+ * is a frame the proxy does not have, which is why timestamps come from the picture rather
+ * than from a counter.
+ */
+async function pumpByPlayback(
+  video: HTMLVideoElement,
+  request: ProxyRequest,
+  emit: (source: CanvasImageSource, at: number) => Promise<boolean>,
+  encodeError: () => Error | null,
+  warnings: string[],
+): Promise<void> {
+  video.playbackRate = 1;
+  video.muted = true;
+  await video.play().catch(() => {
+    warnings.push('The browser would not start playback, so the proxy may be short.');
+  });
+
+  for (;;) {
+    throwIfAborted(request.signal);
+    const error = encodeError();
+    if (error) throw error;
+
+    const presented = await nextPresentedFrame(video, FRAME_TIMEOUT_MS);
+    if (presented === null) break;
+
+    await emit(video, secondsToMicros(presented));
+    if (video.ended) break;
+  }
+
+  video.pause();
+}
+
+/** Turn the canvas so the picture comes out the way up the recording is meant to be seen. */
+function applyRotation(ctx: OffscreenCanvasRenderingContext2D, rotation: number, out: FrameSize): void {
+  if (rotation === 90) {
+    ctx.translate(out.width, 0);
+    ctx.rotate(Math.PI / 2);
+  } else if (rotation === 180) {
+    ctx.translate(out.width, out.height);
+    ctx.rotate(Math.PI);
+  } else if (rotation === 270) {
+    ctx.translate(0, out.height);
+    ctx.rotate(-Math.PI / 2);
+  }
+}
+
+/** The size the recording is meant to be seen at, which is not the size it is stored at. */
+export function displaySize(track: SourceVideoTrack): FrameSize {
+  return track.rotation % 180 === 0
+    ? { width: track.codedWidth, height: track.codedHeight }
+    : { width: track.codedHeight, height: track.codedWidth };
+}
+
+function fitWithin(size: FrameSize, maxDimension: number): FrameSize {
+  const longest = Math.max(size.width, size.height);
+  const scale = longest > maxDimension ? maxDimension / longest : 1;
+  return { width: even(size.width * scale), height: even(size.height * scale) };
 }
 
 /**
@@ -354,15 +597,20 @@ async function openVideo(url: string): Promise<HTMLVideoElement> {
   return video;
 }
 
-function proxySize(video: HTMLVideoElement, maxDimension: number): FrameSize {
-  const width = video.videoWidth || 1920;
-  const height = video.videoHeight || 1080;
-  const longest = Math.max(width, height);
-  const scale = longest > maxDimension ? maxDimension / longest : 1;
-  return { width: even(width * scale), height: even(height * scale) };
-}
+/**
+ * Roughly how long a proxy will take.
+ *
+ * Two answers, because there are two ways to make one. Fed through a decoder it runs at
+ * whatever the hardware manages — call it four times real time, which is conservative for a
+ * phone; played through a media element it runs at exactly real time, because presentation
+ * is locked to the display.
+ *
+ * Deliberately pessimistic. "About ten minutes" that turns out to be six is a good
+ * surprise; the other way round is someone waiting on a progress bar that lied to them.
+ */
+export const DECODER_SPEEDUP = 4;
 
-/** How long a proxy will take, roughly: the recording's own length, because capture plays it. */
-export function proxyEstimateMs(durationUs: number): number {
-  return Math.round(microsToSeconds(durationUs) * 1000);
+export function proxyEstimateMs(durationUs: number, from: 'decoder' | 'playback' = 'playback'): number {
+  const seconds = microsToSeconds(durationUs);
+  return Math.round((seconds * 1000) / (from === 'decoder' ? DECODER_SPEEDUP : 1));
 }
