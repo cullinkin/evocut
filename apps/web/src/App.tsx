@@ -367,6 +367,32 @@ export function App() {
         />
       )}
 
+      {/*
+        The last open of this project killed the tab.
+
+        Said plainly, and with the way back on it. A phone can end a process for using too
+        much memory with no warning and nothing to catch, and the work that risks it here
+        is the analysis — so this session skips it and stays up. Everything that matters is
+        still reachable: the edit, the log, and the EDL.
+      */}
+      {session.recovered && (
+        <div className="banner recovered" role="status">
+          <div>
+            <strong>Opened without analysis</strong>
+            <small>
+              Last time this project was opened the tab stopped, {session.recovered.stage === 'measure'
+                ? 'while measuring the footage'
+                : `during ${session.recovered.stage}`}
+              . The waveform and the suggestions are off for this session; editing, export and the
+              log all work.
+            </small>
+          </div>
+          <button className="ghost small" onClick={session.retryOpen}>
+            Try again
+          </button>
+        </div>
+      )}
+
       {session.missingMedia.length > 0 && (
         <RelinkPrompt
           missing={session.missingMedia}

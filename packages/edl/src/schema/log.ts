@@ -29,6 +29,11 @@ export const LOG_EVENT_TYPES = [
   // because "the video plays but will not seek" is invisible from the EDL alone, and it
   // is the difference between an editor and a video player.
   'media.diagnostics',
+  // The previous open of this project never finished — the tab was killed doing it, and
+  // this row says how far it had got. There is no other trace of a crash on a phone: no
+  // stack, no console, and a log that could not be exported because the app would not
+  // stay up long enough to export it.
+  'app.recovered',
   // What the analysis pass measured, and how long it took. The cost of measuring a
   // recording is a property of the phone doing it, and cannot be observed anywhere else.
   'signals.compute',

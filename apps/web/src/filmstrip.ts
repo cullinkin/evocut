@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { whenQuiet } from './quiet.ts';
 import { lumaFromRgba } from '@evocut/signals';
 
 /**
@@ -34,35 +35,35 @@ export interface Filmstrip {
   frames: Frame[];
   /** Ordered by time. Sampled far more finely than the thumbnails; see below. */
   luma: LumaSample[];
-  /** The thumbnails are complete. */
+  /** The thumbnails are complete — and with them, the luma this strip will ever have. */
   ready: boolean;
-  /** The motion sampling is complete too — it runs on after the strip is usable. */
-  motionReady: boolean;
   /** Aspect ratio of the extracted frames, for laying out the strip. */
   aspect: number;
 }
 
-const EMPTY: Filmstrip = { frames: [], luma: [], ready: false, motionReady: false, aspect: 9 / 16 };
+const EMPTY: Filmstrip = { frames: [], luma: [], ready: false, aspect: 9 / 16 };
 
 /** Cap on thumbnails per source: enough to read a take at a glance, cheap on a phone. */
 const MAX_FRAMES = 80;
 const MIN_INTERVAL_US = 1_000_000;
 
-/**
- * Motion is sampled on its own schedule, and far more finely than the strip.
- *
- * These used to be one number, and that quietly broke the motion signal on anything long.
- * Eighty frames across a 27-minute recording is one sample every twenty seconds, and at
- * that spacing "this shot is static" is not a measurement — two frames twenty seconds
- * apart are unrelated pictures. The signals pass duly reported four still regions for the
- * whole take and the refinement pass had nothing to work with.
- *
- * Thumbnails are a display budget: eighty is what fits under a thumb. Motion is a
- * measurement budget: it wants the shortest interval a phone can afford to seek to, which
- * is what makes 600 samples at no less than half a second a different number from 80.
- */
-const MAX_LUMA_SAMPLES = 600;
-const MIN_LUMA_INTERVAL_US = 500_000;
+/*
+  Motion no longer has a sampling budget here, and the frames this pass takes are the only
+  ones it gets.
+
+  It used to have one: six hundred extra seeks, on the reasoning that eighty frames across
+  a 27-minute recording is one every twenty seconds and two frames that far apart are
+  unrelated pictures. The reasoning was right and the remedy was wrong. Six hundred seeks
+  through a multi-gigabyte HEVC file, each followed by a main-thread `drawImage` of a 4K
+  frame, is minutes of stolen main thread — measured off a screen recording of a real
+  session as whole seconds where the interface did not move at all.
+
+  So the budget is gone and the luma of the thumbnails — which this pass takes anyway — is
+  all the motion signal gets. That is coarser than it was, and it is the right trade: the
+  signal answers "is this shot locked off" for a model deciding whether to suggest a push-in,
+  and no answer to that is worth minutes of a frozen editor. A finer measurement is coming
+  from the container's own index, which costs no seeks at all.
+*/
 /**
  * Frames are captured well above their display size.
  *
@@ -100,6 +101,20 @@ interface Extraction {
 
 const cache = new Map<string, Extraction>();
 
+/*
+  Whether the strip may be extracted at all.
+
+  Off in recovery — see `recover.ts`. Extraction opens a third `<video>` on a
+  multi-gigabyte recording and seeks it eighty times, which is exactly the sort of work
+  that gets a tab killed on a phone, and a session that is trying to survive should not be
+  spending its allowance on decoration.
+*/
+let extracting = true;
+
+export function setFilmstripExtraction(on: boolean): void {
+  extracting = on;
+}
+
 /**
  * Extract a source's filmstrip, once.
  *
@@ -108,10 +123,10 @@ const cache = new Map<string, Extraction>();
  * Progress is pushed to listeners as frames arrive: a timeline with half a filmstrip is
  * useful, one that blocks until all of it is ready is not.
  *
- * Two passes over one open `<video>`. The first takes the thumbnails, and the strip is
- * announced ready at the end of it, because that is the pass someone is waiting on. The
- * second fills in the motion samples between them — seven times as many seeks, all of them
- * after the editor is already usable, and nothing on screen depends on them finishing.
+ * One pass over one open `<video>`, waiting for a gap in what the user is doing before
+ * each seek. There used to be a second pass taking seven times as many samples for the
+ * motion signal; the container's own sample table answers that question per frame and for
+ * free, and the pass was costing whole seconds of frozen interface. See `quiet.ts`.
  */
 export function loadFilmstrip(
   sourceId: string,
@@ -119,6 +134,11 @@ export function loadFilmstrip(
   durationUs: number,
   onProgress?: (strip: Filmstrip) => void,
 ): Promise<Filmstrip> {
+  if (!extracting) {
+    onProgress?.(EMPTY);
+    return Promise.resolve(EMPTY);
+  }
+
   let entry = cache.get(sourceId);
 
   if (!entry) {
@@ -130,14 +150,12 @@ export function loadFilmstrip(
       created.strip = strip;
       for (const listener of created.listeners) listener(strip);
     };
-    const snapshot = (aspect: number, ready: boolean, motionReady: boolean): Filmstrip => ({
+    const snapshot = (aspect: number, ready: boolean): Filmstrip => ({
       frames: [...frames],
-      // Sorted on the way out rather than on the way in: the second pass fills the gaps
-      // the first one left, so the arrival order is not time order, and `analyzeMotion`
-      // differences consecutive entries.
+      // Sorted on the way out rather than on the way in: a seek that fails leaves a gap,
+      // and `analyzeMotion` differences consecutive entries.
       luma: [...luma].sort((a, b) => a.t - b.t),
       ready,
-      motionReady,
       aspect,
     });
 
@@ -145,25 +163,21 @@ export function loadFilmstrip(
       onFrame(frame, sample, aspect) {
         frames.push(frame);
         luma.push(sample);
-        publish(snapshot(aspect, false, false));
+        publish(snapshot(aspect, false));
       },
       onThumbnailsDone(aspect) {
-        publish(snapshot(aspect, true, false));
-      },
-      onLuma(sample, aspect) {
-        luma.push(sample);
-        publish(snapshot(aspect, true, false));
+        publish(snapshot(aspect, true));
       },
     })
       .then((aspect) => {
-        const strip = snapshot(aspect, true, true);
+        const strip = snapshot(aspect, true);
         publish(strip);
         return strip;
       })
       .catch(() => {
         // A strip that stops early is still useful; a thrown error would take the editor
         // down over decorative pixels. Whatever arrived is what there is.
-        const strip = { ...created.strip, ready: true, motionReady: true };
+        const strip = { ...created.strip, ready: true };
         publish(strip);
         return strip;
       });
@@ -323,27 +337,14 @@ export function frameNear(strip: Filmstrip, sourceTimeUs: number, withinUs: numb
 interface ExtractHandlers {
   onFrame(frame: Frame, sample: LumaSample, aspect: number): void;
   onThumbnailsDone(aspect: number): void;
-  onLuma(sample: LumaSample, aspect: number): void;
 }
 
 /** The times to seek to, split into the pass that is watched and the pass that is not. */
-export function planExtraction(durationUs: number): { thumbnails: number[]; luma: number[] } {
+export function planExtraction(durationUs: number): { thumbnails: number[] } {
   const thumbnailInterval = Math.max(MIN_INTERVAL_US, Math.ceil(durationUs / MAX_FRAMES));
-  const lumaInterval = Math.min(
-    thumbnailInterval,
-    Math.max(MIN_LUMA_INTERVAL_US, Math.ceil(durationUs / MAX_LUMA_SAMPLES)),
-  );
-
   const thumbnails: number[] = [];
   for (let t = 0; t < durationUs; t += thumbnailInterval) thumbnails.push(t);
-
-  // Only the times the first pass will not already have visited. Seeking twice to the
-  // same frame would cost as much as the seek that produced it.
-  const taken = new Set(thumbnails);
-  const luma: number[] = [];
-  for (let t = 0; t < durationUs; t += lumaInterval) if (!taken.has(t)) luma.push(t);
-
-  return { thumbnails, luma };
+  return { thumbnails };
 }
 
 async function extractFrames(
@@ -408,17 +409,15 @@ async function extractFrames(
 
     for (const t of plan.thumbnails) {
       if (consecutive >= MAX_CONSECUTIVE_FAILURES) break;
+      // Between frames, not during one: a seek and the draw that follows it are a few
+      // hundred milliseconds of main thread on a phone, and taking them while someone is
+      // scrubbing is what made the whole interface stop. See `quiet.ts`.
+      await whenQuiet();
       if (!(await seek(t))) continue;
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       handlers.onFrame({ t, url: canvas.toDataURL('image/jpeg', 0.6) }, sampleLuma(t), aspect);
     }
     handlers.onThumbnailsDone(aspect);
-
-    // From here on nothing on screen is waiting.
-    for (const t of plan.luma) {
-      if (consecutive >= MAX_CONSECUTIVE_FAILURES) break;
-      if (await seek(t)) handlers.onLuma(sampleLuma(t), aspect);
-    }
 
     return aspect;
   } finally {

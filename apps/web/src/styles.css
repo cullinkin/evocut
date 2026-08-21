@@ -707,6 +707,42 @@ footer button {
   border: 1px solid var(--line);
 }
 
+/* The tab did not survive the last open. Amber rather than red: nothing is broken, the
+   session is simply doing less — and the way back is on the strip. */
+.banner.recovered {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 12px 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 176, 74, 0.12);
+  border: 1px solid rgba(255, 176, 74, 0.4);
+  flex: 0 0 auto;
+}
+
+.banner.recovered div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.banner.recovered strong {
+  font-size: 13px;
+}
+
+.banner.recovered small {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.banner.recovered button {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
 .relink,
 .warning {
   padding: 12px;

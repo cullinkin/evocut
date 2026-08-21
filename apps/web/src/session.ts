@@ -40,8 +40,11 @@ import {
 import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
+import { setFilmstripExtraction } from './filmstrip.ts';
+import { noteInteraction } from './quiet.ts';
 import { frameUsOf, snapToFrame } from './frames.ts';
 import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
+import { beginOpen, clearOnExit, finishOpen, noteStage } from './recover.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
 import { EMPTY_SETTINGS, useSettings, type RefinementSettings } from './settings.ts';
 
@@ -72,6 +75,16 @@ const SAVE_DEBOUNCE_MS = 400;
  * around that signal, not more of it. The final position of every drag is always logged.
  */
 const SCRUB_LOG_INTERVAL_MS = 250;
+
+/**
+ * How long an editor has to stay up, with nothing left to measure, before the open counts
+ * as having succeeded.
+ *
+ * Not the first frame. What kills a tab on a phone happens a minute into an open — an
+ * audio pass working through half an hour of AAC while three decoders are live — so
+ * "it rendered" is not evidence of anything.
+ */
+const SETTLED_MS = 30_000;
 
 /** How many steps back the editor can go. */
 const HISTORY_LIMIT = 50;
@@ -143,6 +156,16 @@ export interface Session {
   status: SessionStatus;
   persistent: boolean;
   project: Project | null;
+  /**
+   * Set when the previous open of this project ended with the tab being killed.
+   *
+   * Carries the stage it died at, and turns the analysis off for this session — see
+   * `recover.ts`. The editor is otherwise entirely usable, which is the point: the edit,
+   * the log and the EDL all have to remain reachable after a crash.
+   */
+  recovered: { stage: string } | null;
+  /** Clear the breadcrumb and reload, to try a full open again. */
+  retryOpen(): void;
   selectedClipId: string | null;
   canUndo: boolean;
   /** Object URLs by source id. */
@@ -272,6 +295,19 @@ export interface Session {
 export function useSession(): Session {
   const [status, setStatus] = useState<SessionStatus>('loading');
   const [project, setProject] = useState<Project | null>(null);
+  /*
+    Whether the last attempt to open this project ended with the tab being killed.
+
+    A phone editor cannot assume it will be allowed to finish opening: a multi-gigabyte
+    recording, two `<video>` elements holding hardware decoders, a third extracting
+    thumbnails and an audio pass decoding half an hour of AAC all sit inside an allowance
+    iOS ends the process for exceeding — with no warning and nothing to catch. Reported
+    exactly that way, and because opening is what killed it, every reload killed it again.
+
+    So: a breadcrumb, and an open that skips the analysis when it finds one. See
+    `recover.ts`.
+  */
+  const [recovered, setRecovered] = useState<{ stage: string } | null>(null);
   const [mediaUrls, setMediaUrls] = useState<Map<string, string>>(new Map());
   // Read from inside the refinement's async body, which starts before the render that
   // would have closed over a fresh copy.
@@ -358,16 +394,31 @@ export function useSession(): Session {
         (existingEvents.at(-1)?.seq ?? -1) + 1,
       );
 
+      /*
+        Before anything expensive. If the last open of this project never reached the end
+        of its analysis, the process was killed doing it — so this one does not try again,
+        and says where the last one got to. That line is the whole point: a crash on a
+        phone leaves no stack, no console and no exportable log, and "it died measuring"
+        is the difference between a guess and a fix.
+      */
+      const failed = beginOpen(next.id);
+      setRecovered(failed ? { stage: failed.stage } : null);
+
       setProject(next);
       setEvents(existingEvents);
       setPlayhead(0);
       setSelectedClipId(null);
       setHistory([]);
+      if (failed) {
+        record('app.recovered', { payload: { diedAt: failed.stage, sinceMs: Date.now() - failed.at } });
+      }
+      noteStage('media');
       await bind(next);
       await stores.projects.setLastOpened(next.id);
+      noteStage('measure');
       setStatus('ready');
     },
-    [bind],
+    [bind, record],
   );
 
   // Reopen whatever the user was last working on.
@@ -616,6 +667,10 @@ export function useSession(): Session {
       */
       const target = final ? snapToFrame(Math.max(0, to), frameUsRef.current) : Math.max(0, to);
       writePlayhead(target);
+      // Everything that moves the playhead comes through here, which makes this the one
+      // place that knows the user is busy. Background work reads it and stands aside; see
+      // `quiet.ts` for what that was costing.
+      noteInteraction();
 
       const now = Date.now();
       const due = now - lastScrubLogRef.current >= SCRUB_LOG_INTERVAL_MS;
@@ -626,6 +681,19 @@ export function useSession(): Session {
     },
     [record],
   );
+
+  /**
+   * Come out of recovery and open normally again.
+   *
+   * The breadcrumb has to be cleared *before* the reload, or the next open finds this
+   * session's own and recovers again — which is the correct default (nothing has yet
+   * proved this project can be opened) and the wrong answer to someone asking for another
+   * go at it.
+   */
+  const retryOpen = useCallback(() => {
+    finishOpen();
+    window.location.reload();
+  }, []);
 
   const select = useCallback((clipId: string | null) => setSelectedClipId(clipId), []);
 
@@ -659,12 +727,41 @@ export function useSession(): Session {
   );
   const settingsRef = useRef<RefinementSettings>(EMPTY_SETTINGS);
 
+  /*
+    Nothing is measured in recovery. The analysis is where the allowance goes — an audio
+    decode of the whole recording, and a filmstrip pass that opens a third decoder — so a
+    session that is only trying to stay up long enough to be useful does without it.
+  */
   const { signals, pending: measuring, progress: measuringProgress } = useSourceSignals(
     stores,
-    project,
+    recovered ? null : project,
     mediaUrls,
     onSignals,
   );
+
+  useEffect(() => {
+    setFilmstripExtraction(!recovered);
+  }, [recovered]);
+
+  /**
+   * The dangerous part is over: forget the breadcrumb.
+   *
+   * "Over" is the analysis having finished and the editor having stayed up for a while
+   * afterwards — not merely having rendered, because the thing that kills the tab happens
+   * a minute into an open rather than at the first frame of it.
+   */
+  useEffect(() => {
+    if (status !== 'ready' || measuring.length > 0) return;
+    const timer = setTimeout(finishOpen, SETTLED_MS);
+    return () => clearTimeout(timer);
+  }, [status, measuring.length]);
+
+  /*
+    And leaving on purpose is not crashing. Without this the mechanism is a nuisance rather
+    than a safety net: a reload ten seconds into an open — for any of the ordinary reasons
+    people reload — would look exactly like a tab that had been killed.
+  */
+  useEffect(clearOnExit, []);
   const settingsState = useSettings(stores);
   const { settings } = settingsState;
   settingsRef.current = settings;
@@ -1316,6 +1413,9 @@ export function useSession(): Session {
     status,
     persistent: stores.persistent,
     project,
+    /** Set when the previous open of this project killed the tab. Analysis is off. */
+    recovered,
+    retryOpen,
     selectedClipId,
     canUndo: history.length > 0,
     mediaUrls,
