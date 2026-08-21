@@ -126,83 +126,6 @@ export function scaleDb(db: number, peakDb: number, medianDb: number): number {
   return Math.min(1, (db - floor) / Math.max(1, peakDb - floor));
 }
 
-/**
- * The picture's movement, drawn over the sound.
- *
- * ## Why it is here and not in its own lane
- *
- * Asked for outright, after a session spent framing a knife going into a box seal: "While
- * the audio is good, it isn't perfect for making these keyframe decisions. I really need to
- * key off of motion." The sound tells you a seal *tore*; it does not tell you which frame
- * the blade first moved.
- *
- * It shares the lane rather than taking height from the picture, because the two are read
- * together — a hit you can hear and a movement you can see are the same event, and putting
- * them one above the other makes you check twice. The sound is a filled envelope; this is a
- * line over it.
- *
- * ## What the numbers are
- *
- * The encoded size of each frame, straight from the container's index — see
- * `analyzePicture`. An inter-coded frame is a description of what changed since the last
- * one, so its length is a measure of how much moved.
- */
-export interface MotionSource {
-  /** Spacing between weights, in microseconds: one frame of the recording. */
-  hopUs: number;
-  /** Encoded bytes per hop, keyframes already bridged. */
-  weight: number[];
-  peakBytes: number;
-  medianBytes: number;
-}
-
-/**
- * How much busier than typical a frame has to be to reach the top of the lane.
- *
- * Taken from the recording, and bounded at both ends. Below `MIN_GAIN` there is nothing to
- * show — a take whose busiest frame costs less than four times its ordinary one never moved,
- * and opening the scale up would draw compression noise as a mountain range. Above
- * `MAX_GAIN` a single enormous frame — a cut to a different scene, a flash — would press
- * everything else flat.
- */
-const MIN_GAIN = 4;
-const MAX_GAIN = 300;
-
-/**
- * Encoded bytes to 0..1, against this recording's own typical frame.
- *
- * Two anchors: the typical frame sits at `MEDIAN_AT`, and one `gain` times busier reaches
- * the top. Log spaced, for the same reason decibels are — a hand crossing frame costs a
- * hundred times a locked-off shot, and drawn linearly everything but the peak is a flat
- * line.
- */
-export function scaleWeight(bytes: number, peakBytes: number, medianBytes: number): number {
-  const median = Math.max(1, medianBytes);
-  const gain = Math.min(MAX_GAIN, Math.max(MIN_GAIN, Math.max(2, peakBytes) / median));
-  const above = Math.log(Math.max(1, bytes) / median) / Math.log(gain);
-  return Math.max(0, Math.min(1, MEDIAN_AT + (1 - MEDIAN_AT) * above));
-}
-
-/** 0..1 for the busiest frame between two source times. Zero where there is nothing. */
-export function weightBetween(motion: MotionSource, fromUs: number, toUs: number): number {
-  const { hopUs, weight } = motion;
-  if (hopUs <= 0 || weight.length === 0) return 0;
-
-  const first = Math.max(0, Math.floor(Math.min(fromUs, toUs) / hopUs));
-  if (first >= weight.length) return 0;
-  // Half-open, and never narrower than one hop — the same rule, and the same reason, as
-  // the level envelope above.
-  const end = Math.max(first, Math.ceil(Math.max(fromUs, toUs) / hopUs) - 1);
-  const last = Math.min(weight.length - 1, end);
-
-  let busiest = 0;
-  for (let index = first; index <= last; index += 1) {
-    const bytes = weight[index]!;
-    if (bytes > busiest) busiest = bytes;
-  }
-  return scaleWeight(busiest, motion.peakBytes, motion.medianBytes);
-}
-
 /** The clip covering an output time, or null in a gap or past the end. */
 export function clipAt(clips: WaveClip[], outputUs: number): WaveClip | null {
   for (const clip of clips) {
@@ -231,44 +154,15 @@ export interface WaveRequest {
  * will do to it, so the drawing and the file agree.
  */
 export function waveColumns({ clips, audio, fromUs, usPerColumn, columns }: WaveRequest): Float32Array {
-  return columnsOver({ clips, fromUs, usPerColumn, columns }, (sourceId, from, to) => {
-    const source = audio.get(sourceId);
-    return source ? levelBetween(source, from, to) : 0;
-  });
-}
-
-export interface MotionRequest extends Omit<WaveRequest, 'audio'> {
-  /** Weight curves by source id. A container whose index could not be read is absent. */
-  motion: Map<string, MotionSource>;
-}
-
-/** The same walk, for the picture. */
-export function motionColumns({ clips, motion, fromUs, usPerColumn, columns }: MotionRequest): Float32Array {
-  return columnsOver({ clips, fromUs, usPerColumn, columns }, (sourceId, from, to) => {
-    const source = motion.get(sourceId);
-    return source ? weightBetween(source, from, to) : 0;
-  });
-}
-
-/**
- * Output time in, source time out, one column at a time.
- *
- * A cursor rather than a search. Columns run left to right, so the clip under one is never
- * before the clip under the last — and `clipAt` starting from the beginning every time made
- * this O(columns x clips), which on a fifty-clip edit repainted every frame is forty
- * thousand iterations a frame for a picture four hundred pixels wide.
- *
- * A clip played at 2x covers twice as much of the recording per column, and whatever is
- * drawn for it has to compress to match — which is what the export will do to it, so the
- * drawing and the file agree.
- */
-function columnsOver(
-  { clips, fromUs, usPerColumn, columns }: Omit<WaveRequest, 'audio'>,
-  sample: (sourceId: string, fromSourceUs: number, toSourceUs: number) => number,
-): Float32Array {
   const out = new Float32Array(Math.max(0, columns));
   if (usPerColumn <= 0) return out;
 
+  /*
+    A cursor rather than a search. Columns run left to right, so the clip under one is never
+    before the clip under the last — and `clipAt` starting from the beginning every time
+    made this O(columns x clips), which on a fifty-clip edit repainted every frame is forty
+    thousand iterations a frame for a picture four hundred pixels wide.
+  */
   let index = 0;
   for (let column = 0; column < out.length; column += 1) {
     const at = fromUs + column * usPerColumn;
@@ -278,10 +172,13 @@ function columnsOver(
     const clip = clips[index];
     if (!clip || !clip.enabled || at < clip.start) continue;
 
+    const source = audio.get(clip.sourceId);
+    if (!source) continue;
+
     const into = (at - clip.start) * clip.speed;
     const from = clip.sourceIn + into;
     const to = Math.min(clip.sourceOut, from + usPerColumn * clip.speed);
-    out[column] = sample(clip.sourceId, from, to);
+    out[column] = levelBetween(source, from, to);
   }
   return out;
 }

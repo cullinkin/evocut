@@ -1,4 +1,3 @@
-import type { PictureSignals } from './picture.js';
 /**
  * What the footage sounds and looks like.
  *
@@ -33,17 +32,13 @@ import type { PictureSignals } from './picture.js';
  * sampled on its own schedule rather than the filmstrip's, which on a long take is the
  * difference between a sample every twenty seconds and one every three.
  *
- * 5: the picture's movement is read per frame out of the container's sample table rather
- * than from a handful of decoded frames — which is both finer by three orders of magnitude
- * and the removal of six hundred seeks per source, the ones that were freezing the editor.
- *
  * 3: onsets are rate-capped to the sharpest few a minute, so twenty-seven minutes of talking
  * yields hits rather than three and a half thousand syllables; and a slow seek no longer
  * aborts the motion pass, which had been silently returning nothing on real footage. Both
  * of those went wrong on a cached result that looked perfectly valid, which is the case
  * this number exists for.
  */
-export const SIGNALS_VERSION = 5;
+export const SIGNALS_VERSION = 4;
 
 /** A transient: something struck, said hard, or landed. In source microseconds. */
 export interface Onset {
@@ -91,13 +86,6 @@ export interface SourceSignals {
   audio: AudioSignals | null;
   /** Null when no frames were available to compare. */
   motion: MotionSignals | null;
-  /**
-   * Per-frame movement, read from the container index. Null for anything not an MP4.
-   *
-   * Kept alongside `motion` rather than replacing it: they answer different questions at
-   * different resolutions, and only this one is fine enough to aim a keyframe with.
-   */
-  picture?: PictureSignals | null;
   computedAt: string;
 }
 

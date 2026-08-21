@@ -5,11 +5,7 @@ import {
   displayFloor,
   levelBetween,
   scaleDb,
-  motionColumns,
-  scaleWeight,
   waveColumns,
-  weightBetween,
-  type MotionSource,
   type WaveClip,
   type WaveSource,
 } from '../src/waveform.ts';
@@ -189,86 +185,5 @@ describe('finding the clip under a moment', () => {
     expect(clipAt(clips, 0)).toBe(clips[0]);
     expect(clipAt(clips, 1_999_999)).toBe(clips[0]);
     expect(clipAt(clips, 2_000_000)).toBe(clips[1]);
-  });
-});
-
-/**
- * The picture, over the sound.
- *
- * Asked for after a session spent framing a knife going into a box seal: "While the audio is
- * good, it isn't perfect for making these keyframe decisions. I really need to key off of
- * motion." The numbers are the encoded size of each frame, which is a description of what
- * changed since the last one — see `analyzePicture`. What has to be right here is the same
- * thing as for the sound: the mapping, and a scale that makes an ordinary recording legible.
- */
-describe('the motion line', () => {
-  /** Bytes per frame at 30fps: still, then a movement, then still again. */
-  function movement(): MotionSource {
-    const weight = [
-      ...new Array(30).fill(40),
-      ...new Array(30).fill(4000),
-      ...new Array(30).fill(40),
-    ];
-    return { hopUs: 33_333, weight, peakBytes: 4000, medianBytes: 40 };
-  }
-
-  it('reads a busy frame as busy and a held one as nothing', () => {
-    const source = movement();
-    // A held frame is the recording's own typical one, so it draws where "ordinary" goes
-    // — low, and continuous, rather than a broken line with gaps for stillness.
-    expect(weightBetween(source, 0, 100_000)).toBeCloseTo(0.25, 1);
-    expect(weightBetween(source, 1_100_000, 1_200_000)).toBeGreaterThan(0.8);
-  });
-
-  it('takes the busiest frame in a column, not the average', () => {
-    /*
-      Peak-per-column, for the same reason the loudness is: at a zoom where one column is a
-      second of footage, averaging turns a four-frame movement into the stillness around
-      it — and a four-frame movement is exactly what someone is looking for.
-    */
-    const source = movement();
-    const wide = weightBetween(source, 0, 3_000_000);
-    expect(wide).toBeGreaterThan(0.8);
-  });
-
-  it('scales on a log, so an ordinary recording is not a flat line', () => {
-    // A hand crossing frame costs a hundred times a locked-off shot. Drawn linearly,
-    // everything but the peak is nothing.
-    const middle = scaleWeight(400, 4000, 40);
-    expect(middle).toBeGreaterThan(0.3);
-    expect(middle).toBeLessThan(0.8);
-    expect(scaleWeight(4000, 4000, 40)).toBe(1);
-    expect(scaleWeight(40, 4000, 40)).toBeCloseTo(0.25, 1);
-  });
-
-  it('refuses to stretch compression noise into a mountain range', () => {
-    // A recording that never moves still has a median and a peak, a few percent apart.
-    // Opening the scale all the way up would draw that as shape.
-    expect(scaleWeight(1030, 1050, 1000)).toBeLessThan(0.4);
-  });
-
-  it('follows a trimmed, retimed clip into the recording', () => {
-    const source = movement();
-    const clips = [clip({ start: 0, sourceIn: 1_000_000, sourceOut: 2_000_000 })];
-    const columns = motionColumns({
-      clips,
-      motion: new Map([['src', source]]),
-      fromUs: 0,
-      usPerColumn: 100_000,
-      columns: 10,
-    });
-    // The clip starts a second into the recording, which is where the movement is.
-    expect(columns[0]!).toBeGreaterThan(0.8);
-  });
-
-  it('draws nothing for a source whose container could not be read', () => {
-    const columns = motionColumns({
-      clips: [clip({ start: 0, sourceIn: 0, sourceOut: 1_000_000 })],
-      motion: new Map(),
-      fromUs: 0,
-      usPerColumn: 100_000,
-      columns: 5,
-    });
-    expect([...columns]).toEqual([0, 0, 0, 0, 0]);
   });
 });
