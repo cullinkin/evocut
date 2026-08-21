@@ -14,4 +14,5 @@
 export * from './types.js';
 export * from './audio.js';
 export * from './motion.js';
+export * from './picture.js';
 export * from './summarize.js';

@@ -20,7 +20,6 @@ import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { SuggestionSheet } from './Suggestion.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
-import { proxyEstimateMs } from '@evocut/renderer';
 import { frameUsOf } from './frames.ts';
 import { usePlayhead } from './playhead.ts';
 import { downloadLog, downloadProject, useSession, type RefineProgress } from './session.ts';
@@ -459,6 +458,7 @@ export function App() {
         selectedClipId={session.selectedClipId}
         draftKeys={framing}
         signals={session.signals}
+        pictures={session.pictures}
         previews={previews}
         accepted={review?.accepted ?? []}
         onSeek={session.seek}
@@ -820,14 +820,14 @@ function ProxyBanner({
   const waiting = project.sources.filter((source) => !proxies.ready.has(source.id));
   if (dismissed || waiting.length === 0) return null;
 
-  const longest = Math.max(...waiting.map((source) => source.duration));
+  const slowest = Math.max(...waiting.map((source) => proxies.estimateMs.get(source.id) ?? 0));
   return (
     <div className="banner proxy" role="status">
       <div>
         <strong>Editing straight off the recording</strong>
         <small>
           Every scrub is decoding the full-size footage, which is why it stutters. A proxy —
-          a small copy, used only for editing — takes about {formatMinutes(longest)} to make,
+          a small copy, used only for editing — takes about {formatMinutes(slowest)} to make,
           once. The export still uses the original.
         </small>
       </div>
@@ -846,8 +846,8 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1_048_576).toFixed(bytes < 104_857_600 ? 1 : 0)} MB`;
 }
 
-function formatMinutes(durationUs: number): string {
-  const minutes = Math.round(proxyEstimateMs(durationUs) / 60_000);
+function formatMinutes(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
   if (minutes < 1) return 'under a minute';
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }

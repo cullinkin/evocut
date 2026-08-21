@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project, Source } from '@evocut/edl';
-import { PROXY_MAX_DIMENSION, isProxySupported, renderProxy, type ProxyProgress } from '@evocut/renderer';
+import {
+  PROXY_MAX_DIMENSION,
+  isProxySupported,
+  proxyEstimateMs,
+  proxyStrategy,
+  renderProxy,
+  type ProxyProgress,
+} from '@evocut/renderer';
 import { proxyPath, type AppStores } from '@evocut/store';
 
 /**
@@ -33,6 +40,15 @@ export interface Proxies {
   supported: boolean;
   /** Sources that already have a proxy on disk. */
   ready: Set<string>;
+  /**
+   * Roughly how long each source would take, in milliseconds.
+   *
+   * Measured against what will actually happen — whether the container can be read and its
+   * codec decoded without playing it — because the difference between the two routes is
+   * five minutes and half an hour, and a person deciding whether to wait deserves the real
+   * number.
+   */
+  estimateMs: Map<string, number>;
   /** The one being made, if any. */
   job: ProxyJob | null;
   error: string | null;
@@ -55,6 +71,7 @@ export function useProxies(
   onDone: (report: Record<string, unknown>) => void,
 ): Proxies {
   const [ready, setReady] = useState<Set<string>>(new Set());
+  const [estimateMs, setEstimateMs] = useState<Map<string, number>>(new Map());
   const [job, setJob] = useState<ProxyJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -72,11 +89,21 @@ export function useProxies(
     let live = true;
     void (async () => {
       const found = new Set<string>();
+      const estimates = new Map<string, number>();
       for (const source of sources) {
         const path = proxyPathFor(source);
-        if (path && (await stores.media.has(path).catch(() => false))) found.add(source.id);
+        if (path && (await stores.media.has(path).catch(() => false))) {
+          found.add(source.id);
+          continue;
+        }
+        if (source.locator.kind !== 'opfs') continue;
+        const file = await stores.media.get(source.locator.path).catch(() => null);
+        const from = file ? await proxyStrategy(file).catch(() => 'playback' as const) : 'playback';
+        estimates.set(source.id, proxyEstimateMs(source.duration, from));
       }
-      if (live) setReady(found);
+      if (!live) return;
+      setReady(found);
+      setEstimateMs(estimates);
     })();
     return () => {
       live = false;
@@ -128,6 +155,8 @@ export function useProxies(
             width: result.width,
             height: result.height,
             framesEncoded: result.framesEncoded,
+            framesSkipped: result.framesSkipped,
+            from: result.from,
             bytes,
             videoCodec: result.videoCodec,
             audio: result.audio,
@@ -150,5 +179,5 @@ export function useProxies(
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  return { supported: isProxySupported(), ready, job, error, make, cancel };
+  return { supported: isProxySupported(), ready, estimateMs, job, error, make, cancel };
 }

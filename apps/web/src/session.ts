@@ -22,7 +22,7 @@ import {
   type ReviewSession,
 } from '@evocut/edl';
 import { planLocalRefinement, proposeRefinement, type ClipFrames } from '@evocut/agent';
-import type { SourceSignals } from '@evocut/signals';
+import type { PictureSignals, SourceSignals } from '@evocut/signals';
 import {
   isRenderSupported,
   renderProject,
@@ -42,6 +42,7 @@ import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } f
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
 import { setFilmstripExtraction } from './filmstrip.ts';
 import { noteInteraction } from './quiet.ts';
+import { useSourcePictures } from './picture.ts';
 import { proxyPathFor, useProxies, type Proxies } from './proxy.ts';
 import { frameUsOf, snapToFrame } from './frames.ts';
 import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
@@ -236,6 +237,14 @@ export interface Session {
    * finishes, which is fine — the refinement pass works without it, just blind.
    */
   signals: Map<string, SourceSignals>;
+  /**
+   * Per-frame movement, by source id.
+   *
+   * Read from each container's index rather than measured off decoded frames, and kept
+   * apart from `signals` because it is cheap enough to recompute on every open — which
+   * means it never has to invalidate the analysis cache to change shape.
+   */
+  pictures: Map<string, PictureSignals>;
   /** Sources still being measured. */
   measuring: string[];
   /**
@@ -787,6 +796,7 @@ export function useSession(): Session {
     setFilmstripExtraction(!recovered);
   }, [recovered]);
 
+
   /**
    * The dangerous part is over: forget the breadcrumb.
    *
@@ -822,6 +832,12 @@ export function useSession(): Session {
   useEffect(() => {
     if (proxies.error) record('proxy.error', { payload: { message: proxies.error } });
   }, [proxies.error, record]);
+  /*
+    Per-frame movement, read from each container's index. Cheap enough to do on every open —
+    fifty-six milliseconds for half an hour of 4K — so it is not cached and not part of the
+    signals pass, whose version key is what forced the re-measure that killed the tab.
+  */
+  const pictures = useSourcePictures(stores, project, !recovered, proxies.ready);
 
   /*
     And leaving on purpose is not crashing. Without this the mechanism is a nuisance rather
@@ -1526,6 +1542,7 @@ export function useSession(): Session {
     discardReview,
     saveBrief,
     signals,
+    pictures,
     measuring,
     measuringProgress,
     refining,
