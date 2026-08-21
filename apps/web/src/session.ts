@@ -41,6 +41,7 @@ import { probeVideo, sourceFromMedia } from './probe.ts';
 import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } from './media-url.ts';
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
 import { frameUsOf, snapToFrame } from './frames.ts';
+import { noteInteraction } from './quiet.ts';
 import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
 import { EMPTY_SETTINGS, useSettings, type RefinementSettings } from './settings.ts';
@@ -616,6 +617,10 @@ export function useSession(): Session {
       */
       const target = final ? snapToFrame(Math.max(0, to), frameUsRef.current) : Math.max(0, to);
       writePlayhead(target);
+      // Everything that moves the playhead comes through here, which makes this the one
+      // place that knows the user is busy. Background work reads it and stands aside; see
+      // `quiet.ts` for what that was costing.
+      noteInteraction();
 
       const now = Date.now();
       const due = now - lastScrubLogRef.current >= SCRUB_LOG_INTERVAL_MS;

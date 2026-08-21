@@ -291,6 +291,57 @@ const signals = await reimport.evaluate(async () => {
   return all.find((entry) => entry?.value?.audio)?.value ?? null;
 });
 
+/*
+  And what the picture is doing, per frame, read out of the sample table of the file the app
+  itself just wrote.
+
+  Asked for after a session spent framing a knife going into a box seal: "I really need to
+  key off of motion and right now it's just not reliable." The reliable version cannot be a
+  decode — on a phone, against a multi-gigabyte recording, that is minutes of stolen main
+  thread — so it is the encoded size of each frame, which is already a description of what
+  changed since the last one. This is the check that it survives a real container written by
+  a real encoder, rather than only the one the unit tests build by hand.
+*/
+const picture = signals?.picture;
+set('pictureSignal', {
+  frames: picture?.weight?.length ?? 0,
+  hopUs: picture?.hopUs ?? null,
+  medianBytes: picture?.medianBytes ?? null,
+  peakBytes: picture?.peakBytes ?? null,
+  allIntra: picture?.allIntra ?? null,
+  note: measured?.pictureNote ?? null,
+});
+check('readThePictureOutOfTheSampleTable', (picture?.weight?.length ?? 0) > 30, true);
+// Per frame, not per second — which is the entire point, and what the old motion signal
+// (one sample every few seconds, and six hundred seeks to get it) could not be.
+check('andItIsPerFrame', (picture?.hopUs ?? 1e9) <= 50_000, true);
+// A track of nothing but keyframes measures picture complexity rather than movement, and
+// the app declines to draw it as movement. The export writes inter-coded frames.
+check('andTheFramesAreInterCoded', picture?.allIntra, false);
+
+// The lane draws it. Same reading as the audio ink, in the motion colour.
+const motionInk = await reimport.evaluate(() => {
+  const canvas = document.querySelector('canvas.wave-lane');
+  if (!canvas?.width) return 0;
+  const hex = getComputedStyle(document.documentElement).getPropertyValue('--motion-ink').trim();
+  const want = [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+  const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+  let found = 0;
+  for (let at = 0; at < data.length; at += 4) {
+    if (
+      data[at + 3] > 0 &&
+      Math.abs(data[at] - want[0]) < 40 &&
+      Math.abs(data[at + 1] - want[1]) < 40 &&
+      Math.abs(data[at + 2] - want[2]) < 40
+    ) {
+      found += 1;
+    }
+  }
+  return found;
+});
+set('motionInkPixels', motionInk);
+check('andTheLaneDrawsIt', motionInk > 20, true);
+
 // Where the two bursts were in the original recording, less the head the cut removed.
 const expectedHits = [7, 9].map((at) => at - sourceInMs / 1000);
 const heard = (signals?.audio?.onsets ?? []).map((onset) => onset.t / 1_000_000);

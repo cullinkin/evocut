@@ -7,11 +7,13 @@ import {
   describeAudioTrack,
   isAudioDecodeSupported,
   readAudioTrack,
+  readVideoWeights,
 } from '@evocut/renderer';
 import {
   SIGNALS_VERSION,
   analyzeAudio,
   analyzeMotion,
+  analyzePicture,
   toMono,
   type SourceSignals,
 } from '@evocut/signals';
@@ -81,6 +83,9 @@ export interface SignalsReport {
    * open", "the seeks were too slow" and "this recording is one still frame".
    */
   motionNote: string;
+  /** Frames of per-frame picture weight the container's index gave up, and what it said. */
+  pictureFrames: number;
+  pictureNote: string;
   /** The levels the quiet and hit thresholds are measured against. */
   peakDb: number | null;
   medianDb: number | null;
@@ -150,7 +155,7 @@ export function useSourceSignals(
         setProgress(0);
         const cached = await read(stores, source);
         const computed: Measurement = cached
-          ? { signals: cached, audioNote: 'cached', motionNote: 'cached' }
+          ? { signals: cached, audioNote: 'cached', motionNote: 'cached', pictureNote: 'cached' }
           : await measure(stores, source, url, controller.signal, (fraction) => {
               if (live) setProgress(fraction);
             });
@@ -171,6 +176,8 @@ export function useSourceSignals(
             hasAudio: false,
             motionSamples: 0,
             motionNote: computed.motionNote,
+            pictureFrames: 0,
+            pictureNote: computed.pictureNote,
             peakDb: null,
             medianDb: null,
             audioNote: computed.audioNote,
@@ -192,6 +199,8 @@ export function useSourceSignals(
           hasAudio: computed.signals.audio !== null,
           motionSamples: computed.signals.motion?.motion.length ?? 0,
           motionNote: computed.motionNote,
+          pictureFrames: computed.signals.picture?.weight.length ?? 0,
+          pictureNote: computed.pictureNote,
           // The two numbers every threshold downstream is relative to. Without them a row
           // reporting no quiet spans could mean silence was never found or that the
           // recording genuinely has no floor, and those want different fixes.
@@ -243,6 +252,7 @@ interface Measurement {
   signals: SourceSignals | null;
   audioNote: string;
   motionNote: string;
+  pictureNote: string;
 }
 
 async function measure(
@@ -252,13 +262,14 @@ async function measure(
   signal: AbortSignal,
   onProgress: (fraction: number) => void,
 ): Promise<Measurement> {
-  const [audio, motion] = await Promise.all([
+  const [audio, motion, picture] = await Promise.all([
     measureAudio(stores, source, signal, onProgress),
     measureMotion(source, url),
+    measurePicture(stores, source),
   ]);
 
-  if (!audio.signals && !motion.signals) {
-    return { signals: null, audioNote: audio.note, motionNote: motion.note };
+  if (!audio.signals && !motion.signals && !picture.signals) {
+    return { signals: null, audioNote: audio.note, motionNote: motion.note, pictureNote: picture.note };
   }
   return {
     signals: {
@@ -268,11 +279,46 @@ async function measure(
       durationUs: source.duration,
       audio: audio.signals,
       motion: motion.signals,
+      picture: picture.signals,
       computedAt: new Date().toISOString(),
     },
     audioNote: audio.note,
     motionNote: motion.note,
+    pictureNote: picture.note,
   };
+}
+
+/**
+ * What the picture is doing, per frame, from the container's index.
+ *
+ * Costs the same few hundred kilobytes the audio index does and decodes nothing, so unlike
+ * every other measurement here it does not compete with the editor for the phone. See
+ * `readVideoWeights`.
+ */
+async function measurePicture(
+  stores: AppStores,
+  source: Source,
+): Promise<{ signals: SourceSignals['picture']; note: string }> {
+  if (source.locator.kind !== 'opfs') return { signals: null, note: 'media is not stored on this device' };
+
+  try {
+    const file = await stores.media.get(source.locator.path);
+    if (!file) return { signals: null, note: 'media is missing from storage' };
+
+    const weights = await readVideoWeights(file);
+    if (!weights) return { signals: null, note: 'container has no readable video sample table' };
+
+    const picture = analyzePicture(weights);
+    if (!picture) return { signals: null, note: `sample table held ${weights.sizes.length} frames` };
+
+    const seconds = (picture.weight.length * picture.hopUs) / 1_000_000;
+    return {
+      signals: picture,
+      note: `${picture.weight.length} frames over ${seconds.toFixed(1)}s, median ${picture.medianBytes}B, peak ${picture.peakBytes}B${picture.allIntra ? ', all-intra' : ''}`,
+    };
+  } catch (cause) {
+    return { signals: null, note: cause instanceof Error ? cause.message : String(cause) };
+  }
 }
 
 interface AudioMeasurement {
