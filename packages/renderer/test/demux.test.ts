@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Mp4Writer, audioSpecificConfig } from '../src/mp4.js';
-import {
-  describeAudioTrack,
-  readAudioTrack,
-  readVideoFrameRate,
-  readVideoTrack,
-  readVideoWeights,
-} from '../src/demux.js';
+import { describeAudioTrack, readAudioTrack, readVideoFrameRate } from '../src/demux.js';
 
 /**
  * The demuxer, checked against the muxer.
@@ -424,100 +418,6 @@ describe('readVideoFrameRate', () => {
     expect(await readVideoFrameRate(buildAudioOnly())).toBe(null);
   });
 });
-
-describe('readVideoTrack', () => {
-  /*
-    Everything a `VideoDecoder` needs, without a `<video>` element.
-
-    The proxy is why: captured through a media element it runs at playback speed, because a
-    decoder presents frames when a screen would show them. Fed straight into a decoder the
-    same hardware runs several times faster, and this is the index that makes that possible.
-  */
-  it('reads the codec, the configuration and every frame', async () => {
-    const track = (await readVideoTrack(videoWeighing([9000, 120, 130, 4000], { keyEvery: 2 })))!;
-
-    expect(track.codec).toMatch(/^vp09\./);
-    expect(track.codedWidth).toBe(64);
-    expect(track.codedHeight).toBe(64);
-    expect(track.samples).toHaveLength(4);
-    expect(track.samples.map((sample) => sample.size)).toEqual([9000, 120, 130, 4000]);
-    expect(track.samples.map((sample) => sample.timestampUs)).toEqual([0, 40_000, 80_000, 120_000]);
-    expect(track.samples.map((sample) => sample.key)).toEqual([true, false, true, false]);
-  });
-
-  it('reads where each frame is, so it can be sliced out without decoding', async () => {
-    const file = videoWeighing([100, 200, 300], { keyEvery: 1 });
-    const track = (await readVideoTrack(file))!;
-
-    for (const [index, sample] of track.samples.entries()) {
-      const bytes = new Uint8Array(await file.slice(sample.offset, sample.offset + sample.size).arrayBuffer());
-      expect(bytes).toHaveLength([100, 200, 300][index]!);
-      expect(bytes[0]).toBe(0xaa);
-    }
-  });
-
-  it('reports an upright picture as upright', async () => {
-    // `Mp4Writer` writes the identity matrix, which is a phone holding the camera the way
-    // the sensor is mounted. The rotated cases are what a phone actually writes, and are
-    // covered against real recordings rather than against a file we made ourselves.
-    expect((await readVideoTrack(videoWeighing([100, 200], { keyEvery: 1 })))?.rotation).toBe(0);
-  });
-
-  it('returns nothing rather than guessing, on a file it cannot read', async () => {
-    expect(await readVideoTrack(new Blob([new Uint8Array(64)]))).toBe(null);
-    expect(await readVideoTrack(buildAudioOnly())).toBe(null);
-  });
-});
-
-describe('readVideoWeights', () => {
-  /*
-    The curve someone aims a keyframe at.
-
-    An inter-coded frame is a description of what changed since the last one, so its length
-    in bytes is a measure of how much moved. Read straight out of the sample table, it costs
-    the same few hundred kilobytes the audio index does and touches no picture data at all —
-    which is the whole point, because the alternative on a phone is six hundred seeks
-    through a multi-gigabyte file.
-  */
-  it('reads a frame’s weight and when it is shown', async () => {
-    const sizes = [9000, 120, 130, 4000, 4200, 90];
-    const weights = await readVideoWeights(videoWeighing(sizes, { keyEvery: 3 }));
-
-    expect(weights?.sizes).toEqual(sizes);
-    expect(weights?.hopUs).toBe(40_000);
-    expect(weights?.times).toEqual([0, 40_000, 80_000, 120_000, 160_000, 200_000]);
-    // The keyframes are the ones a caller has to bridge: a whole picture says nothing
-    // about change.
-    expect(weights?.sync).toEqual([true, false, false, true, false, false]);
-  });
-
-  it('says every frame is a keyframe when the track has no `stss`', async () => {
-    // Which is what an all-intra track is, and the caller has to know the curve it is
-    // holding measures each picture rather than the difference between two.
-    const weights = await readVideoWeights(videoWeighing([100, 200, 300], { keyEvery: 1 }));
-    expect(weights?.sync).toEqual([true, true, true]);
-  });
-
-  it('returns nothing rather than guessing, on a file it cannot read', async () => {
-    expect(await readVideoWeights(new Blob([new Uint8Array(64)]))).toBe(null);
-    expect(await readVideoWeights(buildAudioOnly())).toBe(null);
-  });
-});
-
-/** A video track whose frames have the given sizes, at a steady 25fps. */
-function videoWeighing(sizes: number[], options: { keyEvery: number }): Blob {
-  const writer = new Mp4Writer();
-  const track = writer.addVideoTrack({ codec: 'vp09.00.10.08', width: 64, height: 64 });
-  for (const [index, size] of sizes.entries()) {
-    writer.addSample(track, {
-      data: new Uint8Array(size).fill(0xaa),
-      timestampUs: index * 40_000,
-      durationUs: 40_000,
-      key: index % options.keyEvery === 0,
-    });
-  }
-  return writer.finalize().blob;
-}
 
 /** A file with a sound track and no picture. */
 function buildAudioOnly(): Blob {

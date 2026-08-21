@@ -55,3 +55,16 @@ export function mediaPath(fingerprint: MediaFingerprint): string {
 export function proxyPath(fingerprint: MediaFingerprint): string {
   return `proxy/${fingerprint}`;
 }
+
+/**
+ * The marker that says a proxy was finished rather than merely started.
+ *
+ * A proxy is written straight to storage as it encodes, which means a tab that is killed
+ * half way through leaves a file that exists, has a plausible size, and has no index at all
+ * — the `moov` is written last. Playing one shows nothing, forever, with no way to tell it
+ * from a broken recording. So existence is not the test; this is, and it is written after
+ * the last byte.
+ */
+export function proxyDonePath(fingerprint: MediaFingerprint): string {
+  return `proxy/${fingerprint}.ok`;
+}

@@ -90,19 +90,35 @@ export function shouldRecover(previous: OpenAttempt | null, projectId: string, n
 export function beginOpen(projectId: string, now = Date.now()): OpenAttempt | null {
   const previous = read();
   const failed = shouldRecover(previous, projectId, now) ? previous : null;
+  runs = failed ? runs + 1 : 0;
   write({ projectId, stage: 'open', at: now });
   return failed;
 }
 
-/** Mark how far this open has got. */
+/**
+ * Mark how far this open has got.
+ *
+ * The names matter more than they look. "measure" covered everything after the media was
+ * bound — the audio pass, the filmstrip, the index reads — which is three candidates
+ * wearing one label, and a crash report that says "it died measuring" narrows nothing. Each
+ * thing that could plausibly take the process down says its own name before it starts.
+ */
 export function noteStage(stage: string, now = Date.now()): void {
   const current = read();
   if (!current) return;
   write({ ...current, stage, at: now });
 }
 
+/** How many opens in a row have failed. Reset by `finishOpen`, like everything else here. */
+export function failedRuns(): number {
+  return runs;
+}
+
+let runs = 0;
+
 /** The dangerous part is over. */
 export function finishOpen(): void {
+  runs = 0;
   write(null);
 }
 
@@ -129,5 +145,6 @@ export function clearOnExit(): () => void {
 
 /** Test seam: forget everything. */
 export function resetOpen(): void {
+  runs = 0;
   write(null);
 }

@@ -1,14 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project, Source } from '@evocut/edl';
-import {
-  PROXY_MAX_DIMENSION,
-  isProxySupported,
-  proxyEstimateMs,
-  proxyStrategy,
-  renderProxy,
-  type ProxyProgress,
-} from '@evocut/renderer';
-import { proxyPath, type AppStores } from '@evocut/store';
+import { PROXY_MAX_DIMENSION, isProxySupported, renderProxy, type ProxyProgress } from '@evocut/renderer';
+import { proxyDonePath, proxyPath, type AppStores } from '@evocut/store';
+import { noteStage } from './recover.ts';
 
 /**
  * The small copy of each recording, and the making of it.
@@ -40,15 +34,6 @@ export interface Proxies {
   supported: boolean;
   /** Sources that already have a proxy on disk. */
   ready: Set<string>;
-  /**
-   * Roughly how long each source would take, in milliseconds.
-   *
-   * Measured against what will actually happen — whether the container can be read and its
-   * codec decoded without playing it — because the difference between the two routes is
-   * five minutes and half an hour, and a person deciding whether to wait deserves the real
-   * number.
-   */
-  estimateMs: Map<string, number>;
   /** The one being made, if any. */
   job: ProxyJob | null;
   error: string | null;
@@ -58,9 +43,35 @@ export interface Proxies {
 
 /** A stored source's proxy path, or null for media that is not ours to copy. */
 export function proxyPathFor(source: Source): string | null {
+  return pathsFor(source)?.proxy ?? null;
+}
+
+function pathsFor(source: Source): { proxy: string; done: string } | null {
   if (source.locator.kind !== 'opfs') return null;
   const fingerprint = source.locator.path.split('/').filter(Boolean).at(-1);
-  return fingerprint ? proxyPath(fingerprint) : null;
+  return fingerprint ? { proxy: proxyPath(fingerprint), done: proxyDonePath(fingerprint) } : null;
+}
+
+/**
+ * The proxy to play for a source, or null.
+ *
+ * Null both for "there isn't one" and for "there is half of one" — and the second is the
+ * case worth having a function for. A proxy is written as it encodes and indexed at the
+ * end, so a tab killed part way through leaves a file that exists and cannot be played.
+ * Without this check the editor would point at it and show black for the rest of time.
+ */
+export async function finishedProxy(source: Source, media: AppStores['media']): Promise<string | null> {
+  const paths = pathsFor(source);
+  if (!paths) return null;
+  return (await media.has(paths.done).catch(() => false)) ? paths.proxy : null;
+}
+
+/** Write the marker that says this proxy is whole. */
+async function markFinished(stores: AppStores, donePath: string): Promise<void> {
+  const marker = await stores.media.openWrite(donePath);
+  if (!marker) return;
+  await marker.write(new Uint8Array([1]));
+  await marker.close();
 }
 
 export function useProxies(
@@ -71,7 +82,6 @@ export function useProxies(
   onDone: (report: Record<string, unknown>) => void,
 ): Proxies {
   const [ready, setReady] = useState<Set<string>>(new Set());
-  const [estimateMs, setEstimateMs] = useState<Map<string, number>>(new Map());
   const [job, setJob] = useState<ProxyJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -89,21 +99,15 @@ export function useProxies(
     let live = true;
     void (async () => {
       const found = new Set<string>();
-      const estimates = new Map<string, number>();
       for (const source of sources) {
+        // Named here rather than before the loop: with no project yet there is nothing to
+        // look for, and stamping a stage for work that is not happening overwrites the
+        // breadcrumb of the open that actually died.
+        noteStage('measure:proxies');
         const path = proxyPathFor(source);
-        if (path && (await stores.media.has(path).catch(() => false))) {
-          found.add(source.id);
-          continue;
-        }
-        if (source.locator.kind !== 'opfs') continue;
-        const file = await stores.media.get(source.locator.path).catch(() => null);
-        const from = file ? await proxyStrategy(file).catch(() => 'playback' as const) : 'playback';
-        estimates.set(source.id, proxyEstimateMs(source.duration, from));
+        if (path && (await stores.media.has(path).catch(() => false))) found.add(source.id);
       }
-      if (!live) return;
-      setReady(found);
-      setEstimateMs(estimates);
+      if (live) setReady(found);
     })();
     return () => {
       live = false;
@@ -119,7 +123,8 @@ export function useProxies(
   const make = useCallback(
     (sourceId: string) => {
       const source = project?.sources.find((candidate) => candidate.id === sourceId);
-      const path = source ? proxyPathFor(source) : null;
+      const paths = source ? pathsFor(source) : null;
+      const path = paths?.proxy ?? null;
       const url = urlsRef.current.get(sourceId);
       if (!source || !path || !url || abortRef.current) return;
 
@@ -130,6 +135,7 @@ export function useProxies(
 
       void (async () => {
         const started = Date.now();
+        noteStage('proxy');
         let sink: Awaited<ReturnType<typeof stores.media.openWrite>> = null;
         try {
           if (source.locator.kind !== 'opfs') throw new Error('That recording is not stored on this device.');
@@ -147,6 +153,7 @@ export function useProxies(
           );
           const bytes = await sink.close();
           sink = null;
+          if (paths) await markFinished(stores, paths.done);
 
           setReady((previous) => new Set(previous).add(sourceId));
           doneRef.current({
@@ -155,8 +162,6 @@ export function useProxies(
             width: result.width,
             height: result.height,
             framesEncoded: result.framesEncoded,
-            framesSkipped: result.framesSkipped,
-            from: result.from,
             bytes,
             videoCodec: result.videoCodec,
             audio: result.audio,
@@ -179,5 +184,5 @@ export function useProxies(
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  return { supported: isProxySupported(), ready, estimateMs, job, error, make, cancel };
+  return { supported: isProxySupported(), ready, job, error, make, cancel };
 }

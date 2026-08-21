@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { whenQuiet } from './quiet.ts';
+import { noteStage } from './recover.ts';
 import { lumaFromRgba } from '@evocut/signals';
 
 /**
@@ -413,6 +414,7 @@ async function extractFrames(
       // hundred milliseconds of main thread on a phone, and taking them while someone is
       // scrubbing is what made the whole interface stop. See `quiet.ts`.
       await whenQuiet();
+      noteStage('measure:frames');
       if (!(await seek(t))) continue;
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       handlers.onFrame({ t, url: canvas.toDataURL('image/jpeg', 0.6) }, sampleLuma(t), aspect);

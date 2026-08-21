@@ -20,6 +20,7 @@ import { Player } from './Player.tsx';
 import { Review } from './Review.tsx';
 import { SuggestionSheet } from './Suggestion.tsx';
 import { TimelineEditor, type TimelineDragState } from './Timeline.tsx';
+import { proxyEstimateMs } from '@evocut/renderer';
 import { frameUsOf } from './frames.ts';
 import { usePlayhead } from './playhead.ts';
 import { downloadLog, downloadProject, useSession, type RefineProgress } from './session.ts';
@@ -390,17 +391,19 @@ export function App() {
         {session.recovered && (
           <div className="banner recovered" role="status">
             <div>
-              <strong>Opened without analysis</strong>
+              <strong>
+                {session.recovered.attempt > 1
+                  ? `Stopped again — ${session.recovered.attempt} tries`
+                  : 'Opened without analysis'}
+              </strong>
               <small>
-                Last time this project was opened the tab stopped, {session.recovered.stage === 'measure'
-                  ? 'while measuring the footage'
-                  : `during ${session.recovered.stage}`}
-                . The waveform and the suggestions are off for this session; editing, export and the
-                log all work.
+                {session.recovered.attempt > 1
+                  ? 'Opening this project keeps ending the tab. This session leaves the analysis off so it stays up — editing, export and the log all work, and the log now records which pass it was in.'
+                  : `Last time this project was opened the tab stopped ${describeStage(session.recovered.stage)}. The waveform and the suggestions are off for this session; editing, export and the log all work.`}
               </small>
             </div>
             <button className="ghost small" onClick={session.retryOpen}>
-              Try again
+              {session.recovered.attempt > 1 ? 'Again' : 'Try again'}
             </button>
           </div>
         )}
@@ -458,7 +461,6 @@ export function App() {
         selectedClipId={session.selectedClipId}
         draftKeys={framing}
         signals={session.signals}
-        pictures={session.pictures}
         previews={previews}
         accepted={review?.accepted ?? []}
         onSeek={session.seek}
@@ -820,14 +822,14 @@ function ProxyBanner({
   const waiting = project.sources.filter((source) => !proxies.ready.has(source.id));
   if (dismissed || waiting.length === 0) return null;
 
-  const slowest = Math.max(...waiting.map((source) => proxies.estimateMs.get(source.id) ?? 0));
+  const longest = Math.max(...waiting.map((source) => source.duration));
   return (
     <div className="banner proxy" role="status">
       <div>
         <strong>Editing straight off the recording</strong>
         <small>
           Every scrub is decoding the full-size footage, which is why it stutters. A proxy —
-          a small copy, used only for editing — takes about {formatMinutes(slowest)} to make,
+          a small copy, used only for editing — takes about {formatMinutes(longest)} to make,
           once. The export still uses the original.
         </small>
       </div>
@@ -841,13 +843,34 @@ function ProxyBanner({
   );
 }
 
+/**
+ * The stage a killed open had reached, in words.
+ *
+ * Worth naming precisely, because "measuring" covered three separate things that each take
+ * real work — and a report that cannot tell them apart cannot be acted on.
+ */
+function describeStage(stage: string): string {
+  const named: Record<string, string> = {
+    open: 'as it opened',
+    media: 'while opening the recording',
+    editor: 'just after the editor appeared',
+    'measure:audio': 'while listening to the footage',
+    'measure:frames': 'while pulling thumbnails out of the recording',
+    'measure:proxies': 'while looking for a proxy',
+    proxy: 'while making a proxy',
+    // The name every open before this change wrote, which is why it says so little.
+    measure: 'while measuring the footage',
+  };
+  return named[stage] ?? `during ${stage}`;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1_048_576) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1_048_576).toFixed(bytes < 104_857_600 ? 1 : 0)} MB`;
 }
 
-function formatMinutes(ms: number): string {
-  const minutes = Math.round(ms / 60_000);
+function formatMinutes(durationUs: number): string {
+  const minutes = Math.round(proxyEstimateMs(durationUs) / 60_000);
   if (minutes < 1) return 'under a minute';
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }

@@ -11,18 +11,12 @@ import {
   type TrimBounds,
 } from '@evocut/edl';
 import type { OpPreview } from '@evocut/edl';
-import type { PictureSignals, SourceSignals } from '@evocut/signals';
+import type { SourceSignals } from '@evocut/signals';
 import { frameAt, frameSpacingUs, thumbnailSlots, useFilmstrips, type Filmstrip } from './filmstrip.ts';
 import { frameUsOf } from './frames.ts';
 import { getPlayhead, subscribePlayhead, usePlayhead } from './playhead.ts';
 import { planRuler } from './ruler.ts';
-import {
-  motionColumns,
-  waveColumns,
-  type MotionSource,
-  type WaveClip,
-  type WaveSource,
-} from './waveform.ts';
+import { waveColumns, type WaveClip, type WaveSource } from './waveform.ts';
 
 /**
  * The editing timeline: draggable playhead, tap-to-select clips, drag-the-edges trimming.
@@ -105,14 +99,6 @@ export interface TimelineProps {
    * nothing.
    */
   signals: Map<string, SourceSignals>;
-  /**
-   * Per-frame movement, by source id.
-   *
-   * Drawn over the sound in the same lane rather than in one of its own: a hit you can hear
-   * and a movement you can see are the same event, and putting them one above the other
-   * makes you check twice.
-   */
-  pictures: Map<string, PictureSignals>;
   /** Open suggestions, drawn as bubbles over the clips they touch. */
   previews: OpPreview[];
   accepted: boolean[];
@@ -171,7 +157,6 @@ export function TimelineEditor({
   selectedClipId,
   draftKeys = null,
   signals,
-  pictures,
   previews,
   accepted,
   onSeek,
@@ -592,23 +577,6 @@ export function TimelineEditor({
     return out;
   }, [signals]);
 
-  const waveMotion = useMemo(() => {
-    const out = new Map<string, MotionSource>();
-    for (const [sourceId, measured] of pictures) {
-      // An all-intra recording's frame sizes measure how complicated each picture is, not
-      // how much moved between two. Drawing that as movement would be a lie told
-      // convincingly, so it is not drawn.
-      if (measured.allIntra) continue;
-      out.set(sourceId, {
-        hopUs: measured.hopUs,
-        weight: measured.weight,
-        peakBytes: measured.peakBytes,
-        medianBytes: measured.medianBytes,
-      });
-    }
-    return out;
-  }, [pictures]);
-
   /** Stable, so the memoised ruler is not re-rendered by a fresh closure every scroll. */
   const seekRef = useRef(onSeek);
   seekRef.current = onSeek;
@@ -637,7 +605,6 @@ export function TimelineEditor({
       faint: read('--tick', '#55556a'),
       bed: read('--wave-bed', '#241f3d'),
       ink: read('--wave-ink', '#a794ff'),
-      motion: read('--motion-ink', '#5ee0c0'),
     };
   }, []);
 
@@ -695,7 +662,7 @@ export function TimelineEditor({
    */
   const paintWave = useCallback(
     (ctx: CanvasRenderingContext2D, { scrollLeft, cssWidth, dpr }: StripView) => {
-      const { bed, ink, motion } = palette;
+      const { bed, ink } = palette;
 
       // The bed covers the edit and nothing else: the lane carries half a viewport of
       // padding at each end so the first and last frame can reach the middle of the screen,
@@ -706,7 +673,7 @@ export function TimelineEditor({
         ctx.fillStyle = bed;
         ctx.fillRect(bedFrom, 0, bedTo - bedFrom, WAVE_HEIGHT_PX);
       }
-      if (waveAudio.size === 0 && waveMotion.size === 0) return;
+      if (waveAudio.size === 0) return;
 
       /*
         Never sample finer than the data. At full zoom one hop of the level envelope is a
@@ -769,48 +736,8 @@ export function TimelineEditor({
       closeRun(columns);
       ctx.fillStyle = ink;
       ctx.fill(path);
-
-      /*
-        And the picture over the sound.
-
-        A stroked line rather than a second filled shape: the two are meant to be read at
-        once — "I can hear the seal tear, and here is the frame the blade first moved" —
-        and two fills in one lane is a fight neither wins. Measured from the bottom, so it
-        has a baseline of its own and does not have to be told apart from the symmetric
-        envelope underneath it.
-      */
-      if (waveMotion.size === 0) return;
-      const moves = motionColumns({
-        clips: waveClips,
-        motion: waveMotion,
-        fromUs: ((scrollLeft - halfWidth) / pxPerSecond) * 1_000_000,
-        usPerColumn: (step / pxPerSecond) * 1_000_000,
-        columns,
-      });
-
-      const line = new Path2D();
-      let drawing = false;
-      for (let column = 0; column < columns; column += 1) {
-        const move = moves[column]!;
-        if (move <= 0) {
-          drawing = false;
-          continue;
-        }
-        const y = WAVE_HEIGHT_PX - 1 - move * (WAVE_HEIGHT_PX - 2);
-        if (!drawing) {
-          line.moveTo(column * step, y);
-          drawing = true;
-        } else {
-          line.lineTo(column * step, y);
-        }
-        line.lineTo((column + 1) * step, y);
-      }
-      ctx.strokeStyle = motion;
-      ctx.lineWidth = 1.5;
-      ctx.lineJoin = 'round';
-      ctx.stroke(line);
     },
-    [committedTotal, halfWidth, hopUs, palette, pxPerSecond, waveAudio, waveClips, waveMotion],
+    [committedTotal, halfWidth, hopUs, palette, pxPerSecond, waveAudio, waveClips],
   );
 
   // A new identity forces a repaint where the position alone would not: a zoom, an edit, a
@@ -821,7 +748,7 @@ export function TimelineEditor({
   );
   const waveToken = useMemo(
     () => ({}),
-    [committedTotal, halfWidth, pxPerSecond, waveAudio, waveClips, waveMotion],
+    [committedTotal, halfWidth, pxPerSecond, waveAudio, waveClips],
   );
   const rulerRef = useStripCanvas(scrollerRef, RULER_HEIGHT_PX, paintRuler, rulerToken);
   const waveRef = useStripCanvas(scrollerRef, WAVE_HEIGHT_PX, paintWave, waveToken);

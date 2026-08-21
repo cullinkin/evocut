@@ -22,7 +22,7 @@ import {
   type ReviewSession,
 } from '@evocut/edl';
 import { planLocalRefinement, proposeRefinement, type ClipFrames } from '@evocut/agent';
-import type { PictureSignals, SourceSignals } from '@evocut/signals';
+import type { SourceSignals } from '@evocut/signals';
 import {
   isRenderSupported,
   renderProject,
@@ -42,11 +42,10 @@ import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } f
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
 import { setFilmstripExtraction } from './filmstrip.ts';
 import { noteInteraction } from './quiet.ts';
-import { useSourcePictures } from './picture.ts';
-import { proxyPathFor, useProxies, type Proxies } from './proxy.ts';
+import { finishedProxy, useProxies, type Proxies } from './proxy.ts';
 import { frameUsOf, snapToFrame } from './frames.ts';
 import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
-import { beginOpen, clearOnExit, finishOpen, noteStage } from './recover.ts';
+import { beginOpen, clearOnExit, failedRuns, finishOpen, noteStage } from './recover.ts';
 import { useSourceSignals, type SignalsReport } from './signals.ts';
 import { EMPTY_SETTINGS, useSettings, type RefinementSettings } from './settings.ts';
 
@@ -165,7 +164,7 @@ export interface Session {
    * `recover.ts`. The editor is otherwise entirely usable, which is the point: the edit,
    * the log and the EDL all have to remain reachable after a crash.
    */
-  recovered: { stage: string } | null;
+  recovered: { stage: string; attempt: number } | null;
   /** Clear the breadcrumb and reload, to try a full open again. */
   retryOpen(): void;
   /**
@@ -237,14 +236,6 @@ export interface Session {
    * finishes, which is fine — the refinement pass works without it, just blind.
    */
   signals: Map<string, SourceSignals>;
-  /**
-   * Per-frame movement, by source id.
-   *
-   * Read from each container's index rather than measured off decoded frames, and kept
-   * apart from `signals` because it is cheap enough to recompute on every open — which
-   * means it never has to invalidate the analysis cache to change shape.
-   */
-  pictures: Map<string, PictureSignals>;
   /** Sources still being measured. */
   measuring: string[];
   /**
@@ -322,7 +313,7 @@ export function useSession(): Session {
     So: a breadcrumb, and an open that skips the analysis when it finds one. See
     `recover.ts`.
   */
-  const [recovered, setRecovered] = useState<{ stage: string } | null>(null);
+  const [recovered, setRecovered] = useState<{ stage: string; attempt: number } | null>(null);
   const [mediaUrls, setMediaUrls] = useState<Map<string, string>>(new Map());
   // Read from inside the refinement's async body, which starts before the render that
   // would have closed over a fresh copy.
@@ -426,7 +417,7 @@ export function useSession(): Session {
     async (next: Project, originals: Map<string, string>): Promise<Map<string, string>> => {
       const out = new Map(originals);
       for (const source of next.sources) {
-        const path = proxyPathFor(source);
+        const path = await finishedProxy(source, stores.media);
         if (!path) continue;
         const file = await stores.media.get(path).catch(() => null);
         if (file) out.set(source.id, mediaUrlFor(source, file, { variant: 'proxy' }).url);
@@ -455,7 +446,7 @@ export function useSession(): Session {
         is the difference between a guess and a fix.
       */
       const failed = beginOpen(next.id);
-      setRecovered(failed ? { stage: failed.stage } : null);
+      setRecovered(failed ? { stage: failed.stage, attempt: failedRuns() } : null);
 
       setProject(next);
       setEvents(existingEvents);
@@ -463,12 +454,14 @@ export function useSession(): Session {
       setSelectedClipId(null);
       setHistory([]);
       if (failed) {
-        record('app.recovered', { payload: { diedAt: failed.stage, sinceMs: Date.now() - failed.at } });
+        record('app.recovered', {
+          payload: { diedAt: failed.stage, sinceMs: Date.now() - failed.at, attempt: failedRuns() },
+        });
       }
       noteStage('media');
       await bind(next);
       await stores.projects.setLastOpened(next.id);
-      noteStage('measure');
+      noteStage('editor');
       setStatus('ready');
     },
     [bind, record],
@@ -796,7 +789,6 @@ export function useSession(): Session {
     setFilmstripExtraction(!recovered);
   }, [recovered]);
 
-
   /**
    * The dangerous part is over: forget the breadcrumb.
    *
@@ -832,12 +824,6 @@ export function useSession(): Session {
   useEffect(() => {
     if (proxies.error) record('proxy.error', { payload: { message: proxies.error } });
   }, [proxies.error, record]);
-  /*
-    Per-frame movement, read from each container's index. Cheap enough to do on every open —
-    fifty-six milliseconds for half an hour of 4K — so it is not cached and not part of the
-    signals pass, whose version key is what forced the re-measure that killed the tab.
-  */
-  const pictures = useSourcePictures(stores, project, !recovered, proxies.ready);
 
   /*
     And leaving on purpose is not crashing. Without this the mechanism is a nuisance rather
@@ -1542,7 +1528,6 @@ export function useSession(): Session {
     discardReview,
     saveBrief,
     signals,
-    pictures,
     measuring,
     measuringProgress,
     refining,

@@ -17,6 +17,7 @@ import {
 } from '@evocut/signals';
 import type { AppStores } from '@evocut/store';
 import { loadFilmstrip } from './filmstrip.ts';
+import { noteStage } from './recover.ts';
 
 /**
  * Measuring the footage, in the background, once per recording ever.
@@ -148,6 +149,9 @@ export function useSourceSignals(
 
         const started = Date.now();
         setProgress(0);
+        // Named before it starts, so a tab that does not come back says which pass it was
+        // in. See `recover.ts`.
+        noteStage('measure:audio');
         const cached = await read(stores, source);
         const computed: Measurement = cached
           ? { signals: cached, audioNote: 'cached', motionNote: 'cached' }

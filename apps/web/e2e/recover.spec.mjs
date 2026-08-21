@@ -58,7 +58,7 @@ await page.addInitScript(() => {
   localStorage.removeItem('e2e:arm');
   localStorage.setItem(
     'evocut:open',
-    JSON.stringify({ projectId: localStorage.getItem('e2e:project'), stage: 'measure', at: Date.now() }),
+    JSON.stringify({ projectId: localStorage.getItem('e2e:project'), stage: 'measure:audio', at: Date.now() }),
   );
 });
 await page.evaluate((id) => {
@@ -72,7 +72,7 @@ await page.waitForTimeout(4000);
 
 set('bannerText', await page.locator('.banner.recovered').innerText().catch(() => null));
 check('saysWhatHappened', await page.locator('.banner.recovered').isVisible(), true);
-check('andWhereItDied', /measuring the footage/.test(await page.locator('.banner.recovered').innerText()), true);
+check('andWhereItDied', /listening to the footage/.test(await page.locator('.banner.recovered').innerText()), true);
 
 /*
   The editor still works. This is the whole point of the mode: a crash must not cost
@@ -96,7 +96,9 @@ set('recoveredRows', recovered.map((event) => event.payload));
 // and the log that would have said so could not be exported because the app would not stay
 // up long enough to export it.
 check('theLogSaysTheLastOpenDied', recovered.length, 1);
-check('andHowFarItGot', recovered[0]?.payload?.diedAt, 'measure');
+check('andHowFarItGot', recovered[0]?.payload?.diedAt, 'measure:audio');
+// Which try this is, so a banner that says "stopped again" is telling the truth.
+check('andWhichTryThisIs', recovered[0]?.payload?.attempt, 1);
 
 // Try again clears it.
 await page.locator('.banner.recovered button').click();
