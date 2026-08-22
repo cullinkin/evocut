@@ -47,6 +47,20 @@ export function mediaPath(fingerprint: MediaFingerprint): string {
 }
 
 /**
+ * The index key a path owns, or null if it owns none.
+ *
+ * The recording and its proxy share a fingerprint — that is how one finds the other — so a
+ * path's last segment is *not* a licence to delete the index entry under it. Deleting a
+ * half-written proxy took the recording's filename and MIME type with it, and a recording
+ * with no recorded type comes back untyped, which Safari will not decode. That is what
+ * "sometimes it shows the video and sometimes it doesn't" was.
+ */
+export function indexKeyFor(path: string): MediaFingerprint | null {
+  const segments = path.split('/').filter(Boolean);
+  return segments.length === 2 && segments[0] === 'media' ? segments[1]! : null;
+}
+
+/**
  * Where the small copy of it lives.
  *
  * Beside the original rather than derived from it, so deleting a recording takes its proxy

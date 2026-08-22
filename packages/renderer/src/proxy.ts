@@ -63,6 +63,19 @@ import { Mp4Stream, type Mp4Sample, type Mp4Sink } from './mp4.js';
 export interface ProxyRequest {
   /** The original, for its audio index. */
   file: Blob;
+  /**
+   * A *fresh* handle on the same recording.
+   *
+   * A proxy reads the original for a quarter of an hour, and a `File` taken out of the
+   * origin-private file system is a snapshot rather than a subscription: on iOS one held
+   * that long stops answering, and the read fails with nothing wrong with the file. It
+   * happened twice, both times at the far end of a finished run — "The I/O read operation
+   * failed", after fifteen minutes of work.
+   *
+   * So a failed read is retried against a newly opened handle before it is believed. Null
+   * where the caller cannot reopen, and then a failure is a failure.
+   */
+  reopen?: () => Promise<Blob | null>;
   /** A URL a `<video>` element can play and seek — the same one the editor uses. */
   url: string;
   /** Where the proxy goes, a piece at a time. It is far too large to hold. */
@@ -193,6 +206,7 @@ export async function renderProxy(
     half-hour recording is the difference between five minutes and thirty. A `<video>`
     element is the fallback, and it is what WebM and anything else unindexable gets.
   */
+  const source = new SourceReader(request.file, request.reopen);
   const decodable = await openDecodable(request.file);
   const video = decodable ? null : await openVideo(request.url);
 
@@ -290,7 +304,7 @@ export async function renderProxy(
       keyAt = -Infinity;
     };
 
-    const sound = audio ? new AudioCopier(request.file, audio) : null;
+    const sound = audio ? new AudioCopier(source, audio) : null;
     let lastAt = -1;
 
     /** Drain whatever the encoder has finished, and the sound that belongs beside it. */
@@ -339,7 +353,7 @@ export async function renderProxy(
 
     report('encoding', 0);
     if (decodable) {
-      await pumpByDecoding(decodable, request, emit, () => encodeError, recover, () => {
+      await pumpByDecoding(decodable, source, request, emit, () => encodeError, recover, () => {
         interruptions += 1;
       });
     } else {
@@ -494,6 +508,7 @@ export async function canDecode(track: SourceVideoTrack): Promise<boolean> {
  */
 async function pumpByDecoding(
   state: Decodable,
+  source: SourceReader,
   request: ProxyRequest,
   emit: (source: CanvasImageSource, at: number) => Promise<boolean>,
   encodeError: () => Error | null,
@@ -570,7 +585,7 @@ async function pumpByDecoding(
         from = Math.min(from, track.offsets[index]!);
         to = Math.max(to, track.offsets[index]! + track.sizes[index]!);
       }
-      bytes = new Uint8Array(await request.file.slice(from, to).arrayBuffer());
+      bytes = await source.read(from, to);
       loadedFrom = from;
     }
 
@@ -690,6 +705,46 @@ function fitWithin(size: FrameSize, maxDimension: number): FrameSize {
 }
 
 /**
+ * Read a stretch of the recording, and do not believe the first refusal.
+ *
+ * The handle is replaced and the read tried again, because a `File` from the origin-private
+ * file system goes stale on iOS across a long job and says so as an I/O error — which is
+ * indistinguishable, from here, from a recording that has gone bad. One of those is worth
+ * retrying and the other costs a moment.
+ */
+export class SourceReader {
+  #file: Blob;
+
+  constructor(
+    file: Blob,
+    private readonly reopen: (() => Promise<Blob | null>) | undefined,
+  ) {
+    this.#file = file;
+  }
+
+  get file(): Blob {
+    return this.#file;
+  }
+
+  async read(from: number, to: number): Promise<Uint8Array> {
+    try {
+      return new Uint8Array(await this.#file.slice(from, to).arrayBuffer());
+    } catch (cause) {
+      const fresh = this.reopen ? await this.reopen().catch(() => null) : null;
+      if (!fresh) {
+        throw new Error(
+          `Could not read the recording at ${Math.round(from / 1_048_576)}MB: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+        );
+      }
+      this.#file = fresh;
+      return new Uint8Array(await this.#file.slice(from, to).arrayBuffer());
+    }
+  }
+}
+
+/**
  * The original's compressed audio, copied through.
  *
  * Not decoded and re-encoded: there is nothing to gain by it and two things to lose — the
@@ -704,7 +759,7 @@ export class AudioCopier {
   #batch: Array<{ data: Uint8Array; ref: AudioSampleRef }> = [];
 
   constructor(
-    private readonly file: Blob,
+    private readonly source: SourceReader,
     private readonly track: SourceAudioTrack,
   ) {}
 
@@ -727,7 +782,7 @@ export class AudioCopier {
 
     const from = Math.min(...refs.map((ref) => ref.offset));
     const to = Math.max(...refs.map((ref) => ref.offset + ref.size));
-    const bytes = new Uint8Array(await this.file.slice(from, to).arrayBuffer());
+    const bytes = await this.source.read(from, to);
     this.#batch = refs.map((ref) => ({
       ref,
       // A copy rather than a view: the batch's buffer is released once its frames are

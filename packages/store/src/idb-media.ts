@@ -1,4 +1,4 @@
-import { fingerprintFile, mediaPath } from './fingerprint.js';
+import { fingerprintFile, indexKeyFor, mediaPath } from './fingerprint.js';
 import { mimeOf, restoreFile } from './media-file.js';
 import type { IdbConnection } from './idb.js';
 import type { MediaIndex } from './opfs.js';
@@ -72,8 +72,9 @@ export class IdbMediaStore implements MediaStore {
 
   async delete(path: string): Promise<void> {
     await this.#db.run(BLOBS, 'readwrite', (store) => store.delete(path));
-    const fingerprint = path.split('/').at(-1);
-    if (fingerprint) await this.#index.delete(fingerprint);
+    // Only the recording's own path owns its index entry; see `indexKeyFor`.
+    const key = indexKeyFor(path);
+    if (key) await this.#index.delete(key);
   }
 
   async list(): Promise<MediaRecord[]> {

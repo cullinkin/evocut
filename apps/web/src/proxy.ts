@@ -170,9 +170,20 @@ export function useProxies(
   const sources = project?.sources ?? [];
   const identity = sources.map((source) => source.id).join('|');
 
-  // What is already on disk. Cheap — a directory lookup per source — and it has to run on
-  // open, because a proxy made in a previous session is the whole point of making one.
+  /*
+    What is already on disk — and what a killed tab left behind.
+
+    Once per project, and never while a proxy is being made. Both halves are the fix for a
+    race that ate a finished run: the sweep deletes a proxy file that has no marker beside
+    it, a proxy *being written* has no marker beside it yet, and this effect can re-run
+    whenever React feels like re-running it. The file was removed from under the writer,
+    which surfaced fifteen minutes later as "The I/O read operation failed".
+  */
+  const sweptRef = useRef('');
   useEffect(() => {
+    if (sweptRef.current === identity || abortRef.current) return;
+    sweptRef.current = identity;
+
     let live = true;
     void (async () => {
       const found = new Set<string>();
@@ -191,7 +202,7 @@ export function useProxies(
           holding storage, so it goes.
         */
         const paths = pathsFor(source);
-        if (paths && (await stores.media.has(paths.proxy).catch(() => false))) {
+        if (paths && !abortRef.current && (await stores.media.has(paths.proxy).catch(() => false))) {
           await stores.media.delete(paths.proxy).catch(() => {});
         }
       }
@@ -228,7 +239,15 @@ export function useProxies(
         let sink: Awaited<ReturnType<typeof stores.media.openWrite>> = null;
         try {
           if (source.locator.kind !== 'opfs') throw new Error('That recording is not stored on this device.');
-          const file = await stores.media.get(source.locator.path);
+          /*
+            Named for what it is, and never `path` — that is the proxy's, and shadowing it
+            here pointed `openWrite` at the recording itself. A writable truncates, so the
+            proxy was written *over* the original: the file the whole app is about, gone,
+            and every read after it a failure.
+          */
+          const recordingPath = source.locator.path;
+          const openSource = async () => stores.media.get(recordingPath);
+          const file = await openSource();
           if (!file) throw new Error('That recording is missing from storage.');
 
           const cramped = await tooLittleRoom(source.duration);
@@ -238,7 +257,16 @@ export function useProxies(
           if (!sink) throw new Error('This browser cannot write a proxy without holding it in memory.');
 
           const result = await renderProxy(
-            { file, url, sink, maxDimension: PROXY_MAX_DIMENSION, signal: controller.signal },
+            {
+              file,
+              // So a handle that has gone stale over a quarter of an hour of reading can be
+              // replaced rather than believed. See `SourceReader`.
+              reopen: openSource,
+              url,
+              sink,
+              maxDimension: PROXY_MAX_DIMENSION,
+              signal: controller.signal,
+            },
             (progress) => {
               if (!controller.signal.aborted) setJob({ sourceId, ...progress });
             },

@@ -56,6 +56,46 @@ check('andHasFramesInIt', (made?.framesEncoded ?? 0) > 100, true);
 const liveUrl = await page.locator('.player video.live').getAttribute('src');
 set('urlAfterProxy', liveUrl);
 check('thePreviewPlaysTheProxy', /from=proxy/.test(liveUrl ?? ''), true);
+
+/*
+  And the file it points at is really there.
+
+  It was not, once. The sweep that clears a half-written proxy left by a killed tab ran
+  again while one was being *written* — a proxy in progress has no finished-marker beside it
+  either — and deleted the file from under its own writer. It took the recording's index
+  entry with it on the way past, which is what "sometimes it shows the video and sometimes
+  it doesn't" was: a recording with no recorded MIME type comes back untyped, and Safari
+  will not decode an untyped blob.
+*/
+const stored = await page.evaluate(async () => {
+  const root = await navigator.storage.getDirectory();
+  const out = {};
+  for (const dir of ['media', 'proxy']) {
+    try {
+      const handle = await root.getDirectoryHandle(dir);
+      for await (const [name, entry] of handle.entries()) out[`${dir}/${name}`] = (await entry.getFile()).size;
+    } catch {
+      out[dir] = 'missing';
+    }
+  }
+  return out;
+});
+set('storedAfterProxy', stored);
+const proxyBytes = Object.entries(stored).find(([name]) => name.startsWith('proxy/') && !name.endsWith('.ok'))?.[1];
+check('theProxyFileIsOnDisk', typeof proxyBytes === 'number' && proxyBytes > 10_000, true);
+check('andSoIsTheRecording', Object.keys(stored).some((name) => name.startsWith('media/')), true);
+// The recording still knows what it is; without this the preview goes black on Safari.
+const typed = await page.evaluate(async () => {
+  const open = indexedDB.open('evocut');
+  const db = await new Promise((resolve) => (open.onsuccess = () => resolve(open.result)));
+  const all = await new Promise((resolve) => {
+    const request = db.transaction('media').objectStore('media').getAll();
+    request.onsuccess = () => resolve(request.result);
+  });
+  return all.map((record) => record?.mimeType ?? null);
+});
+set('recordedMimeTypes', typed);
+check('andItsTypeSurvivedTheProxy', typed.filter(Boolean).length > 0, true);
 /*
   And typed as an MP4, whatever the recording was. The proxy shares the recording's
   fingerprint, so the store hands it back wearing the original's identity — and Safari

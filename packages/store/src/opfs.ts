@@ -1,4 +1,4 @@
-import { fingerprintFile, mediaPath } from './fingerprint.js';
+import { fingerprintFile, indexKeyFor, mediaPath } from './fingerprint.js';
 import { fingerprintFromPath, mimeOf, restoreFile } from './media-file.js';
 import type { MediaRecord, MediaSink, MediaStore } from './types.js';
 
@@ -101,8 +101,9 @@ export class OpfsMediaStore implements MediaStore {
     const [directory, name] = await this.#resolve(path, false);
     if (!directory) return;
     await directory.removeEntry(name).catch(() => {});
-    const fingerprint = path.split('/').at(-1);
-    if (fingerprint) await this.#index.delete(fingerprint);
+    // Only the recording's own path owns its index entry; see `indexKeyFor`.
+    const key = indexKeyFor(path);
+    if (key) await this.#index.delete(key);
   }
 
   async list(): Promise<MediaRecord[]> {
@@ -122,6 +123,18 @@ export class OpfsMediaStore implements MediaStore {
    * sample has gone past. See `Mp4Stream`.
    */
   async openWrite(path: string): Promise<MediaSink | null> {
+    /*
+      Never over a recording.
+
+      A writable truncates what it opens, so pointing this at `media/…` destroys the file
+      the whole app is about — and it is one shadowed variable away, as a bug caught before
+      this shipped proved. Imports go through `put`, which streams a picked file in; nothing
+      else has any business writing there.
+    */
+    if (indexKeyFor(path)) {
+      throw new Error(`Refusing to overwrite a stored recording at ${path}`);
+    }
+
     const handle = await this.#fileHandle(path, true);
     if (!handle) return null;
 

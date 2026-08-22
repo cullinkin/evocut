@@ -12,7 +12,14 @@ import {
 } from '@evocut/edl';
 import type { OpPreview } from '@evocut/edl';
 import type { SourceSignals } from '@evocut/signals';
-import { frameAt, frameSpacingUs, thumbnailSlots, useFilmstrips, type Filmstrip } from './filmstrip.ts';
+import {
+  frameAt,
+  frameSpacingUs,
+  thumbnailSlots,
+  tooHeavyToSeek,
+  useFilmstrips,
+  type Filmstrip,
+} from './filmstrip.ts';
 import { frameUsOf } from './frames.ts';
 import { getPlayhead, subscribePlayhead, usePlayhead } from './playhead.ts';
 import { planRuler } from './ruler.ts';
@@ -226,14 +233,31 @@ export function TimelineEditor({
     second. Hoisted, the blocks become pure functions of their props and a scroll stops
     touching them at all.
   */
+  /*
+    Thumbnails come from a proxy, or from a recording small enough to seek.
+
+    Extraction opens a *third* `<video>` on the source and seeks it eighty times. Against a
+    twelve-second clip that is free. Against half an hour of 4K — five gigabytes, with the
+    preview already holding two decoders — it is what killed the tab: the crash breadcrumb
+    named `measure:open`, which is this element being handed the recording, sixteen seconds
+    before the process ended.
+
+    So a heavy recording gets no filmstrip until there is a proxy to take it from, and then
+    it gets one for almost nothing: a small file with a keyframe every second. Until then
+    the lane shows blocks, and the strip that offers to make a proxy is the answer to why.
+  */
   const strips = useFilmstrips(
     useMemo(
       () =>
-        sources.map((source) => ({
-          id: source.id,
-          url: mediaUrls.get(source.id) ?? null,
-          durationUs: source.duration,
-        })),
+        sources.map((source) => {
+          const url = mediaUrls.get(source.id) ?? null;
+          const proxied = url !== null && url.includes('from=proxy');
+          return {
+            id: source.id,
+            url: proxied || !tooHeavyToSeek({ durationUs: source.duration, ...source.video }) ? url : null,
+            durationUs: source.duration,
+          };
+        }),
       [sources, mediaUrls],
     ),
   );

@@ -30,6 +30,7 @@ import {
   MemorySettingsStore,
 } from '../src/memory.js';
 import { IdbMediaStore } from '../src/idb-media.js';
+import { indexKeyFor } from '../src/fingerprint.js';
 import { bindProjectMedia, orphanedMedia, rebindSource } from '../src/bind.js';
 import { fingerprintFile, mediaPath } from '../src/fingerprint.js';
 import { fingerprintFromPath, mimeFromFilename } from '../src/media-file.js';
@@ -559,5 +560,34 @@ describe.each([
 
     expect(await projects.getLastOpened()).toBe('prj_real');
     expect(await settings.get('lastOpened')).toBe('not a project id');
+  });
+});
+
+/**
+ * Which paths own the index entry under them, and which merely borrow the fingerprint.
+ *
+ * A recording and its proxy share a fingerprint — that is how one finds the other — so the
+ * last segment of a path is not a licence to act on the record beneath it. Deleting a
+ * half-written proxy took the recording's filename and MIME type with it, and a recording
+ * with no recorded type comes back untyped, which Safari refuses to decode. That was
+ * "sometimes it shows the video and sometimes it doesn't".
+ *
+ * The same rule keeps `openWrite` off a recording, because a writable truncates what it
+ * opens and the two paths are one shadowed variable apart.
+ */
+describe('what a media path owns', () => {
+  it('claims the index entry only for the recording itself', () => {
+    expect(indexKeyFor('media/0000abcd')).toBe('0000abcd');
+  });
+
+  it('claims nothing for anything derived from it', () => {
+    expect(indexKeyFor('proxy/0000abcd')).toBe(null);
+    expect(indexKeyFor('proxy/0000abcd.ok')).toBe(null);
+  });
+
+  it('claims nothing for a path it does not recognise', () => {
+    expect(indexKeyFor('0000abcd')).toBe(null);
+    expect(indexKeyFor('media/nested/0000abcd')).toBe(null);
+    expect(indexKeyFor('')).toBe(null);
   });
 });

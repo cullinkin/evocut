@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AudioCopier } from '../src/proxy.js';
+import { AudioCopier, SourceReader } from '../src/proxy.js';
 import { readAudioTrack } from '../src/demux.js';
 import { Mp4Writer } from '../src/mp4.js';
 
@@ -55,7 +55,7 @@ describe('copying the original’s audio into the proxy', () => {
   it('hands back the frames due by a given moment, in order and unaltered', async () => {
     const file = recording(40);
     const track = (await readAudioTrack(file))!;
-    const copier = new AudioCopier(file, track);
+    const copier = new AudioCopier(new SourceReader(file, undefined), track);
 
     const first = await copier.upTo(at(3));
     expect(first.map((frame) => frame.timestampUs)).toEqual([at(0), at(1), at(2), at(3)]);
@@ -75,7 +75,7 @@ describe('copying the original’s audio into the proxy', () => {
     */
     const file = recording(600);
     const track = (await readAudioTrack(file))!;
-    const copier = new AudioCopier(file, track);
+    const copier = new AudioCopier(new SourceReader(file, undefined), track);
 
     const all = await copier.upTo(Number.MAX_SAFE_INTEGER);
     expect(all).toHaveLength(600);
@@ -84,9 +84,52 @@ describe('copying the original’s audio into the proxy', () => {
     expect([...all[599]!.data]).toEqual(new Array(40).fill(599 % 251));
   });
 
+  it('retries a failed read against a fresh handle', async () => {
+    /*
+      What cost a finished run twice. A `File` from the origin-private file system is a
+      snapshot, and on iOS one held across a quarter of an hour of reading stops answering:
+      the read fails, with nothing wrong with the recording. Believing the first refusal
+      threw away fifteen minutes of work.
+    */
+    const file = recording(40);
+    const track = (await readAudioTrack(file))!;
+
+    let refusals = 0;
+    const stale = {
+      slice: () => ({
+        arrayBuffer: async () => {
+          refusals += 1;
+          throw new Error('The I/O read operation failed.');
+        },
+      }),
+    } as unknown as Blob;
+
+    const copier = new AudioCopier(new SourceReader(stale, async () => file), track);
+    const frames = await copier.upTo(at(3));
+    expect(refusals).toBe(1);
+    expect(frames.map((frame) => frame.timestampUs)).toEqual([at(0), at(1), at(2), at(3)]);
+  });
+
+  it('gives up, with the position, when there is no fresh handle to be had', async () => {
+    const track = (await readAudioTrack(recording(4)))!;
+    const stale = {
+      slice: () => ({
+        arrayBuffer: async () => {
+          throw new Error('The I/O read operation failed.');
+        },
+      }),
+    } as unknown as Blob;
+
+    // Named with where it was, because "it failed" and "it failed 2GB into a 5GB file" are
+    // different reports.
+    await expect(new AudioCopier(new SourceReader(stale, undefined), track).upTo(at(1))).rejects.toThrow(
+      /Could not read the recording at \d+MB/,
+    );
+  });
+
   it('gives back nothing when nothing is due yet', async () => {
     const file = recording(10);
     const track = (await readAudioTrack(file))!;
-    expect(await new AudioCopier(file, track).upTo(-1)).toEqual([]);
+    expect(await new AudioCopier(new SourceReader(file, undefined), track).upTo(-1)).toEqual([]);
   });
 });

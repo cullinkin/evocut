@@ -10,7 +10,7 @@ import {
   type TransformValue,
 } from '@evocut/edl';
 import { filterFor, paintedSize, previewTransform, sampleTimeline, type FrameLayer } from '@evocut/renderer';
-import { frameNear, frameSpacingUs, useFilmstrips } from './filmstrip.ts';
+import { frameNear, frameSpacingUs, tooHeavyToSeek, useFilmstrips } from './filmstrip.ts';
 import { usePlayhead } from './playhead.ts';
 import {
   newScrubPace,
@@ -279,7 +279,19 @@ export function Player({
         .flatMap((track) => track.clips)
         .map((clip) => clip.sourceId)
         .filter((id, index, all) => all.indexOf(id) === index)
-        .map((id) => ({ id, url: objectUrl, durationUs: sourceDurationOf(timeline, id) })),
+        /*
+          Null unless the URL is a proxy's. The scrub proxy reads whatever the filmstrip
+          extracted, and extraction opens a third decoder on the source — which against half
+          an hour of 4K is what has been killing the tab. The timeline applies the same rule;
+          both have to, because the extraction is shared and one caller asking for it is
+          enough to start it.
+        */
+        .map((id) => {
+          const durationUs = sourceDurationOf(timeline, id);
+          const proxied = objectUrl.includes('from=proxy');
+          const heavy = tooHeavyToSeek({ durationUs, ...timeline.resolution });
+          return { id, url: proxied || !heavy ? objectUrl : null, durationUs };
+        }),
     [objectUrl, timeline],
   );
   const strips = useFilmstrips(sources);

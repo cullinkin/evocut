@@ -44,6 +44,24 @@ export interface Filmstrip {
 
 const EMPTY: Filmstrip = { frames: [], luma: [], ready: false, aspect: 9 / 16 };
 
+/**
+ * A recording a phone cannot afford to seek through eighty times.
+ *
+ * Both halves matter and neither is enough alone: a 4K frame is expensive to decode however
+ * short the take, and a long recording means a large file whose keyframes are far apart and
+ * whose seeks are therefore slow wherever they land. Under both, extraction is the cheap
+ * background job it was always meant to be.
+ */
+export function tooHeavyToSeek(source: { durationUs: number; width?: number; height?: number }): boolean {
+  const pixels = (source.width ?? 0) * (source.height ?? 0);
+  return pixels >= HEAVY_PIXELS || source.durationUs >= HEAVY_DURATION_US;
+}
+
+/** Around 3MP: 4K in either orientation, and nothing a phone shoots below it. */
+const HEAVY_PIXELS = 3_000_000;
+/** Five minutes. Past this a phone recording is large enough that every seek is a read. */
+const HEAVY_DURATION_US = 5 * 60 * 1_000_000;
+
 /** Cap on thumbnails per source: enough to read a take at a glance, cheap on a phone. */
 const MAX_FRAMES = 80;
 const MIN_INTERVAL_US = 1_000_000;
