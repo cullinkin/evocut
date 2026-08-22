@@ -8,6 +8,7 @@ import {
   type ProxyProgress,
 } from '@evocut/renderer';
 import { proxyDonePath, proxyPath, type AppStores } from '@evocut/store';
+import { openProxySink } from './proxy-sink.ts';
 import { noteStage } from './recover.ts';
 
 /**
@@ -253,7 +254,13 @@ export function useProxies(
           const cramped = await tooLittleRoom(source.duration);
           if (cramped) throw new Error(cramped);
 
-          sink = await stores.media.openWrite(path);
+          /*
+            A sync access handle first, and the ordinary writable only if the platform will
+            not give one. The difference is a swap file: the writable needs the space twice
+            and commits at the end, which is where three quarter-hour runs died.
+          */
+          const direct = await openProxySink(path);
+          sink = direct ?? (await stores.media.openWrite(path));
           if (!sink) throw new Error('This browser cannot write a proxy without holding it in memory.');
 
           const result = await renderProxy(
@@ -289,6 +296,9 @@ export function useProxies(
             framesSkipped: result.framesSkipped,
             interruptions: result.interruptions,
             from: result.from,
+            // Which way the bytes reached storage. The swap-file route is where three
+            // finished runs died, so a proxy that says `writable` is one to be suspicious of.
+            wrote: direct ? 'sync' : 'writable',
             bytes,
             videoCodec: result.videoCodec,
             audio: result.audio,

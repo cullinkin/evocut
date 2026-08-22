@@ -49,6 +49,15 @@ const log = await exportLog(page, 'proxy-log.jsonl');
 const made = log.events.filter((event) => event.type === 'proxy.complete').at(-1)?.payload;
 set('proxy', made);
 check('itFinished', Boolean(made), true);
+/*
+  Written straight into the file rather than through a swap.
+
+  `createWritable` writes beside the target and commits the lot at `close()` — the space is
+  needed twice and the commit is one all-or-nothing operation at the very end, which is
+  exactly where three quarter-hour runs died with "The I/O read operation failed". A sync
+  access handle writes in place, from a worker, with nothing left to commit.
+*/
+check('itWroteStraightIntoTheFile', made?.wrote, 'sync');
 check('andIsSmallerThanTheRecording', (made?.width ?? 9999) <= 1080 && (made?.height ?? 9999) <= 1080, true);
 check('andHasFramesInIt', (made?.framesEncoded ?? 0) > 100, true);
 
