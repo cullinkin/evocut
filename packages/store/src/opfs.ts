@@ -15,6 +15,15 @@ import type { MediaRecord, MediaSink, MediaStore } from './types.js';
  * `readdir` on every import and no room for the metadata (original filename, mime type)
  * that OPFS itself does not keep.
  */
+/**
+ * How much of a streamed file is held before it is handed to storage.
+ *
+ * Large enough that a half-hour proxy costs tens of writes rather than tens of thousands;
+ * small enough that the buffer is never a memory problem beside the decoder and encoder it
+ * sits between.
+ */
+const WRITE_BLOCK_BYTES = 4 * 1024 * 1024;
+
 export class OpfsMediaStore implements MediaStore {
   #index: MediaIndex;
   #root: Promise<FileSystemDirectoryHandle> | null = null;
@@ -119,20 +128,58 @@ export class OpfsMediaStore implements MediaStore {
     const writable = await handle.createWritable().catch(() => null);
     if (!writable) return null;
 
+    /*
+      Buffered, and appended rather than positioned.
+
+      A proxy arrives one encoded frame at a time — forty-nine thousand of them for a
+      half-hour recording — and the first version handed each one to the file system on its
+      own, at an explicit offset, and waited. That is forty-nine thousand round trips to
+      storage on a phone, which is minutes of the fifteen a real proxy took, and forty-nine
+      thousand chances for the one that failed at the end of a finished run.
+
+      A few megabytes at a time, written at the cursor, is the shape a file system is built
+      for. The only positioned write left is the single sixteen-byte patch that closes the
+      `mdat` box, and it flushes first so the two cannot cross.
+    */
     let at = 0;
+    let held: Uint8Array[] = [];
+    let heldBytes = 0;
+
+    const flush = async (): Promise<void> => {
+      if (heldBytes === 0) return;
+      const block = new Uint8Array(heldBytes);
+      let offset = 0;
+      for (const part of held) {
+        block.set(part, offset);
+        offset += part.byteLength;
+      }
+      held = [];
+      heldBytes = 0;
+      await writable.write(block as unknown as BufferSource);
+    };
+
     return {
       async write(bytes) {
-        await writable.write({ type: 'write', position: at, data: bytes as unknown as BufferSource });
+        // A copy, because the caller may reuse its buffer before the block is written.
+        held.push(bytes.slice());
+        heldBytes += bytes.byteLength;
         at += bytes.byteLength;
+        if (heldBytes >= WRITE_BLOCK_BYTES) await flush();
       },
       async patch(position, bytes) {
+        await flush();
         await writable.write({ type: 'write', position, data: bytes as unknown as BufferSource });
+        // Back to the end, so the appends that follow land where the cursor was.
+        await writable.write({ type: 'seek', position: at });
       },
       async close() {
+        await flush();
         await writable.close();
         return at;
       },
       abort: async () => {
+        held = [];
+        heldBytes = 0;
         await writable.abort().catch(() => {});
         // Nothing half-written is worth keeping: a truncated proxy is a file the editor
         // would try to play.

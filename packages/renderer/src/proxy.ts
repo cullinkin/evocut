@@ -95,6 +95,15 @@ export interface ProxyResult {
    * proxy is wrong" look identical from outside and want different fixes.
    */
   framesSkipped: number;
+  /**
+   * Times the page was taken away and the run picked itself back up.
+   *
+   * iOS closes a backgrounded page's codecs, so locking the screen or switching apps in the
+   * middle of a fifteen-minute proxy used to end it. Worth counting: a proxy that survived
+   * four interruptions and one that was never touched are the same file, and only one of
+   * them says anything about how the phone behaved.
+   */
+  interruptions: number;
   byteLength: number;
   videoCodec: string;
   /** `copied` when the original's audio was passed through untouched. */
@@ -217,35 +226,72 @@ export async function renderProxy(
         })
       : null;
 
-    let described = false;
     let encodeError: Error | null = null;
+    let interruptions = 0;
+    let keyAt = -Infinity;
     const pending: Mp4Sample[] = [];
 
-    const encoder = new VideoEncoder({
-      output: (chunk, metadata) => {
-        const description = metadata?.decoderConfig?.description;
-        if (description && !described) {
-          file.describeTrack(videoTrack, toBytes(description));
-          described = true;
-        }
-        pending.push(chunkToSample(chunk));
-      },
-      error: (error) => {
-        encodeError = error;
-      },
-    });
-    encoder.configure({
+    const encoderConfig: VideoEncoderConfig = {
       codec,
       width: out.width,
       height: out.height,
       bitrate: Math.round(bitrateFor(out) * BITRATE_SHARE),
       latencyMode: 'quality',
       ...(codec.startsWith('avc') ? { avc: { format: 'avc' as const } } : {}),
+    };
+
+    let encoder = new VideoEncoder({
+      output: (chunk, metadata) => {
+        // Written every time rather than once: a rebuilt encoder produces its own, and
+        // for the same configuration it is the same bytes.
+        const description = metadata?.decoderConfig?.description;
+        if (description) file.describeTrack(videoTrack, toBytes(description));
+        pending.push(chunkToSample(chunk));
+      },
+      error: (error) => {
+        encodeError = error;
+      },
     });
+    encoder.configure(encoderConfig);
+
+    /*
+      What to do when the page comes back.
+
+      iOS takes a backgrounded page's codecs away — both of them — so coming back means
+      building a new encoder as well as a new decoder. The next frame is forced to be a
+      keyframe, because a fresh encoder has no history to code against and the stream has
+      to be decodable across the join.
+    */
+    const rebuildEncoder = (): void => {
+      if (encoder.state !== 'closed') {
+        try {
+          encoder.close();
+        } catch {
+          // Already gone, which is the case this exists for.
+        }
+      }
+      encodeError = null;
+      encoder = new VideoEncoder({
+        output: (chunk, metadata) => {
+          const description = metadata?.decoderConfig?.description;
+          if (description) file.describeTrack(videoTrack, toBytes(description));
+          pending.push(chunkToSample(chunk));
+        },
+        error: (error) => {
+          encodeError = error;
+        },
+      });
+      encoder.configure(encoderConfig);
+    };
+
+    const recover = async (): Promise<void> => {
+      await whenVisible();
+      rebuildEncoder();
+      keyAt = -Infinity;
+    };
 
     const sound = audio ? new AudioCopier(request.file, audio) : null;
     let lastAt = -1;
-    let keyAt = -Infinity;
 
     /** Drain whatever the encoder has finished, and the sound that belongs beside it. */
     const drain = async (upToUs: number): Promise<void> => {
@@ -293,15 +339,32 @@ export async function renderProxy(
 
     report('encoding', 0);
     if (decodable) {
-      await pumpByDecoding(decodable, request, emit, () => encodeError);
+      await pumpByDecoding(decodable, request, emit, () => encodeError, recover, () => {
+        interruptions += 1;
+      });
     } else {
       await pumpByPlayback(video!, request, emit, () => encodeError, warnings);
     }
 
+    /*
+      The last stretch, and the one that has to be on screen.
+
+      Flushing the encoder and writing the index are both codec-and-storage work, and a
+      page that goes away during them loses a finished run at the final step. So it waits
+      for the page rather than pressing on into a decoder that may already be gone.
+    */
     report('finishing', 1);
-    await encoder.flush();
-    if (encodeError) throw encodeError;
-    encoder.close();
+    await whenVisible();
+    if (encoder.state === 'closed') {
+      // Nothing left to flush from an encoder that was taken away; whatever it had already
+      // handed over is written, and the tail of the recording is missing rather than the
+      // whole file.
+      warnings.push('The page was put away as the proxy finished, so its last moments may be short.');
+    } else {
+      await encoder.flush();
+      if (encodeError) throw encodeError;
+      encoder.close();
+    }
     await drain(Number.MAX_SAFE_INTEGER);
 
     const done = await file.finish();
@@ -314,6 +377,7 @@ export async function renderProxy(
       height: out.height,
       framesEncoded,
       framesSkipped,
+      interruptions,
       byteLength: done.byteLength,
       videoCodec: codec,
       audio: audioTrack === null ? 'none' : 'copied',
@@ -333,9 +397,12 @@ export async function renderProxy(
 
 interface Decodable {
   track: SourceVideoTrack;
+  config: VideoDecoderConfig;
   decoder: VideoDecoder;
   frames: VideoFrame[];
   failure: Error | null;
+  /** Build a fresh decoder, after one has been taken away. See `resumable`. */
+  reopen(): void;
 }
 
 /**
@@ -350,17 +417,30 @@ async function openDecodable(file: Blob): Promise<Decodable | null> {
   if (!ready) return null;
 
   const { track, config } = ready;
-  const state: Decodable = { track, decoder: null as unknown as VideoDecoder, frames: [], failure: null };
-  state.decoder = new VideoDecoder({
-    output: (frame) => state.frames.push(frame),
-    error: (error) => {
-      state.failure = error;
+  const state: Decodable = {
+    track,
+    config,
+    decoder: null as unknown as VideoDecoder,
+    frames: [],
+    failure: null,
+    reopen() {
+      for (const frame of state.frames) frame.close();
+      state.frames = [];
+      state.failure = null;
+      if (state.decoder?.state !== 'closed') state.decoder?.close();
+      state.decoder = new VideoDecoder({
+        output: (frame) => state.frames.push(frame),
+        error: (error) => {
+          state.failure = error;
+        },
+      });
+      state.decoder.configure(config);
     },
-  });
+  };
+
   try {
-    state.decoder.configure(config);
+    state.reopen();
   } catch {
-    state.decoder.close();
     return null;
   }
   return state;
@@ -417,8 +497,10 @@ async function pumpByDecoding(
   request: ProxyRequest,
   emit: (source: CanvasImageSource, at: number) => Promise<boolean>,
   encodeError: () => Error | null,
+  recover: () => Promise<void>,
+  onInterrupted: () => void,
 ): Promise<void> {
-  const { track, decoder } = state;
+  const { track } = state;
 
   const take = async (): Promise<void> => {
     while (state.frames.length > 0) {
@@ -431,45 +513,117 @@ async function pumpByDecoding(
     }
   };
 
-  for (let first = 0; first < track.count; first += SAMPLE_BATCH) {
+  /** The last frame that can be decoded on its own, at or before `index`. */
+  const rewind = (index: number): number => {
+    for (let at = Math.min(index, track.count - 1); at > 0; at -= 1) {
+      if (track.keys[at]) return at;
+    }
+    return 0;
+  };
+
+  let cursor = 0;
+  let loadedFrom = -1;
+  let loadedTo = -1;
+  let bytes: Uint8Array | null = null;
+
+  /*
+    Picked up where it was put down, rather than abandoned.
+
+    iOS takes a backgrounded page's codecs away — lock the screen or switch apps and the
+    decoder is simply closed underneath you, which after fifteen minutes of work is the
+    most expensive way possible to lose it. It cannot be prevented; it can be survived.
+    Decoding is driven from the sample table here, so resuming is a matter of building a
+    new decoder and starting again at the last frame that can stand on its own. Everything
+    between there and where we stopped is decoded a second time and discarded by `emit`,
+    which already refuses a timestamp it has passed.
+  */
+  const resume = async (): Promise<void> => {
+    onInterrupted();
+    await recover();
+    state.reopen();
+    cursor = rewind(cursor);
+    bytes = null;
+  };
+
+  while (cursor < track.count) {
     throwIfAborted(request.signal);
+
+    if (interrupted(state)) {
+      await resume();
+      continue;
+    }
     const error = encodeError() ?? state.failure;
-    if (error) throw error;
+    if (error) {
+      if (!interrupted(state)) throw error;
+      await resume();
+      continue;
+    }
 
     // One read for a run of frames. They are laid down in order, so the run is contiguous
     // and this is a single slice rather than sixty-four.
-    const last = Math.min(track.count, first + SAMPLE_BATCH);
-    let from = Infinity;
-    let to = 0;
-    for (let index = first; index < last; index += 1) {
-      from = Math.min(from, track.offsets[index]!);
-      to = Math.max(to, track.offsets[index]! + track.sizes[index]!);
+    if (bytes === null || cursor < loadedFrom || cursor >= loadedTo) {
+      loadedFrom = cursor;
+      loadedTo = Math.min(track.count, cursor + SAMPLE_BATCH);
+      let from = Infinity;
+      let to = 0;
+      for (let index = loadedFrom; index < loadedTo; index += 1) {
+        from = Math.min(from, track.offsets[index]!);
+        to = Math.max(to, track.offsets[index]! + track.sizes[index]!);
+      }
+      bytes = new Uint8Array(await request.file.slice(from, to).arrayBuffer());
+      loadedFrom = from;
     }
-    const bytes = new Uint8Array(await request.file.slice(from, to).arrayBuffer());
 
-    for (let index = first; index < last; index += 1) {
-      const at = track.offsets[index]! - from;
-      decoder.decode(
+    const at = track.offsets[cursor]! - loadedFrom;
+    try {
+      state.decoder.decode(
         new EncodedVideoChunk({
-          type: track.keys[index] ? 'key' : 'delta',
-          timestamp: track.timesUs[index]!,
-          duration: track.durationsUs[index]!,
-          data: bytes.subarray(at, at + track.sizes[index]!),
+          type: track.keys[cursor] ? 'key' : 'delta',
+          timestamp: track.timesUs[cursor]!,
+          duration: track.durationsUs[cursor]!,
+          data: bytes.subarray(at, at + track.sizes[cursor]!),
         }),
       );
+    } catch (cause) {
+      // `decode` on a decoder that has been taken away throws rather than reporting.
+      if (!interrupted(state)) throw cause;
+      await resume();
+      continue;
+    }
+    cursor += 1;
 
+    await take();
+    while (state.decoder.decodeQueueSize > MAX_DECODE_QUEUE || state.frames.length > MAX_HELD_FRAMES) {
+      throwIfAborted(request.signal);
+      if (interrupted(state)) break;
+      await tick();
       await take();
-      while (decoder.decodeQueueSize > MAX_DECODE_QUEUE || state.frames.length > MAX_HELD_FRAMES) {
-        throwIfAborted(request.signal);
-        await tick();
-        await take();
-      }
     }
   }
 
-  await decoder.flush();
+  await state.decoder.flush().catch(() => {});
   await take();
-  if (state.failure) throw state.failure;
+  if (state.failure && !interrupted(state)) throw state.failure;
+}
+
+/** Whether the page, rather than the recording, is what went wrong. */
+function interrupted(state: Decodable): boolean {
+  if (typeof document !== 'undefined' && document.hidden) return true;
+  if (state.decoder.state === 'closed') return true;
+  return /closed/i.test(state.failure?.message ?? '');
+}
+
+/** Resolve once the page is on screen again. */
+export function whenVisible(): Promise<void> {
+  if (typeof document === 'undefined' || !document.hidden) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (document.hidden) return;
+      document.removeEventListener('visibilitychange', check);
+      resolve();
+    };
+    document.addEventListener('visibilitychange', check);
+  });
 }
 
 /**
@@ -609,6 +763,21 @@ async function openVideo(url: string): Promise<HTMLVideoElement> {
  * surprise; the other way round is someone waiting on a progress bar that lied to them.
  */
 export const DECODER_SPEEDUP = 4;
+
+/**
+ * Roughly how much room a proxy will want, in bytes.
+ *
+ * The picture at a proxy's bitrate plus the recording's own audio, which is copied through
+ * rather than re-encoded. Approximate on purpose — it is used to decide whether there is
+ * obviously not enough space, which is a question that does not need three significant
+ * figures.
+ */
+export function proxyBytesEstimate(durationUs: number, audioBytes = 0): number {
+  const seconds = microsToSeconds(durationUs);
+  // A 1080-long-edge frame lands on the floor in `bitrateFor`, so this is that floor.
+  const bitsPerSecond = 2_000_000 * BITRATE_SHARE;
+  return Math.round((seconds * bitsPerSecond) / 8 + audioBytes);
+}
 
 export function proxyEstimateMs(durationUs: number, from: 'decoder' | 'playback' = 'playback'): number {
   const seconds = microsToSeconds(durationUs);

@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project, Source } from '@evocut/edl';
-import { PROXY_MAX_DIMENSION, isProxySupported, renderProxy, type ProxyProgress } from '@evocut/renderer';
+import {
+  PROXY_MAX_DIMENSION,
+  isProxySupported,
+  proxyBytesEstimate,
+  renderProxy,
+  type ProxyProgress,
+} from '@evocut/renderer';
 import { proxyDonePath, proxyPath, type AppStores } from '@evocut/store';
 import { noteStage } from './recover.ts';
 
@@ -64,6 +70,77 @@ export async function finishedProxy(source: Source, media: AppStores['media']): 
   const paths = pathsFor(source);
   if (!paths) return null;
   return (await media.has(paths.done).catch(() => false)) ? paths.proxy : null;
+}
+
+/**
+ * Whether there is obviously not enough room, before fifteen minutes are spent finding out.
+ *
+ * A finished run failed on its last step with "The I/O read operation failed", which is
+ * what a file system says when it cannot complete a write — and the most ordinary reason
+ * for that, on a phone holding a five-gigabyte recording, is that there is nowhere to put
+ * two hundred megabytes more. Asking first costs a millisecond and turns a quarter of an
+ * hour of wasted work into a sentence.
+ *
+ * Returns null when there is room, or when the browser will not say — an unknown quota is
+ * not a reason to refuse.
+ */
+async function tooLittleRoom(durationUs: number): Promise<string | null> {
+  const wanted = proxyBytesEstimate(durationUs);
+  const estimate = await navigator.storage?.estimate?.().catch(() => null);
+  if (!estimate?.quota || estimate.usage === undefined) return null;
+
+  const free = estimate.quota - estimate.usage;
+  // Half again, because the file system needs room to commit as well as to hold.
+  if (free >= wanted * 1.5) return null;
+  return `There is not enough space: a proxy of this recording needs about ${megabytes(wanted)}, and ${megabytes(free)} is free.`;
+}
+
+function megabytes(bytes: number): string {
+  return `${Math.max(1, Math.round(bytes / 1_048_576))}MB`;
+}
+
+/**
+ * Keep the screen on while a proxy is being made.
+ *
+ * Not a nicety. iOS closes a backgrounded page's codecs, and the surest way to background a
+ * page is to let the phone lock itself while a fifteen-minute job runs — which is exactly
+ * what happened, twice, and cost the whole run each time. The generation survives an
+ * interruption now, but not needing to is better.
+ *
+ * Re-requested when the page comes back, because the lock is released by the very event it
+ * exists to prevent. Absent on browsers without it, where the answer is simply "keep the
+ * phone awake yourself".
+ */
+function holdScreenAwake(): () => void {
+  const anyNavigator = navigator as Navigator & {
+    wakeLock?: { request(kind: 'screen'): Promise<{ release(): Promise<void> }> };
+  };
+  if (!anyNavigator.wakeLock) return () => {};
+
+  let held: { release(): Promise<void> } | null = null;
+  let live = true;
+
+  const take = () => {
+    if (!live || document.hidden) return;
+    void anyNavigator
+      .wakeLock!.request('screen')
+      .then((lock) => {
+        if (live) held = lock;
+        else void lock.release().catch(() => {});
+      })
+      .catch(() => {
+        // Refused — low battery, or a browser that says no. The job still runs.
+      });
+  };
+
+  take();
+  document.addEventListener('visibilitychange', take);
+  return () => {
+    live = false;
+    document.removeEventListener('visibilitychange', take);
+    void held?.release().catch(() => {});
+    held = null;
+  };
 }
 
 /** Write the marker that says this proxy is whole. */
@@ -144,6 +221,7 @@ export function useProxies(
       setError(null);
       setJob({ sourceId, stage: 'preparing', progress: 0, framesEncoded: 0, byteLength: 0 });
 
+      const release = holdScreenAwake();
       void (async () => {
         const started = Date.now();
         noteStage('proxy');
@@ -152,6 +230,9 @@ export function useProxies(
           if (source.locator.kind !== 'opfs') throw new Error('That recording is not stored on this device.');
           const file = await stores.media.get(source.locator.path);
           if (!file) throw new Error('That recording is missing from storage.');
+
+          const cramped = await tooLittleRoom(source.duration);
+          if (cramped) throw new Error(cramped);
 
           sink = await stores.media.openWrite(path);
           if (!sink) throw new Error('This browser cannot write a proxy without holding it in memory.');
@@ -167,13 +248,18 @@ export function useProxies(
           if (paths) await markFinished(stores, paths.done);
 
           setReady((previous) => new Set(previous).add(sourceId));
+          const room = await navigator.storage?.estimate?.().catch(() => null);
           doneRef.current({
             sourceId,
             elapsedMs: Date.now() - started,
+            ...(room?.quota
+              ? { freeBytesAfter: Math.round(room.quota - (room.usage ?? 0)) }
+              : {}),
             width: result.width,
             height: result.height,
             framesEncoded: result.framesEncoded,
             framesSkipped: result.framesSkipped,
+            interruptions: result.interruptions,
             from: result.from,
             bytes,
             videoCodec: result.videoCodec,
@@ -187,6 +273,7 @@ export function useProxies(
           // person who pressed the button.
           if (!controller.signal.aborted) setError(message);
         } finally {
+          release();
           if (abortRef.current === controller) abortRef.current = null;
           setJob(null);
         }

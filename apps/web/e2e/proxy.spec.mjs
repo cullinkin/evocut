@@ -180,6 +180,70 @@ check('andBeatPlayingItThrough', tookMs < Math.round(before.sources[0].duration 
 
 errors.push(...fastErrors);
 
+// --- Put away, and picked back up --------------------------------------------------------
+/**
+ * A backgrounded page loses its codecs, and the run has to survive that.
+ *
+ * Reported after a real attempt: "if my screen locked, or I went away from the Safari app,
+ * the proxy generation would fail" — twice, each time throwing away a quarter of an hour.
+ * iOS closes a hidden page's `VideoDecoder` and `VideoEncoder` outright; nothing can hold
+ * on to them. What the run can do is notice, wait, build new ones, and start again at the
+ * last frame that decodes on its own.
+ *
+ * Faked here by telling the page it is hidden, which is what the browser tells it. The
+ * codecs stay alive in a headless Chromium, so what this proves is the *rule* — that the
+ * pump stops while the page is away and finishes the file when it comes back — rather than
+ * the recovery from a genuinely closed decoder, which no test can arrange.
+ */
+const away = await browser.newContext({ acceptDownloads: true });
+const paused = await away.newPage();
+const pausedErrors = [];
+paused.on('pageerror', (error) => pausedErrors.push(String(error)));
+
+await paused.addInitScript(() => {
+  let hidden = false;
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => (hidden ? 'hidden' : 'visible'),
+  });
+  window.__setHidden = (next) => {
+    hidden = next;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+});
+
+await paused.goto(APP_URL);
+await paused.locator('text=Choose a video').waitFor();
+await paused.setInputFiles('input[type=file]', proxyFile);
+await paused.locator('.clip-block').first().waitFor({ timeout: 30000 });
+await paused.locator('.banner.proxy button:has-text("Make one")').click();
+await paused.locator('.banner.proxy.running').waitFor({ timeout: 20000 });
+
+// Away, part way through.
+await paused.evaluate(() => window.__setHidden(true));
+await paused.waitForTimeout(1500);
+const whileAway = await paused.evaluate(() => document.querySelector('.banner.proxy.running')?.textContent ?? '');
+await paused.waitForTimeout(1500);
+const stillAway = await paused.evaluate(() => document.querySelector('.banner.proxy.running')?.textContent ?? '');
+set('progressWhileAway', { first: whileAway, then: stillAway });
+// It has not given up and put the offer back, which is what it used to do.
+check('itDidNotFailWhileAway', /Proxy/.test(stillAway), true);
+
+// And back.
+await paused.evaluate(() => window.__setHidden(false));
+await paused.waitForFunction(() => !document.querySelector('.banner.proxy'), null, { timeout: 180_000 });
+await paused.waitForTimeout(1000);
+
+const survived = (await exportLog(paused, 'proxy-paused-log.jsonl')).events
+  .filter((event) => event.type === 'proxy.complete')
+  .at(-1)?.payload;
+set('afterComingBack', survived);
+check('itFinishedAfterComingBack', Boolean(survived), true);
+check('andThereIsNoError', (await exportLog(paused, 'proxy-paused-log.jsonl')).events.filter((e) => e.type === 'proxy.error').length, 0);
+
+errors.push(...pausedErrors);
+
 const code = finish(errors.filter((error) => !error.includes('favicon')));
 await browser.close();
 process.exit(code);
