@@ -822,6 +822,31 @@ function ProxyBanner({
   const waiting = project.sources.filter((source) => !proxies.ready.has(source.id));
   if (dismissed || waiting.length === 0) return null;
 
+  /*
+    A failure has to say so.
+
+    It did not: the strip went back to offering, which from the outside is a button that
+    flashes and does nothing. The one real failure so far — a phone encoding H.264, where
+    the muxer refused a track whose description had not arrived yet — spent two attempts
+    looking exactly like that, and was only visible in the exported log.
+  */
+  if (proxies.error) {
+    return (
+      <div className="banner proxy failed" role="status">
+        <div>
+          <strong>The proxy could not be made</strong>
+          <small>{proxies.error}</small>
+        </div>
+        <button className="ghost small" onClick={() => proxies.make(waiting[0]!.id)}>
+          Retry
+        </button>
+        <button className="ghost small" onClick={onDismiss} aria-label="Not now">
+          ✕
+        </button>
+      </div>
+    );
+  }
+
   const longest = Math.max(...waiting.map((source) => source.duration));
   return (
     <div className="banner proxy" role="status">

@@ -89,9 +89,6 @@ const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 1_000_000;
 
 function videoTrackState(init: VideoTrackInit): Omit<TrackState, 'id' | 'samples'> {
-  if (isAvc(init.codec) && !init.description) {
-    throw new Error('An AVC track needs the avcC description from the encoder.');
-  }
   return {
     kind: 'video',
     codec: init.codec,
@@ -105,9 +102,6 @@ function videoTrackState(init: VideoTrackInit): Omit<TrackState, 'id' | 'samples
 }
 
 function audioTrackState(init: AudioTrackInit): Omit<TrackState, 'id' | 'samples'> {
-  if (isOpus(init.codec) && !init.description) {
-    throw new Error('An Opus track needs the OpusHead description from the encoder.');
-  }
   return {
     kind: 'audio',
     codec: init.codec,
@@ -167,6 +161,7 @@ export class Mp4Writer {
   finalize(): { blob: Blob; durationUs: number } {
     const tracks = this.#tracks.filter((track) => track.samples.length > 0);
     if (tracks.length === 0) throw new Error('Nothing to write: no samples were added.');
+    for (const track of tracks) assertDescribed(track);
 
     const timings = tracks.map((track) => timeTrack(track));
 
@@ -337,6 +332,7 @@ export class Mp4Stream {
   async finish(): Promise<{ durationUs: number; byteLength: number }> {
     const kept = this.#tracks.filter((track) => track.samples.length > 0);
     if (kept.length === 0) throw new Error('Nothing to write: no samples were added.');
+    for (const track of kept) assertDescribed(track);
 
     const offsets = this.#tracks.flatMap((track, index) => (track.samples.length > 0 ? [this.#offsets[index]!] : []));
     const timings = kept.map((track) => timeTrack(track));
@@ -352,6 +348,29 @@ export class Mp4Stream {
 
     this.#open = false;
     return { durationUs, byteLength: this.#cursor };
+  }
+}
+
+/**
+ * A codec that needs a configuration record has one, by the time the index is written.
+ *
+ * Checked here rather than when the track is declared, and the difference is the whole
+ * reason this function exists. An AVC encoder does not hand back its `avcC` until the
+ * *first chunk* — so a writer that streams, and must therefore declare its tracks before
+ * anything has been encoded, cannot possibly have it yet. Refusing at declaration time
+ * meant a proxy failed instantly on any phone that encodes H.264, with an error blaming
+ * the encoder for not having supplied something it had not been asked for.
+ *
+ * The real rule was always about the file: a track whose decoder configuration is missing
+ * when `moov` is built is a track nothing can play. That is what this says.
+ */
+function assertDescribed(track: TrackState): void {
+  if (track.description.length > 0) return;
+  if (isAvc(track.codec)) {
+    throw new Error('An AVC track needs the avcC description from the encoder.');
+  }
+  if (isOpus(track.codec)) {
+    throw new Error('An Opus track needs the OpusHead description from the encoder.');
   }
 }
 

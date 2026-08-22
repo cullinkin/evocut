@@ -251,12 +251,26 @@ describe('Mp4Writer', () => {
     expect(u32At(payload, 4)).toBe(48_000);
   });
 
-  it('will not start a track it cannot describe', () => {
+  it('will not write a track it cannot describe', () => {
+    /*
+      Checked when the index is built rather than when the track is declared.
+
+      An AVC encoder does not hand back its `avcC` until the first chunk, so a writer that
+      streams — and must declare its tracks before anything is encoded — cannot have it at
+      declaration time. Refusing there made a proxy fail instantly on every phone that
+      encodes H.264, with an error blaming the encoder for withholding something it had not
+      been asked for. The rule that actually matters is about the file: a track with no
+      decoder configuration in `moov` is a track nothing can play.
+    */
     const writer = new Mp4Writer();
-    expect(() => writer.addVideoTrack({ codec: 'avc1.42E01F', width: 64, height: 64 })).toThrow(/avcC/);
-    expect(() => writer.addAudioTrack({ codec: 'opus', sampleRate: 48_000, channels: 2 })).toThrow(
-      /OpusHead/,
-    );
+    const video = writer.addVideoTrack({ codec: 'avc1.42E01F', width: 64, height: 64 });
+    writer.addSample(video, { data: new Uint8Array(32), timestampUs: 0, durationUs: 33_333, key: true });
+    expect(() => writer.finalize()).toThrow(/avcC/);
+
+    const sound = new Mp4Writer();
+    const audio = sound.addAudioTrack({ codec: 'opus', sampleRate: 48_000, channels: 2 });
+    sound.addSample(audio, { data: new Uint8Array(16), timestampUs: 0, durationUs: 20_000 });
+    expect(() => sound.finalize()).toThrow(/OpusHead/);
   });
 
   it('refuses to write a file with no samples', () => {

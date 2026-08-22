@@ -34,6 +34,8 @@ function memorySink() {
 }
 
 const FRAME_US = Math.round(1_000_000 / 30);
+/** A minimal, valid-looking `avcC`: enough for the writer to carry into `stsd`. */
+const AVCC = new Uint8Array([1, 0x42, 0, 0x1f, 0xff, 0xe0, 0, 4, 0x67, 0, 0, 0, 1, 0, 4, 0x68, 0, 0, 0]);
 const AUDIO_RATE = 48_000;
 /** One AAC frame is 1024 samples, which at 48kHz is this long. */
 const AUDIO_FRAME_US = Math.round((1024 * 1_000_000) / AUDIO_RATE);
@@ -121,6 +123,33 @@ describe('writing an MP4 without holding it', () => {
     expect(String.fromCharCode(...new Uint8Array(await blob().slice(ftypSize + 4, ftypSize + 8).arrayBuffer()))).toBe('mdat');
     // And the length was patched: it covers the header plus everything written after it.
     expect(Number(head.getBigUint64(ftypSize + 8))).toBeGreaterThan(16);
+  });
+
+  it('takes the codec description after the track has started', async () => {
+    /*
+      The case that broke a proxy on every phone that encodes H.264.
+
+      A streaming writer must declare its tracks before anything is encoded, and an AVC
+      encoder does not hand back its `avcC` until the first chunk. So the description
+      necessarily arrives late, and the writer has to accept it late — the file is only
+      wrong if it is still missing when the index is written.
+    */
+    const held = memorySink();
+    const file = await Mp4Stream.open(held.sink);
+    const track = file.addVideoTrack({ codec: 'avc1.42E01F', width: 64, height: 36 });
+    await file.writeSample(track, { data: new Uint8Array(64).fill(1), timestampUs: 0, durationUs: FRAME_US, key: true });
+
+    file.describeTrack(track, AVCC);
+    await expect(file.finish()).resolves.toBeTruthy();
+  });
+
+  it('refuses to write an AVC track nobody ever described', async () => {
+    const held = memorySink();
+    const file = await Mp4Stream.open(held.sink);
+    const track = file.addVideoTrack({ codec: 'avc1.42E01F', width: 64, height: 36 });
+    await file.writeSample(track, { data: new Uint8Array(64), timestampUs: 0, durationUs: FRAME_US, key: true });
+    // A track with no decoder configuration in `moov` is a track nothing can play.
+    await expect(file.finish()).rejects.toThrow(/avcC/);
   });
 
   it('refuses to write a file with nothing in it', async () => {

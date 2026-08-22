@@ -817,6 +817,12 @@ footer button {
   color: var(--muted);
 }
 
+/* A failure wears the warning colour rather than the offer's. */
+.banner.proxy.failed {
+  background: rgba(60, 26, 26, 0.86);
+  border-color: rgba(255, 107, 107, 0.4);
+}
+
 .proxy-bar {
   height: 3px;
   margin-top: 4px;
