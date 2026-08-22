@@ -45,9 +45,6 @@
   /* The audio. Violet rather than the accent blue, so a glance can tell the two lanes
      apart without reading either. */
   --wave-ink: #a794ff;
-  /* The picture's movement, over the sound. Deliberately not in the purple family: the two
-     are read at once and have to be told apart at a glance on a small screen. */
-  --motion-ink: #5ee0c0;
   --wave-bed: #241f3d;
   color-scheme: dark;
 }

@@ -461,7 +461,6 @@ export function App() {
         selectedClipId={session.selectedClipId}
         draftKeys={framing}
         signals={session.signals}
-        pictures={session.pictures}
         previews={previews}
         accepted={review?.accepted ?? []}
         onSeek={session.seek}
@@ -830,8 +829,8 @@ function ProxyBanner({
         <strong>Editing straight off the recording</strong>
         <small>
           Every scrub is decoding the full-size footage, which is why it stutters. A proxy —
-          a small copy, used only for editing — takes about {formatMinutes(longest)} to make,
-          once. The export still uses the original.
+          a small copy, used only for editing — takes up to {formatMinutes(longest)} to make,
+          once, and often much less. The export still uses the original.
         </small>
       </div>
       <button className="primary small" onClick={() => proxies.make(waiting[0]!.id)}>
@@ -870,6 +869,14 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1_048_576).toFixed(bytes < 104_857_600 ? 1 : 0)} MB`;
 }
 
+/**
+ * The pessimistic figure: as long as the recording.
+ *
+ * It used to be measured — the app read the container's index to work out whether the fast
+ * decode path applied, and quoted that. Reading the index on open is what four crash
+ * reports pointed at, so the reading is gone and the quote is the slow number. Being early
+ * is a good surprise; the other way round is a person watching a bar that lied.
+ */
 function formatMinutes(durationUs: number): string {
   const minutes = Math.round(proxyEstimateMs(durationUs) / 60_000);
   if (minutes < 1) return 'under a minute';

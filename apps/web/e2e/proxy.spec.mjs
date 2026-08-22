@@ -78,44 +78,6 @@ check('theProxySeeks', decoded.seekable, true);
 check('andHasAFrameDecodedThere', decoded.readyState >= 2, true);
 check('andLandedWhereItWasPut', decoded.at > 5, true);
 
-// --- And the motion line, which the proxy's index makes possible --------------------------
-/**
- * Per-frame movement, drawn over the sound.
- *
- * Asked for after a session spent framing a knife going into a box seal: "While the audio
- * is good, it isn't perfect for making these keyframe decisions. I really need to key off
- * of motion." The numbers are the encoded size of each frame — an inter-coded frame is
- * already a description of what changed since the last one — read out of the container's
- * index without decoding anything.
- *
- * The fixture is a WebM, whose index cannot be read at all. The proxy's can: it is an MP4
- * this app wrote, constant frame rate, one keyframe a second. So making a proxy is what
- * gives a WebM a motion line, and this is the check that it does.
- */
-await page.waitForFunction(
-  () => {
-    const canvas = document.querySelector('canvas.wave-lane');
-    if (!canvas?.width) return false;
-    const hex = getComputedStyle(document.documentElement).getPropertyValue('--motion-ink').trim();
-    const want = [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
-    const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
-    for (let at = 0; at < data.length; at += 4) {
-      if (
-        data[at + 3] > 0 &&
-        Math.abs(data[at] - want[0]) < 40 &&
-        Math.abs(data[at + 1] - want[1]) < 40 &&
-        Math.abs(data[at + 2] - want[2]) < 40
-      ) {
-        return true;
-      }
-    }
-    return false;
-  },
-  null,
-  { timeout: 60_000 },
-);
-check('theLaneDrawsTheMotion', true, true);
-
 // --- The edit is unchanged ---------------------------------------------------------------
 const after = await exportEdl(page, 'proxy-after.json');
 // A proxy is not an edit. The EDL still points at the recording, at the same duration, so

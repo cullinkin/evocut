@@ -374,6 +374,10 @@ async function extractFrames(
   const smallContext = small.getContext('2d', { willReadFrequently: true });
 
   try {
+    // Opening a multi-gigabyte recording on a third `<video>` is real work, and until now
+    // it happened under the previous stage's name — which is how four crash reports came
+    // back saying only "editor". See `recover.ts`.
+    noteStage('measure:open');
     await once(video, 'loadeddata', OPEN_TIMEOUT_MS);
     if (!context || !video.videoWidth) return 9 / 16;
 

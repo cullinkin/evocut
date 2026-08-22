@@ -22,7 +22,7 @@ import {
   type ReviewSession,
 } from '@evocut/edl';
 import { planLocalRefinement, proposeRefinement, type ClipFrames } from '@evocut/agent';
-import type { PictureSignals, SourceSignals } from '@evocut/signals';
+import type { SourceSignals } from '@evocut/signals';
 import {
   isRenderSupported,
   renderProject,
@@ -42,7 +42,6 @@ import { isMediaServerActive, mediaUrlFor, releaseMediaUrl, startMediaServer } f
 import { captureContactSheet, forgetContactSheets } from './contact.ts';
 import { setFilmstripExtraction } from './filmstrip.ts';
 import { noteInteraction } from './quiet.ts';
-import { useFootageIndex } from './footage.ts';
 import { finishedProxy, useProxies, type Proxies } from './proxy.ts';
 import { frameUsOf, snapToFrame } from './frames.ts';
 import { getPlayhead, resetPlayhead, setPlayhead as writePlayhead } from './playhead.ts';
@@ -237,16 +236,7 @@ export interface Session {
    * finishes, which is fine — the refinement pass works without it, just blind.
    */
   signals: Map<string, SourceSignals>;
-  /**
-   * Per-frame movement, by source id.
-   *
-   * Read from each container's index rather than measured off decoded frames, and kept
-   * apart from `signals` because it is cheap enough to recompute on every open — which
-   * means it never has to invalidate the analysis cache to change shape.
-   */
-  pictures: Map<string, PictureSignals>;
   /** How a proxy of each recording would be made, which sets what the offer promises. */
-  proxySpeed: Map<string, 'decoder' | 'playback'>;
   /** Sources still being measured. */
   measuring: string[];
   /**
@@ -842,17 +832,6 @@ export function useSession(): Session {
     fifty milliseconds, and a cache would need a version key that could invalidate the audio
     analysis with it.
   */
-  const footage = useFootageIndex(stores, project, !recovered, proxies.ready);
-  const pictures = useMemo(() => {
-    const out = new Map<string, PictureSignals>();
-    for (const [sourceId, entry] of footage) if (entry.picture) out.set(sourceId, entry.picture);
-    return out;
-  }, [footage]);
-  const proxySpeed = useMemo(() => {
-    const out = new Map<string, 'decoder' | 'playback'>();
-    for (const [sourceId, entry] of footage) out.set(sourceId, entry.strategy);
-    return out;
-  }, [footage]);
 
   /*
     And leaving on purpose is not crashing. Without this the mechanism is a nuisance rather
@@ -1557,8 +1536,6 @@ export function useSession(): Session {
     discardReview,
     saveBrief,
     signals,
-    pictures,
-    proxySpeed,
     measuring,
     measuringProgress,
     refining,

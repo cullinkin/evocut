@@ -5,7 +5,6 @@ import {
   readAudioTrack,
   readVideoFrameRate,
   readVideoTrack,
-  readVideoWeights,
 } from '../src/demux.js';
 
 /**
@@ -467,41 +466,6 @@ describe('readVideoTrack', () => {
   it('returns nothing rather than guessing, on a file it cannot read', async () => {
     expect(await readVideoTrack(new Blob([new Uint8Array(64)]))).toBe(null);
     expect(await readVideoTrack(buildAudioOnly())).toBe(null);
-  });
-});
-
-describe('readVideoWeights', () => {
-  /*
-    The curve someone aims a keyframe at.
-
-    An inter-coded frame is a description of what changed since the last one, so its length
-    in bytes is a measure of how much moved. Read straight out of the sample table, it costs
-    the same few hundred kilobytes the audio index does and touches no picture data at all —
-    which is the whole point, because the alternative on a phone is six hundred seeks
-    through a multi-gigabyte file.
-  */
-  it('reads a frame’s weight and when it is shown', async () => {
-    const sizes = [9000, 120, 130, 4000, 4200, 90];
-    const weights = await readVideoWeights(videoWeighing(sizes, { keyEvery: 3 }));
-
-    expect(Array.from(weights?.sizes ?? [])).toEqual(sizes);
-    expect(weights?.hopUs).toBe(40_000);
-    expect(Array.from(weights?.times ?? [])).toEqual([0, 40_000, 80_000, 120_000, 160_000, 200_000]);
-    // The keyframes are the ones a caller has to bridge: a whole picture says nothing
-    // about change.
-    expect(Array.from(weights?.sync ?? [])).toEqual([1, 0, 0, 1, 0, 0]);
-  });
-
-  it('says every frame is a keyframe when the track has no `stss`', async () => {
-    // Which is what an all-intra track is, and the caller has to know the curve it is
-    // holding measures each picture rather than the difference between two.
-    const weights = await readVideoWeights(videoWeighing([100, 200, 300], { keyEvery: 1 }));
-    expect(Array.from(weights?.sync ?? [])).toEqual([1, 1, 1]);
-  });
-
-  it('returns nothing rather than guessing, on a file it cannot read', async () => {
-    expect(await readVideoWeights(new Blob([new Uint8Array(64)]))).toBe(null);
-    expect(await readVideoWeights(buildAudioOnly())).toBe(null);
   });
 });
 
